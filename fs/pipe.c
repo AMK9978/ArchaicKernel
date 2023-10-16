@@ -5,22 +5,28 @@
  */
 
 #include <signal.h>
+#include <errno.h>
+#include <termios.h>
+#include <fcntl.h>
 
 #include <linux/sched.h>
-#include <linux/mm.h>	/* for get_free_page */
 #include <asm/segment.h>
+#include <linux/kernel.h>
 
-int read_pipe(struct m_inode * inode, char * buf, int count)
+int pipe_read(struct inode * inode, struct file * filp, char * buf, int count)
 {
 	int chars, size, read = 0;
 
-	while (count>0) {
-		while (!(size=PIPE_SIZE(*inode))) {
-			wake_up(&inode->i_wait);
+	if (!(filp->f_flags & O_NONBLOCK))
+		while (!PIPE_SIZE(*inode)) {
+			wake_up(& PIPE_WRITE_WAIT(*inode));
 			if (inode->i_count != 2) /* are there any writers? */
-				return read;
-			sleep_on(&inode->i_wait);
+				return 0;
+			if (current->signal & ~current->blocked)
+				return -ERESTARTSYS;
+			interruptible_sleep_on(& PIPE_READ_WAIT(*inode));
 		}
+	while (count>0 && (size = PIPE_SIZE(*inode))) {
 		chars = PAGE_SIZE-PIPE_TAIL(*inode);
 		if (chars > count)
 			chars = count;
@@ -34,22 +40,24 @@ int read_pipe(struct m_inode * inode, char * buf, int count)
 		while (chars-->0)
 			put_fs_byte(((char *)inode->i_size)[size++],buf++);
 	}
-	wake_up(&inode->i_wait);
+	wake_up(& PIPE_WRITE_WAIT(*inode));
 	return read;
 }
 	
-int write_pipe(struct m_inode * inode, char * buf, int count)
+int pipe_write(struct inode * inode, struct file * filp, char * buf, int count)
 {
 	int chars, size, written = 0;
 
 	while (count>0) {
 		while (!(size=(PAGE_SIZE-1)-PIPE_SIZE(*inode))) {
-			wake_up(&inode->i_wait);
+			wake_up(& PIPE_READ_WAIT(*inode));
 			if (inode->i_count != 2) { /* no readers */
 				current->signal |= (1<<(SIGPIPE-1));
-				return written?written:-1;
+				return written?written:-EINTR;
 			}
-			sleep_on(&inode->i_wait);
+			if (current->signal & ~current->blocked)
+				return written?written:-EINTR;
+			interruptible_sleep_on(&PIPE_WRITE_WAIT(*inode));
 		}
 		chars = PAGE_SIZE-PIPE_HEAD(*inode);
 		if (chars > count)
@@ -64,13 +72,13 @@ int write_pipe(struct m_inode * inode, char * buf, int count)
 		while (chars-->0)
 			((char *)inode->i_size)[size++]=get_fs_byte(buf++);
 	}
-	wake_up(&inode->i_wait);
+	wake_up(& PIPE_READ_WAIT(*inode));
 	return written;
 }
 
 int sys_pipe(unsigned long * fildes)
 {
-	struct m_inode * inode;
+	struct inode * inode;
 	struct file * f[2];
 	int fd[2];
 	int i,j;
@@ -108,4 +116,16 @@ int sys_pipe(unsigned long * fildes)
 	put_fs_long(fd[0],0+fildes);
 	put_fs_long(fd[1],1+fildes);
 	return 0;
+}
+
+int pipe_ioctl(struct inode *pino, int cmd, int arg)
+{
+	switch (cmd) {
+		case FIONREAD:
+			verify_area((void *) arg,4);
+			put_fs_long(PIPE_SIZE(*pino),(unsigned long *) arg);
+			return 0;
+		default:
+			return -EINVAL;
+	}
 }

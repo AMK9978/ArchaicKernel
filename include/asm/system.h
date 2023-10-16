@@ -7,10 +7,10 @@ __asm__ ("movl %%esp,%%eax\n\t" \
 	"pushl $1f\n\t" \
 	"iret\n" \
 	"1:\tmovl $0x17,%%eax\n\t" \
-	"movw %%ax,%%ds\n\t" \
-	"movw %%ax,%%es\n\t" \
-	"movw %%ax,%%fs\n\t" \
-	"movw %%ax,%%gs" \
+	"mov %%ax,%%ds\n\t" \
+	"mov %%ax,%%es\n\t" \
+	"mov %%ax,%%fs\n\t" \
+	"mov %%ax,%%gs" \
 	:::"ax")
 
 #define sti() __asm__ ("sti"::)
@@ -24,11 +24,11 @@ __asm__ ("movw %%dx,%%ax\n\t" \
 	"movw %0,%%dx\n\t" \
 	"movl %%eax,%1\n\t" \
 	"movl %%edx,%2" \
-	: \
-	: "i" ((short) (0x8000+(dpl<<13)+(type<<8))), \
-	"o" (*((char *) (gate_addr))), \
-	"o" (*(4+(char *) (gate_addr))), \
-	"d" ((char *) (addr)),"a" (0x00080000))
+	:: "i" ((short) (0x8000+(dpl<<13)+(type<<8))), \
+	"m" (*((char *) (gate_addr))), \
+	"m" (*(4+(char *) (gate_addr))), \
+	"d" ((char *) (addr)),"a" (0x00080000) \
+	:"ax","dx")
 
 #define set_intr_gate(n,addr) \
 	_set_gate(&idt[n],14,0,addr)

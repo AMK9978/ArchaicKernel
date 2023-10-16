@@ -32,10 +32,10 @@
 #define MINIX_HEADER 32
 #define GCC_HEADER 1024
 
-#define SYS_SIZE 0x2000
+#define SYS_SIZE 0x4000
 
-#define DEFAULT_MAJOR_ROOT 3
-#define DEFAULT_MINOR_ROOT 6
+#define DEFAULT_MAJOR_ROOT 0
+#define DEFAULT_MINOR_ROOT 0
 
 /* max nr of sectors of setup: don't change unless you also change
  * bootsect etc */
@@ -61,9 +61,9 @@ int main(int argc, char ** argv)
 	char major_root, minor_root;
 	struct stat sb;
 
-	if ((argc != 4) && (argc != 5))
+	if ((argc < 4) || (argc > 5))
 		usage();
-	if (argc == 5) {
+	if (argc > 4) {
 		if (strcmp(argv[4], "FLOPPY")) {
 			if (stat(argv[4], &sb)) {
 				perror(argv[4]);

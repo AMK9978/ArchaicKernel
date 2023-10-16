@@ -11,6 +11,7 @@
  * current-task
  */
 #include <linux/sched.h>
+#include <linux/timer.h>
 #include <linux/kernel.h>
 #include <linux/sys.h>
 #include <linux/fdreg.h>
@@ -19,6 +20,7 @@
 #include <asm/segment.h>
 
 #include <signal.h>
+#include <errno.h>
 
 #define _S(nr) (1<<((nr)-1))
 #define _BLOCKABLE (~(_S(SIGKILL) | _S(SIGSTOP)))
@@ -27,17 +29,26 @@ void show_task(int nr,struct task_struct * p)
 {
 	int i,j = 4096-sizeof(struct task_struct);
 
-	printk("%d: pid=%d, state=%d, ",nr,p->pid,p->state);
+	printk("%d: pid=%d, state=%d, father=%d, child=%d, ",nr,p->pid,
+		p->state, p->p_pptr->pid, p->p_cptr ? p->p_cptr->pid : -1);
 	i=0;
 	while (i<j && !((char *)(p+1))[i])
 		i++;
-	printk("%d (of %d) chars free in kernel stack\n\r",i,j);
+	printk("%d/%d chars free in kstack\n\r",i,j);
+	printk("   PC=%08X.", *(1019 + (unsigned long *) p));
+	if (p->p_ysptr || p->p_osptr) 
+		printk("   Younger sib=%d, older sib=%d\n\r", 
+			p->p_ysptr ? p->p_ysptr->pid : -1,
+			p->p_osptr ? p->p_osptr->pid : -1);
+	else
+		printk("\n\r");
 }
 
-void show_stat(void)
+void show_state(void)
 {
 	int i;
 
+	printk("\rTask-info:\n\r");
 	for (i=0;i<NR_TASKS;i++)
 		if (task[i])
 			show_task(i,task[i]);
@@ -57,8 +68,14 @@ union task_union {
 
 static union task_union init_task = {INIT_TASK,};
 
-long volatile jiffies=0;
-long startup_time=0;
+unsigned long volatile jiffies=0;
+unsigned long startup_time=0;
+int jiffies_offset = 0;		/* # clock ticks to add to get "true
+				   time".  Should always be less than
+				   1 second's worth.  For time fanatics
+				   who like to syncronize their machines
+				   to WWV :-) */
+
 struct task_struct *current = &(init_task.task);
 struct task_struct *last_task_used_math = NULL;
 
@@ -92,9 +109,8 @@ void math_state_restore()
 }
 
 /*
- *  'schedule()' is the scheduler function. This is GOOD CODE! There
- * probably won't be any reason to change this, as it should work well
- * in all circumstances (ie gives IO-bound processes good response etc).
+ *  'schedule()' is the scheduler function. It's a very simple and nice
+ * scheduler: it's not perfect, but certainly works for most things.
  * The one thing you might take a look at is the signal-handler code here.
  *
  *   NOTE!!  Task 0 is the 'idle' task, which gets called when no other
@@ -110,11 +126,16 @@ void schedule(void)
 
 	for(p = &LAST_TASK ; p > &FIRST_TASK ; --p)
 		if (*p) {
+			if ((*p)->timeout && (*p)->timeout < jiffies) {
+				(*p)->timeout = 0;
+				if ((*p)->state == TASK_INTERRUPTIBLE)
+					(*p)->state = TASK_RUNNING;
+			}
 			if ((*p)->alarm && (*p)->alarm < jiffies) {
-					(*p)->signal |= (1<<(SIGALRM-1));
-					(*p)->alarm = 0;
-				}
-			if (((*p)->signal & ~(_BLOCKABLE & (*p)->blocked)) &&
+				(*p)->signal |= (1<<(SIGALRM-1));
+				(*p)->alarm = 0;
+			}
+			if (((*p)->signal & ~(*p)->blocked) &&
 			(*p)->state==TASK_INTERRUPTIBLE)
 				(*p)->state=TASK_RUNNING;
 		}
@@ -143,53 +164,64 @@ void schedule(void)
 
 int sys_pause(void)
 {
+	unsigned long old_blocked;
+	unsigned long mask;
+	struct sigaction * sa = current->sigaction;
+
+	old_blocked = current->blocked;
+	for (mask=1 ; mask ; sa++,mask += mask)
+		if (sa->sa_handler == SIG_IGN)
+			current->blocked |= mask;
 	current->state = TASK_INTERRUPTIBLE;
 	schedule();
-	return 0;
+	current->blocked = old_blocked;
+	return -EINTR;
 }
 
-void sleep_on(struct task_struct **p)
+static inline void __sleep_on(struct task_struct **p, int state)
 {
 	struct task_struct *tmp;
+	unsigned int flags;
 
 	if (!p)
 		return;
 	if (current == &(init_task.task))
 		panic("task[0] trying to sleep");
+	__asm__("pushfl ; popl %0":"=r" (flags));
 	tmp = *p;
 	*p = current;
-	current->state = TASK_UNINTERRUPTIBLE;
-	schedule();
-	if (tmp)
+	current->state = state;
+/* make sure interrupts are enabled: there should be no more races here */
+	sti();
+repeat:	schedule();
+	if (*p && *p != current) {
+		current->state = TASK_UNINTERRUPTIBLE;
+		(**p).state = 0;
+		goto repeat;
+	}
+	if (*p = tmp)
 		tmp->state=0;
+	__asm__("pushl %0 ; popfl"::"r" (flags));
 }
 
 void interruptible_sleep_on(struct task_struct **p)
 {
-	struct task_struct *tmp;
+	__sleep_on(p,TASK_INTERRUPTIBLE);
+}
 
-	if (!p)
-		return;
-	if (current == &(init_task.task))
-		panic("task[0] trying to sleep");
-	tmp=*p;
-	*p=current;
-repeat:	current->state = TASK_INTERRUPTIBLE;
-	schedule();
-	if (*p && *p != current) {
-		(**p).state=0;
-		goto repeat;
-	}
-	*p=NULL;
-	if (tmp)
-		tmp->state=0;
+void sleep_on(struct task_struct **p)
+{
+	__sleep_on(p,TASK_UNINTERRUPTIBLE);
 }
 
 void wake_up(struct task_struct **p)
 {
 	if (p && *p) {
+		if ((**p).state == TASK_STOPPED)
+			printk("wake_up: TASK_STOPPED");
+		if ((**p).state == TASK_ZOMBIE)
+			printk("wake_up: TASK_ZOMBIE");
 		(**p).state=0;
-		*p=NULL;
 	}
 }
 
@@ -302,14 +334,24 @@ void add_timer(long jiffies, void (*fn)(void))
 	sti();
 }
 
+unsigned long timer_active = 0;
+struct timer_struct timer_table[32];
+
 void do_timer(long cpl)
 {
-	extern int beepcount;
-	extern void sysbeepstop(void);
+	unsigned long mask;
+	struct timer_struct *tp = timer_table+0;
 
-	if (beepcount)
-		if (!--beepcount)
-			sysbeepstop();
+	for (mask = 1 ; mask ; tp++,mask += mask) {
+		if (mask > timer_active)
+			break;
+		if (!(mask & timer_active))
+			continue;
+		if (tp->expires > jiffies)
+			continue;
+		timer_active &= ~mask;
+		tp->fn();
+	}
 
 	if (cpl)
 		current->utime++;
@@ -352,7 +394,7 @@ int sys_getpid(void)
 
 int sys_getppid(void)
 {
-	return current->father;
+	return current->p_pptr->pid;
 }
 
 int sys_getuid(void)
@@ -377,8 +419,11 @@ int sys_getegid(void)
 
 int sys_nice(long increment)
 {
-	if (current->priority-increment>0)
-		current->priority -= increment;
+	if (increment < 0 && !suser())
+		return -EPERM;
+	if (increment > current->priority)
+		increment = current->priority-1;
+	current->priority -= increment;
 	return 0;
 }
 
@@ -392,7 +437,7 @@ void sched_init(void)
 	set_tss_desc(gdt+FIRST_TSS_ENTRY,&(init_task.task.tss));
 	set_ldt_desc(gdt+FIRST_LDT_ENTRY,&(init_task.task.ldt));
 	p = gdt+2+FIRST_TSS_ENTRY;
-	for(i=1;i<NR_TASKS;i++) {
+	for(i=1 ; i<NR_TASKS ; i++) {
 		task[i] = NULL;
 		p->a=p->b=0;
 		p++;
