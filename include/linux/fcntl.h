@@ -1,51 +1,26 @@
-#ifndef _FCNTL_H
-#define _FCNTL_H
+#ifndef _LINUX_FCNTL_H
+#define _LINUX_FCNTL_H
 
-#include <sys/types.h>
+#include <asm/fcntl.h>
 
-/* open/fcntl - NOCTTY, NDELAY isn't implemented yet */
-#define O_ACCMODE	00003
-#define O_RDONLY	   00
-#define O_WRONLY	   01
-#define O_RDWR		   02
-#define O_CREAT		00100	/* not fcntl */
-#define O_EXCL		00200	/* not fcntl */
-#define O_NOCTTY	00400	/* not fcntl */
-#define O_TRUNC		01000	/* not fcntl */
-#define O_APPEND	02000
-#define O_NONBLOCK	04000
-#define O_NDELAY	O_NONBLOCK
+#define F_SETLEASE	(F_LINUX_SPECIFIC_BASE+0)
+#define F_GETLEASE	(F_LINUX_SPECIFIC_BASE+1)
 
-/* Defines for fcntl-commands. Note that currently
- * locking isn't supported, and other things aren't really
- * tested.
+/*
+ * Request nofications on a directory.
+ * See below for events that may be notified.
  */
-#define F_DUPFD		0	/* dup */
-#define F_GETFD		1	/* get f_flags */
-#define F_SETFD		2	/* set f_flags */
-#define F_GETFL		3	/* more flags (cloexec) */
-#define F_SETFL		4
-#define F_GETLK		5	/* not implemented */
-#define F_SETLK		6
-#define F_SETLKW	7
+#define F_NOTIFY	(F_LINUX_SPECIFIC_BASE+2)
 
-/* for F_[GET|SET]FL */
-#define FD_CLOEXEC	1	/* actually anything with low bit set goes */
-
-/* Ok, these are locking features, and aren't implemented at any
- * level. POSIX wants them.
+/*
+ * Types of directory notifications that may be requested.
  */
-#define F_RDLCK		0
-#define F_WRLCK		1
-#define F_UNLCK		2
-
-/* Once again - not implemented, but ... */
-struct flock {
-	short l_type;
-	short l_whence;
-	off_t l_start;
-	off_t l_len;
-	pid_t l_pid;
-};
+#define DN_ACCESS	0x00000001	/* File accessed */
+#define DN_MODIFY	0x00000002	/* File modified */
+#define DN_CREATE	0x00000004	/* File created */
+#define DN_DELETE	0x00000008	/* File removed */
+#define DN_RENAME	0x00000010	/* File renamed */
+#define DN_ATTRIB	0x00000020	/* File changed attibutes */
+#define DN_MULTISHOT	0x80000000	/* Don't remove notifier */
 
 #endif

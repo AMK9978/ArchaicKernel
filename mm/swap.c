@@ -1,306 +1,305 @@
 /*
  *  linux/mm/swap.c
  *
- *  (C) 1991  Linus Torvalds
+ *  Copyright (C) 1991, 1992, 1993, 1994  Linus Torvalds
  */
 
 /*
- * This file should contain most things doing the swapping from/to disk.
+ * This file contains the default values for the opereation of the
+ * Linux VM subsystem. Fine-tuning documentation can be found in
+ * linux/Documentation/sysctl/vm.txt.
  * Started 18.12.91
+ * Swap aging added 23.2.95, Stephen Tweedie.
+ * Buffermem limits added 12.3.98, Rik van Riel.
  */
 
-#include <errno.h>
-
-#include <linux/stat.h>
 #include <linux/mm.h>
-#include <linux/string.h>
-#include <linux/sched.h>
-#include <linux/head.h>
-#include <linux/kernel.h>
+#include <linux/kernel_stat.h>
+#include <linux/swap.h>
+#include <linux/swapctl.h>
+#include <linux/pagemap.h>
+#include <linux/init.h>
 
-#define SWAP_BITS (4096<<3)
-
-#define bitop(name,op) \
-static inline int name(char * addr,unsigned int nr) \
-{ \
-int __res; \
-__asm__ __volatile__("bt" op " %1,%2; adcl $0,%0" \
-:"=g" (__res) \
-:"r" (nr),"m" (*(addr)),"0" (0)); \
-return __res; \
-}
-
-bitop(bit,"")
-bitop(setbit,"s")
-bitop(clrbit,"r")
-
-static char * swap_bitmap = NULL;
-unsigned int swap_device = 0;
-struct inode * swap_file = NULL;
-
-void rw_swap_page(int rw, unsigned int nr, char * buf)
-{
-	unsigned int zones[4];
-	int i;
-
-	if (swap_device) {
-		ll_rw_page(rw,swap_device,nr,buf);
-		return;
-	}
-	if (swap_file) {
-		nr <<= 2;
-		for (i = 0; i < 4; i++)
-			if (!(zones[i] = bmap(swap_file,nr++))) {
-				printk("rw_swap_page: bad swap file\n");
-				return;
-			}
-		ll_rw_swap_file(rw,swap_file->i_dev, zones,4,buf);
-		return;
-	}
-	printk("ll_swap_page: no swap file or device\n");
-}
+#include <asm/dma.h>
+#include <asm/uaccess.h> /* for copy_to/from_user */
+#include <asm/pgtable.h>
 
 /*
- * We never page the pages in task[0] - kernel memory.
- * We page all other pages.
- */
-#define FIRST_VM_PAGE (TASK_SIZE>>12)
-#define LAST_VM_PAGE (1024*1024)
-#define VM_PAGES (LAST_VM_PAGE - FIRST_VM_PAGE)
-
-static int get_swap_page(void)
-{
-	int nr;
-
-	if (!swap_bitmap)
-		return 0;
-	for (nr = 1; nr < SWAP_BITS ; nr++)
-		if (clrbit(swap_bitmap,nr))
-			return nr;
-	return 0;
-}
-
-void swap_free(int swap_nr)
-{
-	if (!swap_nr)
-		return;
-	if (swap_bitmap && swap_nr < SWAP_BITS)
-		if (!setbit(swap_bitmap,swap_nr))
-			return;
-	printk("swap_free: swap-space bitmap bad\n");
-	return;
-}
-
-void swap_in(unsigned long *table_ptr)
-{
-	int swap_nr;
-	unsigned long page;
-
-	if (!swap_bitmap) {
-		printk("Trying to swap in without swap bit-map");
-		return;
-	}
-	if (1 & *table_ptr) {
-		printk("trying to swap in present page\n\r");
-		return;
-	}
-	swap_nr = *table_ptr >> 1;
-	if (!swap_nr) {
-		printk("No swap page in swap_in\n\r");
-		return;
-	}
-	if (!(page = get_free_page()))
-		oom();
-	read_swap_page(swap_nr, (char *) page);
-	if (setbit(swap_bitmap,swap_nr))
-		printk("swapping in multiply from same page\n\r");
-	*table_ptr = page | (PAGE_DIRTY | 7);
-}
-
-int try_to_swap_out(unsigned long * table_ptr)
-{
-	unsigned long page;
-	unsigned long swap_nr;
-
-	page = *table_ptr;
-	if (!(PAGE_PRESENT & page))
-		return 0;
-	if (page - LOW_MEM > PAGING_MEMORY)
-		return 0;
-	if (PAGE_DIRTY & page) {
-		page &= 0xfffff000;
-		if (mem_map[MAP_NR(page)] != 1)
-			return 0;
-		if (!(swap_nr = get_swap_page()))
-			return 0;
-		*table_ptr = swap_nr<<1;
-		invalidate();
-		write_swap_page(swap_nr, (char *) page);
-		free_page(page);
-		return 1;
-	}
-	page &= 0xfffff000;
-	*table_ptr = 0;
-	invalidate();
-	free_page(page);
-	return 1;
-}
-
-/*
- * Go through the page tables, searching for a user page that
- * we can swap out.
+ * We identify three levels of free memory.  We never let free mem
+ * fall below the freepages.min except for atomic allocations.  We
+ * start background swapping if we fall below freepages.high free
+ * pages, and we begin intensive swapping below freepages.low.
  *
- * Here it's easy to add a check for tasks that may not be swapped out:
- * loadable device drivers or similar. Just add an entry to the task-struct
- * and check it at the same time you check for the existence of the task.
- * The code assumes tasks are page-table aligned, but so do other parts
- * of the memory manager...
+ * Actual initialization is done in mm/page_alloc.c or 
+ * arch/sparc(64)/mm/init.c.
  */
-int swap_out(void)
-{
-	static int dir_entry = 1024;
-	static int page_entry = -1;
-	int counter = VM_PAGES;
-	int pg_table;
-	struct task_struct * p;
+freepages_t freepages = {
+	0,	/* freepages.min */
+	0,	/* freepages.low */
+	0	/* freepages.high */
+};
 
-check_dir:
-	if (counter < 0)
-		goto no_swap;
-	if (dir_entry >= 1024)
-		dir_entry = FIRST_VM_PAGE>>10;
-	if (!(p = task[dir_entry >> 4])) {
-		counter -= 1024;
-		dir_entry++;
-		goto check_dir;
-	}
-	if (!(1 & (pg_table = pg_dir[dir_entry]))) {
-		if (pg_table) {
-			printk("bad page-table at pg_dir[%d]: %08x\n\r",
-				dir_entry,pg_table);
-			pg_dir[dir_entry] = 0;
-		}
-		counter -= 1024;
-		dir_entry++;
-		goto check_dir;
-	}
-	pg_table &= 0xfffff000;
-check_table:
-	if (counter < 0)
-		goto no_swap;
-	counter--;
-	page_entry++;
-	if (page_entry >= 1024) {
-		page_entry = -1;
-		dir_entry++;
-		goto check_dir;
-	}
-	if (try_to_swap_out(page_entry + (unsigned long *) pg_table)) {
-		p->rss--;
-		return 1;
-	}
-	goto check_table;
-no_swap:
-	printk("Out of swap-memory\n\r");
-	return 0;
-}
+/* How many pages do we try to swap or page in/out together? */
+int page_cluster;
 
 /*
- * Get physical address of first (actually last :-) free page, and mark it
- * used. If no free pages left, return 0.
- */
-unsigned long get_free_page(void)
-{
-	unsigned long result;
-
-repeat:
-	__asm__("std ; repne ; scasb\n\t"
-		"jne 1f\n\t"
-		"movb $1,1(%%edi)\n\t"
-		"sall $12,%%ecx\n\t"
-		"addl %2,%%ecx\n\t"
-		"movl %%ecx,%%edx\n\t"
-		"movl $1024,%%ecx\n\t"
-		"leal 4092(%%edx),%%edi\n\t"
-		"rep ; stosl\n\t"
-		"movl %%edx,%%eax\n"
-		"1:\tcld"
-		:"=a" (result)
-		:"0" (0),"i" (LOW_MEM),"c" (PAGING_PAGES),
-		"D" (mem_map+PAGING_PAGES-1)
-		:"di","cx","dx");
-	if (result >= HIGH_MEMORY)
-		goto repeat;
-	if ((result && result < LOW_MEM) || (result & 0xfff)) {
-		printk("weird result: %08x\n",result);
-		result = 0;
-	}
-	if (!result && swap_out())
-		goto repeat;
-	return result;
-}
-
-/*
- * Written 01/25/92 by Simmule Turner, heavily changed by Linus.
+ * This variable contains the amount of page steals the system
+ * is doing, averaged over a minute. We use this to determine how
+ * many inactive pages we should have.
  *
- * The swapon system call
+ * In reclaim_page and __alloc_pages: memory_pressure++
+ * In __free_pages_ok: memory_pressure--
+ * In recalculate_vm_stats the value is decayed (once a second)
  */
-int sys_swapon(const char * specialfile)
-{
-	struct inode * swap_inode;
-	char * tmp;
-	int i,j;
+int memory_pressure;
 
-	if (!suser())
-		return -EPERM;
-	if (!(swap_inode  = namei(specialfile)))
-		return -ENOENT;
-	if (swap_file || swap_device || swap_bitmap) {
-		iput(swap_inode);
-		return -EBUSY;
+/* We track the number of pages currently being asynchronously swapped
+   out, so that we don't try to swap TOO many pages out at once */
+atomic_t nr_async_pages = ATOMIC_INIT(0);
+
+buffer_mem_t buffer_mem = {
+	2,	/* minimum percent buffer */
+	10,	/* borrow percent buffer */
+	60	/* maximum percent buffer */
+};
+
+buffer_mem_t page_cache = {
+	2,	/* minimum percent page cache */
+	15,	/* borrow percent page cache */
+	75	/* maximum */
+};
+
+pager_daemon_t pager_daemon = {
+	512,	/* base number for calculating the number of tries */
+	SWAP_CLUSTER_MAX,	/* minimum number of tries */
+	8,	/* do swap I/O in clusters of this size */
+};
+
+/**
+ * age_page_{up,down} -	page aging helper functions
+ * @page - the page we want to age
+ * @nolock - are we already holding the pagelist_lru_lock?
+ *
+ * If the page is on one of the lists (active, inactive_dirty or
+ * inactive_clean), we will grab the pagelist_lru_lock as needed.
+ * If you're already holding the lock, call this function with the
+ * nolock argument non-zero.
+ */
+void age_page_up_nolock(struct page * page)
+{
+	/*
+	 * We're dealing with an inactive page, move the page
+	 * to the active list.
+	 */
+	if (!page->age)
+		activate_page_nolock(page);
+
+	/* The actual page aging bit */
+	page->age += PAGE_AGE_ADV;
+	if (page->age > PAGE_AGE_MAX)
+		page->age = PAGE_AGE_MAX;
+}
+
+/*
+ * We use this (minimal) function in the case where we
+ * know we can't deactivate the page (yet).
+ */
+void age_page_down_ageonly(struct page * page)
+{
+	page->age /= 2;
+}
+
+void age_page_down_nolock(struct page * page)
+{
+	/* The actual page aging bit */
+	page->age /= 2;
+
+	/*
+	 * The page is now an old page. Move to the inactive
+	 * list (if possible ... see below).
+	 */
+	if (!page->age)
+	       deactivate_page_nolock(page);
+}
+
+void age_page_up(struct page * page)
+{
+	/*
+	 * We're dealing with an inactive page, move the page
+	 * to the active list.
+	 */
+	if (!page->age)
+		activate_page(page);
+
+	/* The actual page aging bit */
+	page->age += PAGE_AGE_ADV;
+	if (page->age > PAGE_AGE_MAX)
+		page->age = PAGE_AGE_MAX;
+}
+
+void age_page_down(struct page * page)
+{
+	/* The actual page aging bit */
+	page->age /= 2;
+
+	/*
+	 * The page is now an old page. Move to the inactive
+	 * list (if possible ... see below).
+	 */
+	if (!page->age)
+	       deactivate_page(page);
+}
+
+
+/**
+ * (de)activate_page - move pages from/to active and inactive lists
+ * @page: the page we want to move
+ * @nolock - are we already holding the pagemap_lru_lock?
+ *
+ * Deactivate_page will move an active page to the right
+ * inactive list, while activate_page will move a page back
+ * from one of the inactive lists to the active list. If
+ * called on a page which is not on any of the lists, the
+ * page is left alone.
+ */
+void deactivate_page_nolock(struct page * page)
+{
+	/*
+	 * One for the cache, one for the extra reference the
+	 * caller has and (maybe) one for the buffers.
+	 *
+	 * This isn't perfect, but works for just about everything.
+	 * Besides, as long as we don't move unfreeable pages to the
+	 * inactive_clean list it doesn't need to be perfect...
+	 */
+	int maxcount = (page->buffers ? 3 : 2);
+	page->age = 0;
+	ClearPageReferenced(page);
+
+	/*
+	 * Don't touch it if it's not on the active list.
+	 * (some pages aren't on any list at all)
+	 */
+	if (PageActive(page) && page_count(page) <= maxcount && !page_ramdisk(page)) {
+		del_page_from_active_list(page);
+		add_page_to_inactive_dirty_list(page);
 	}
-	if (S_ISBLK(swap_inode->i_mode)) {
-		swap_device = swap_inode->i_rdev;
-		iput(swap_inode);
-	} else if (S_ISREG(swap_inode->i_mode))
-		swap_file = swap_inode;
-	else {
-		iput(swap_inode);
-		return -EINVAL;
+}	
+
+void deactivate_page(struct page * page)
+{
+	spin_lock(&pagemap_lru_lock);
+	deactivate_page_nolock(page);
+	spin_unlock(&pagemap_lru_lock);
+}
+
+/*
+ * Move an inactive page to the active list.
+ */
+void activate_page_nolock(struct page * page)
+{
+	if (PageInactiveDirty(page)) {
+		del_page_from_inactive_dirty_list(page);
+		add_page_to_active_list(page);
+	} else if (PageInactiveClean(page)) {
+		del_page_from_inactive_clean_list(page);
+		add_page_to_active_list(page);
+	} else {
+		/*
+		 * The page was not on any list, so we take care
+		 * not to do anything.
+		 */
 	}
-	tmp = (char *) get_free_page();
-	if (!tmp) {
-		iput(swap_file);
-		swap_device = 0;
-		swap_file = NULL;
-		printk("Unable to start swapping: out of memory :-)\n");
-		return -ENOMEM;
+
+	/* Make sure the page gets a fair chance at staying active. */
+	if (page->age < PAGE_AGE_START)
+		page->age = PAGE_AGE_START;
+}
+
+void activate_page(struct page * page)
+{
+	spin_lock(&pagemap_lru_lock);
+	activate_page_nolock(page);
+	spin_unlock(&pagemap_lru_lock);
+}
+
+/**
+ * lru_cache_add: add a page to the page lists
+ * @page: the page to add
+ */
+void lru_cache_add(struct page * page)
+{
+	spin_lock(&pagemap_lru_lock);
+	if (!PageLocked(page))
+		BUG();
+	DEBUG_ADD_PAGE
+	add_page_to_active_list(page);
+	/* This should be relatively rare */
+	if (!page->age)
+		deactivate_page_nolock(page);
+	spin_unlock(&pagemap_lru_lock);
+}
+
+/**
+ * __lru_cache_del: remove a page from the page lists
+ * @page: the page to add
+ *
+ * This function is for when the caller already holds
+ * the pagemap_lru_lock.
+ */
+void __lru_cache_del(struct page * page)
+{
+	if (PageActive(page)) {
+		del_page_from_active_list(page);
+	} else if (PageInactiveDirty(page)) {
+		del_page_from_inactive_dirty_list(page);
+	} else if (PageInactiveClean(page)) {
+		del_page_from_inactive_clean_list(page);
+	} else {
+		printk("VM: __lru_cache_del, found unknown page ?!\n");
 	}
-	read_swap_page(0,tmp);
-	if (strncmp("SWAP-SPACE",tmp+4086,10)) {
-		printk("Unable to find swap-space signature\n\r");
-		free_page((long) tmp);
-		iput(swap_file);
-		swap_device = 0;
-		swap_file = NULL;
-		swap_bitmap = NULL;
-		return -EINVAL;
-	}
-	memset(tmp+4086,0,10);
-	j = 0;
-	for (i = 1 ; i < SWAP_BITS ; i++)
-		if (bit(tmp,i))
-			j++;
-	if (!j) {
-		printk("Empty swap-file\n");
-		free_page((long) tmp);
-		iput(swap_file);
-		swap_device = 0;
-		swap_file = NULL;
-		swap_bitmap = NULL;
-		return -EINVAL;
-	}
-	swap_bitmap = tmp;
-	printk("Adding Swap: %d pages (%d bytes) swap-space\n\r",j,j*4096);
-	return 0;
+	DEBUG_ADD_PAGE
+}
+
+/**
+ * lru_cache_del: remove a page from the page lists
+ * @page: the page to remove
+ */
+void lru_cache_del(struct page * page)
+{
+	if (!PageLocked(page))
+		BUG();
+	spin_lock(&pagemap_lru_lock);
+	__lru_cache_del(page);
+	spin_unlock(&pagemap_lru_lock);
+}
+
+/**
+ * recalculate_vm_stats - recalculate VM statistics
+ *
+ * This function should be called once a second to recalculate
+ * some useful statistics the VM subsystem uses to determine
+ * its behaviour.
+ */
+void recalculate_vm_stats(void)
+{
+	/*
+	 * Substract one second worth of memory_pressure from
+	 * memory_pressure.
+	 */
+	memory_pressure -= (memory_pressure >> INACTIVE_SHIFT);
+}
+
+/*
+ * Perform any setup for the swap system
+ */
+void __init swap_setup(void)
+{
+	/* Use a smaller cluster for memory <16MB or <32MB */
+	if (num_physpages < ((16 * 1024 * 1024) >> PAGE_SHIFT))
+		page_cluster = 2;
+	else if (num_physpages < ((32 * 1024 * 1024) >> PAGE_SHIFT))
+		page_cluster = 3;
+	else
+		page_cluster = 4;
 }

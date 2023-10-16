@@ -1,13 +1,12 @@
 /*
  *  linux/fs/exec.c
  *
- *  (C) 1991  Linus Torvalds
+ *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
 /*
  * #!-checking implemented by tytso.
  */
-
 /*
  * Demand-loading implemented 01.12.91 - no need to read anything but
  * the header into memory. The inode of the executable is put into
@@ -15,145 +14,83 @@
  *
  * Once more I can proudly say that linux stood up to being changed: it
  * was less than 2 hours work to get demand-loading completely implemented.
+ *
+ * Demand loading changed July 1993 by Eric Youngdale.   Use mmap instead,
+ * current->executable is only used by the procfs.  This allows a dispatch
+ * table to check for several different types  of binary formats.  We keep
+ * trying until we recognize the file or we run out of supported binary
+ * formats. 
  */
 
-#include <signal.h>
-#include <errno.h>
-#include <sys/ptrace.h>
-#include <a.out.h>
-
-#include <linux/string.h>
+#include <linux/config.h>
+#include <linux/slab.h>
+#include <linux/file.h>
+#include <linux/mman.h>
+#include <linux/a.out.h>
 #include <linux/stat.h>
 #include <linux/fcntl.h>
-#include <linux/fs.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/mm.h>
-#include <asm/segment.h>
-#include <sys/user.h>
+#include <linux/smp_lock.h>
+#include <linux/init.h>
+#include <linux/pagemap.h>
+#include <linux/highmem.h>
+#include <linux/spinlock.h>
+#define __NO_VERSION__
+#include <linux/module.h>
 
-extern int sys_exit(int exit_code);
-extern int sys_close(int fd);
+#include <asm/uaccess.h>
+#include <asm/pgalloc.h>
+#include <asm/mmu_context.h>
 
-/*
- * MAX_ARG_PAGES defines the number of pages allocated for arguments
- * and envelope for the new program. 32 should suffice, this gives
- * a maximum env+arg of 128kB !
- */
-#define MAX_ARG_PAGES 32
+#ifdef CONFIG_KMOD
+#include <linux/kmod.h>
+#endif
 
-/*
- * These are the only things you should do on a core-file: use only these
- * macros to write out all the necessary info.
- */
-#define DUMP_WRITE(addr,nr) \
-while (file.f_op->write(inode,&file,(char *)(addr),(nr)) != (nr)) goto close_coredump
+static struct linux_binfmt *formats;
+static rwlock_t binfmt_lock = RW_LOCK_UNLOCKED;
 
-#define DUMP_SEEK(offset) \
-if (file.f_op->lseek) { \
-	if (file.f_op->lseek(inode,&file,(offset),0) != (offset)) \
- 		goto close_coredump; \
-} else file.f_pos = (offset)		
-
-/*
- * Routine writes a core dump image in the current directory.
- * Currently only a stub-function.
- *
- * Note that setuid/setgid files won't make a core-dump if the uid/gid
- * changed due to the set[u|g]id. It's enforced by the "current->dumpable"
- * field, which also makes sure the core-dumps won't be recursive if the
- * dumping of the process results in another error..
- */
-int core_dump(long signr, struct pt_regs * regs)
+int register_binfmt(struct linux_binfmt * fmt)
 {
-	struct inode * inode = NULL;
-	struct file file;
-	unsigned short fs;
-	int has_dumped = 0;
-	register int dump_start, dump_size;
-	struct user dump;
+	struct linux_binfmt ** tmp = &formats;
 
-	if (!current->dumpable)
-		return 0;
-	current->dumpable = 0;
-/* See if we have enough room to write the upage.  */
-	if(current->rlim[RLIMIT_CORE].rlim_cur < PAGE_SIZE/1024) return 0;
-	__asm__("mov %%fs,%0":"=r" (fs));
-	__asm__("mov %0,%%fs"::"r" ((unsigned short) 0x10));
-	if (open_namei("core",O_CREAT | O_WRONLY | O_TRUNC,0600,&inode))
-		goto end_coredump;
-	if (!S_ISREG(inode->i_mode))
-		goto end_coredump;
-	if (!inode->i_op || !inode->i_op->default_file_ops)
-		goto end_coredump;
-	file.f_mode = 3;
-	file.f_flags = 0;
-	file.f_count = 1;
-	file.f_inode = inode;
-	file.f_pos = 0;
-	file.f_reada = 0;
-	file.f_op = inode->i_op->default_file_ops;
-	if (file.f_op->open)
-		if (file.f_op->open(inode,&file))
-			goto end_coredump;
-	if (!file.f_op->write)
-		goto close_coredump;
-	has_dumped = 1;
-/* write and seek example: from kernel space */
-	__asm__("mov %0,%%fs"::"r" ((unsigned short) 0x10));
-	dump.u_tsize = current->end_code / PAGE_SIZE;
-	dump.u_dsize = (current->brk - current->end_code) / PAGE_SIZE;
-	dump.u_ssize =((current->start_stack +(PAGE_SIZE-1)) / PAGE_SIZE) -
-	  (regs->esp/ PAGE_SIZE);
-/* If the size of the dump file exceeds the rlimit, then see what would happen
-   if we wrote the stack, but not the data area.  */
-	if ((dump.u_dsize+dump.u_ssize+1) * PAGE_SIZE/1024 >
-	    current->rlim[RLIMIT_CORE].rlim_cur)
-		dump.u_dsize = 0;
-/* Make sure we have enough room to write the stack and data areas. */
-	if ((dump.u_ssize+1) * PAGE_SIZE / 1024 >
-	    current->rlim[RLIMIT_CORE].rlim_cur)
-		dump.u_ssize = 0;
-       	dump.u_comm = 0;
-	dump.u_ar0 = (struct pt_regs *)(((int)(&dump.regs)) -((int)(&dump)));
-	dump.signal = signr;
-	dump.regs = *regs;
-	dump.start_code = 0;
-	dump.start_stack = regs->esp & ~(PAGE_SIZE - 1);
-/* Flag indicating the math stuff is valid. */
-	if (dump.u_fpvalid = current->used_math) {
-		if (last_task_used_math == current)
-			__asm__("clts ; fnsave %0"::"m" (dump.i387));
-		else
-			memcpy(&dump.i387,&current->tss.i387,sizeof(dump.i387));
-	};
-	DUMP_WRITE(&dump,sizeof(dump));
-	DUMP_SEEK(sizeof(dump));
- /* Dump the task struct.  Not be used by gdb, but could be useful */
-	DUMP_WRITE(current,sizeof(*current));
-/* Now dump all of the user data.  Include malloced stuff as well */
-	DUMP_SEEK(PAGE_SIZE);
-/* now we start writing out the user space info */
-	__asm__("mov %0,%%fs"::"r" ((unsigned short) 0x17));
-/* Dump the data area */
-	if (dump.u_dsize != 0) {
-		dump_start = current->end_code;
-		dump_size = current->brk - current->end_code;
-		DUMP_WRITE(dump_start,dump_size);
-	};
-/* Now prepare to dump the stack area */
-	if (dump.u_ssize != 0) {
-		dump_start = regs->esp & ~(PAGE_SIZE - 1);
-		dump_size = dump.u_ssize * PAGE_SIZE;
-		DUMP_WRITE(dump_start,dump_size);
-	};
-close_coredump:
-	if (file.f_op->release)
-		file.f_op->release(inode,&file);
-end_coredump:
-	__asm__("mov %0,%%fs"::"r" (fs));
-	iput(inode);
-	return has_dumped;
+	if (!fmt)
+		return -EINVAL;
+	if (fmt->next)
+		return -EBUSY;
+	write_lock(&binfmt_lock);
+	while (*tmp) {
+		if (fmt == *tmp) {
+			write_unlock(&binfmt_lock);
+			return -EBUSY;
+		}
+		tmp = &(*tmp)->next;
+	}
+	fmt->next = formats;
+	formats = fmt;
+	write_unlock(&binfmt_lock);
+	return 0;	
+}
+
+int unregister_binfmt(struct linux_binfmt * fmt)
+{
+	struct linux_binfmt ** tmp = &formats;
+
+	write_lock(&binfmt_lock);
+	while (*tmp) {
+		if (fmt == *tmp) {
+			*tmp = fmt->next;
+			write_unlock(&binfmt_lock);
+			return 0;
+		}
+		tmp = &(*tmp)->next;
+	}
+	write_unlock(&binfmt_lock);
+	return -EINVAL;
+}
+
+static inline void put_binfmt(struct linux_binfmt * fmt)
+{
+	if (fmt->module)
+		__MOD_DEC_USE_COUNT(fmt->module);
 }
 
 /*
@@ -162,425 +99,867 @@ end_coredump:
  *
  * Also note that we take the address to load from from the file itself.
  */
-int sys_uselib(const char * library)
+asmlinkage long sys_uselib(const char * library)
 {
-#define libnum	(current->numlibraries)
-	struct inode * inode;
-	struct buffer_head * bh;
-	struct exec ex;
+	struct file * file;
+	struct nameidata nd;
+	int error;
 
-	if (get_limit(0x17) != TASK_SIZE)
-		return -EINVAL;
-	if ((libnum >= MAX_SHARED_LIBS) || (libnum < 0))
-		return -EINVAL;
-	if (library)
-		inode = namei(library);
-	else
-		inode = NULL;
-	if (!inode)
-		return -ENOENT;
-	if (!S_ISREG(inode->i_mode) || !permission(inode,MAY_READ)) {
-		iput(inode);
-		return -EACCES;
-	}
-	if (!(bh = bread(inode->i_dev,inode->i_data[0]))) {
-		iput(inode);
-		return -EACCES;
-	}
-	ex = *(struct exec *) bh->b_data;
-	brelse(bh);
-	if (N_MAGIC(ex) != ZMAGIC || ex.a_trsize || ex.a_drsize ||
-		ex.a_text+ex.a_data+ex.a_bss>0x3000000 ||
-		inode->i_size < ex.a_text+ex.a_data+ex.a_syms+N_TXTOFF(ex)) {
-		iput(inode);
-		return -ENOEXEC;
-	}
-	current->libraries[libnum].library = inode;
-	current->libraries[libnum].start = ex.a_entry;
-	current->libraries[libnum].length = (ex.a_data+ex.a_text+0xfff) & 0xfffff000;
-#if 0
-	printk("Loaded library %d at %08x, length %08x\n",
-		libnum,
-		current->libraries[libnum].start,
-		current->libraries[libnum].length);
-#endif
-	libnum++;
-	return 0;
-#undef libnum
-}
+	error = user_path_walk(library, &nd);
+	if (error)
+		goto out;
 
-/*
- * create_tables() parses the env- and arg-strings in new user
- * memory and creates the pointer tables from them, and puts their
- * addresses on the "stack", returning the new stack pointer value.
- */
-static unsigned long * create_tables(char * p,int argc,int envc)
-{
-	unsigned long *argv,*envp;
-	unsigned long * sp;
+	error = -EINVAL;
+	if (!S_ISREG(nd.dentry->d_inode->i_mode))
+		goto exit;
 
-	sp = (unsigned long *) (0xfffffffc & (unsigned long) p);
-	sp -= envc+1;
-	envp = sp;
-	sp -= argc+1;
-	argv = sp;
-	put_fs_long((unsigned long)envp,--sp);
-	put_fs_long((unsigned long)argv,--sp);
-	put_fs_long((unsigned long)argc,--sp);
-	while (argc-->0) {
-		put_fs_long((unsigned long) p,argv++);
-		while (get_fs_byte(p++)) /* nothing */ ;
+	error = permission(nd.dentry->d_inode, MAY_READ | MAY_EXEC);
+	if (error)
+		goto exit;
+
+	file = dentry_open(nd.dentry, nd.mnt, O_RDONLY);
+	error = PTR_ERR(file);
+	if (IS_ERR(file))
+		goto out;
+
+	error = -ENOEXEC;
+	if(file->f_op && file->f_op->read) {
+		struct linux_binfmt * fmt;
+
+		read_lock(&binfmt_lock);
+		for (fmt = formats ; fmt ; fmt = fmt->next) {
+			if (!fmt->load_shlib)
+				continue;
+			if (!try_inc_mod_count(fmt->module))
+				continue;
+			read_unlock(&binfmt_lock);
+			error = fmt->load_shlib(file);
+			read_lock(&binfmt_lock);
+			put_binfmt(fmt);
+			if (error != -ENOEXEC)
+				break;
+		}
+		read_unlock(&binfmt_lock);
 	}
-	put_fs_long(0,argv);
-	while (envc-->0) {
-		put_fs_long((unsigned long) p,envp++);
-		while (get_fs_byte(p++)) /* nothing */ ;
-	}
-	put_fs_long(0,envp);
-	return sp;
+	fput(file);
+out:
+  	return error;
+exit:
+	path_release(&nd);
+	goto out;
 }
 
 /*
  * count() counts the number of arguments/envelopes
  */
-static int count(char ** argv)
+static int count(char ** argv, int max)
 {
-	int i=0;
-	char ** tmp;
+	int i = 0;
 
-	if (tmp = argv)
-		while (get_fs_long((unsigned long *) (tmp++)))
-			i++;
+	if (argv != NULL) {
+		for (;;) {
+			char * p;
+			int error;
 
+			error = get_user(p,argv);
+			if (error)
+				return error;
+			if (!p)
+				break;
+			argv++;
+			if(++i > max)
+				return -E2BIG;
+		}
+	}
 	return i;
 }
 
 /*
- * 'copy_string()' copies argument/envelope strings from user
+ * 'copy_strings()' copies argument/envelope strings from user
  * memory to free pages in kernel mem. These are in a format ready
  * to be put directly into the top of new user memory.
- *
- * Modified by TYT, 11/24/91 to add the from_kmem argument, which specifies
- * whether the string and the string array are from user or kernel segments:
- * 
- * from_kmem     argv *        argv **
- *    0          user space    user space
- *    1          kernel space  user space
- *    2          kernel space  kernel space
- * 
- * We do this by playing games with the fs segment register.  Since it
- * it is expensive to load a segment register, we try to avoid calling
- * set_fs() unless we absolutely have to.
  */
-static unsigned long copy_strings(int argc,char ** argv,unsigned long *page,
-		unsigned long p, int from_kmem)
+int copy_strings(int argc,char ** argv, struct linux_binprm *bprm) 
 {
-	char *tmp, *pag = NULL;
-	int len, offset = 0;
-	unsigned long old_fs, new_fs;
-
-	if (!p)
-		return 0;	/* bullet-proofing */
-	new_fs = get_ds();
-	old_fs = get_fs();
-	if (from_kmem==2)
-		set_fs(new_fs);
 	while (argc-- > 0) {
-		if (from_kmem == 1)
-			set_fs(new_fs);
-		if (!(tmp = (char *)get_fs_long(((unsigned long *)argv)+argc)))
-			panic("argc is wrong");
-		if (from_kmem == 1)
-			set_fs(old_fs);
-		len=0;		/* remember zero-padding */
-		do {
-			len++;
-		} while (get_fs_byte(tmp++));
-		if (p < len) {	/* this shouldn't happen - 128kB */
-			set_fs(old_fs);
-			return 0;
-		}
-		while (len) {
-			--p; --tmp; --len;
-			if (--offset < 0) {
-				offset = p % PAGE_SIZE;
-				if (from_kmem==2)
-					set_fs(old_fs);
-				if (!(pag = (char *) page[p/PAGE_SIZE]) &&
-				    !(pag = (char *) page[p/PAGE_SIZE] =
-				      (unsigned long *) get_free_page())) 
-					return 0;
-				if (from_kmem==2)
-					set_fs(new_fs);
+		char *str;
+		int len;
+		unsigned long pos;
 
+		if (get_user(str, argv+argc) || !str || !(len = strnlen_user(str, bprm->p))) 
+			return -EFAULT;
+		if (bprm->p < len) 
+			return -E2BIG; 
+
+		bprm->p -= len;
+		/* XXX: add architecture specific overflow check here. */ 
+
+		pos = bprm->p;
+		while (len > 0) {
+			char *kaddr;
+			int i, new, err;
+			struct page *page;
+			int offset, bytes_to_copy;
+
+			offset = pos % PAGE_SIZE;
+			i = pos/PAGE_SIZE;
+			page = bprm->page[i];
+			new = 0;
+			if (!page) {
+				page = alloc_page(GFP_HIGHUSER);
+				bprm->page[i] = page;
+				if (!page)
+					return -ENOMEM;
+				new = 1;
 			}
-			*(pag + offset) = get_fs_byte(tmp);
+			kaddr = kmap(page);
+
+			if (new && offset)
+				memset(kaddr, 0, offset);
+			bytes_to_copy = PAGE_SIZE - offset;
+			if (bytes_to_copy > len) {
+				bytes_to_copy = len;
+				if (new)
+					memset(kaddr+offset+len, 0, PAGE_SIZE-offset-len);
+			}
+			err = copy_from_user(kaddr + offset, str, bytes_to_copy);
+			kunmap(page);
+
+			if (err)
+				return -EFAULT; 
+
+			pos += bytes_to_copy;
+			str += bytes_to_copy;
+			len -= bytes_to_copy;
 		}
 	}
-	if (from_kmem==2)
-		set_fs(old_fs);
-	return p;
-}
-
-static unsigned long change_ldt(unsigned long text_size,unsigned long * page)
-{
-	unsigned long code_limit,data_limit,code_base,data_base;
-	int i;
-
-	code_limit = TASK_SIZE;
-	data_limit = TASK_SIZE;
-	code_base = get_base(current->ldt[1]);
-	data_base = code_base;
-	set_base(current->ldt[1],code_base);
-	set_limit(current->ldt[1],code_limit);
-	set_base(current->ldt[2],data_base);
-	set_limit(current->ldt[2],data_limit);
-/* make sure fs points to the NEW data segment */
-	__asm__("pushl $0x17\n\tpop %%fs"::);
-	data_base += data_limit - LIBRARY_SIZE;
-	for (i=MAX_ARG_PAGES-1 ; i>=0 ; i--) {
-		data_base -= PAGE_SIZE;
-		if (page[i])
-			put_dirty_page(page[i],data_base);
-	}
-	return data_limit;
-}
-
-static void read_omagic(struct inode *inode, int bytes)
-{
-	struct buffer_head *bh;
-	int n, blkno, blk = 0;
-	char *dest = (char *) 0;
-
-	while (bytes > 0) {
-		if (!(blkno = bmap(inode, blk)))
-			sys_exit(-1);
-		if (!(bh = bread(inode->i_dev, blkno)))
-			sys_exit(-1);
-		n = (blk ? BLOCK_SIZE : BLOCK_SIZE - sizeof(struct exec));
-		if (bytes < n)
-			n = bytes;
-
-		memcpy_tofs(dest, (blk ? bh->b_data :
-				bh->b_data + sizeof(struct exec)), n);
-		brelse(bh);
-		++blk;
-		dest += n;
-		bytes -= n;
-	}
-	iput(inode);
-	current->executable = NULL;
+	return 0;
 }
 
 /*
- * 'do_execve()' executes a new program.
- *
- * NOTE! We leave 4MB free at the top of the data-area for a loadable
- * library.
+ * Like copy_strings, but get argv and its values from kernel memory.
  */
-int do_execve(unsigned long * eip,long tmp,char * filename,
-	char ** argv, char ** envp)
+int copy_strings_kernel(int argc,char ** argv, struct linux_binprm *bprm)
 {
-	struct inode * inode;
-	struct buffer_head * bh;
-	struct exec ex;
-	unsigned long page[MAX_ARG_PAGES];
-	int i,argc,envc;
-	int e_uid, e_gid;
-	int retval;
-	int sh_bang = 0;
-	unsigned long p=PAGE_SIZE*MAX_ARG_PAGES-4;
-	int ch;
+	int r;
+	mm_segment_t oldfs = get_fs();
+	set_fs(KERNEL_DS); 
+	r = copy_strings(argc, argv, bprm);
+	set_fs(oldfs);
+	return r; 
+}
 
-	if ((0xffff & eip[1]) != 0x000f)
-		panic("execve called from supervisor mode");
-	for (i=0 ; i<MAX_ARG_PAGES ; i++)	/* clear page-table */
-		page[i]=0;
-	if (!(inode=namei(filename)))		/* get executables inode */
-		return -ENOENT;
-	argc = count(argv);
-	envc = count(envp);
+/*
+ * This routine is used to map in a page into an address space: needed by
+ * execve() for the initial stack and environment pages.
+ */
+void put_dirty_page(struct task_struct * tsk, struct page *page, unsigned long address)
+{
+	pgd_t * pgd;
+	pmd_t * pmd;
+	pte_t * pte;
+
+	if (page_count(page) != 1)
+		printk("mem_map disagrees with %p at %08lx\n", page, address);
+	pgd = pgd_offset(tsk->mm, address);
+	pmd = pmd_alloc(pgd, address);
+	if (!pmd) {
+		__free_page(page);
+		force_sig(SIGKILL, tsk);
+		return;
+	}
+	pte = pte_alloc(pmd, address);
+	if (!pte) {
+		__free_page(page);
+		force_sig(SIGKILL, tsk);
+		return;
+	}
+	if (!pte_none(*pte)) {
+		pte_ERROR(*pte);
+		__free_page(page);
+		return;
+	}
+	flush_dcache_page(page);
+	flush_page_to_ram(page);
+	set_pte(pte, pte_mkdirty(pte_mkwrite(mk_pte(page, PAGE_COPY))));
+/* no need for flush_tlb */
+}
+
+int setup_arg_pages(struct linux_binprm *bprm)
+{
+	unsigned long stack_base;
+	struct vm_area_struct *mpnt;
+	int i;
+
+	stack_base = STACK_TOP - MAX_ARG_PAGES*PAGE_SIZE;
+
+	bprm->p += stack_base;
+	if (bprm->loader)
+		bprm->loader += stack_base;
+	bprm->exec += stack_base;
+
+	mpnt = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
+	if (!mpnt) 
+		return -ENOMEM; 
 	
-restart_interp:
-	if (!S_ISREG(inode->i_mode)) {	/* must be regular file */
-		retval = -EACCES;
-		goto exec_error2;
-	}
-	i = inode->i_mode;
-	/* make sure we don't let suid, sgid files be ptraced. */
-	if (current->flags & PF_PTRACED) {
-		e_uid = current->euid;
-		e_gid = current->egid;
-	} else {
-		e_uid = (i & S_ISUID) ? inode->i_uid : current->euid;
-		e_gid = (i & S_ISGID) ? inode->i_gid : current->egid;
-	}
-	if (current->euid == inode->i_uid)
-		i >>= 6;
-	else if (in_group_p(inode->i_gid))
-		i >>= 3;
-	if (!(i & 1) &&
-	    !((inode->i_mode & 0111) && suser())) {
-		retval = -EACCES;
-		goto exec_error2;
-	}
-	if (!(bh = bread(inode->i_dev,inode->i_data[0]))) {
-		retval = -EACCES;
-		goto exec_error2;
-	}
-	ex = *((struct exec *) bh->b_data);	/* read exec-header */
-	if ((bh->b_data[0] == '#') && (bh->b_data[1] == '!') && (!sh_bang)) {
-		/*
-		 * This section does the #! interpretation.
-		 * Sorta complicated, but hopefully it will work.  -TYT
-		 */
+	down(&current->mm->mmap_sem);
+	{
+		mpnt->vm_mm = current->mm;
+		mpnt->vm_start = PAGE_MASK & (unsigned long) bprm->p;
+		mpnt->vm_end = STACK_TOP;
+		mpnt->vm_page_prot = PAGE_COPY;
+		mpnt->vm_flags = VM_STACK_FLAGS;
+		mpnt->vm_ops = NULL;
+		mpnt->vm_pgoff = 0;
+		mpnt->vm_file = NULL;
+		mpnt->vm_private_data = (void *) 0;
+		insert_vm_struct(current->mm, mpnt);
+		current->mm->total_vm = (mpnt->vm_end - mpnt->vm_start) >> PAGE_SHIFT;
+	} 
 
-		char buf[128], *cp, *interp, *i_name, *i_arg;
-		unsigned long old_fs;
+	for (i = 0 ; i < MAX_ARG_PAGES ; i++) {
+		struct page *page = bprm->page[i];
+		if (page) {
+			bprm->page[i] = NULL;
+			current->mm->rss++;
+			put_dirty_page(current,page,stack_base);
+		}
+		stack_base += PAGE_SIZE;
+	}
+	up(&current->mm->mmap_sem);
+	
+	return 0;
+}
 
-		strncpy(buf, bh->b_data+2, 127);
-		brelse(bh);
-		iput(inode);
-		buf[127] = '\0';
-		if (cp = strchr(buf, '\n')) {
-			*cp = '\0';
-			for (cp = buf; (*cp == ' ') || (*cp == '\t'); cp++);
+struct file *open_exec(const char *name)
+{
+	struct nameidata nd;
+	struct inode *inode;
+	struct file *file;
+	int err = 0;
+
+	if (path_init(name, LOOKUP_FOLLOW|LOOKUP_POSITIVE, &nd))
+		err = path_walk(name, &nd);
+	file = ERR_PTR(err);
+	if (!err) {
+		inode = nd.dentry->d_inode;
+		file = ERR_PTR(-EACCES);
+		if (!IS_NOEXEC(inode) && S_ISREG(inode->i_mode)) {
+			int err = permission(inode, MAY_EXEC);
+			file = ERR_PTR(err);
+			if (!err) {
+				file = dentry_open(nd.dentry, nd.mnt, O_RDONLY);
+				if (!IS_ERR(file)) {
+					err = deny_write_access(file);
+					if (err) {
+						fput(file);
+						file = ERR_PTR(err);
+					}
+				}
+out:
+				return file;
+			}
 		}
-		if (!cp || *cp == '\0') {
-			retval = -ENOEXEC; /* No interpreter name found */
-			goto exec_error1;
-		}
-		interp = i_name = cp;
-		i_arg = 0;
-		for ( ; *cp && (*cp != ' ') && (*cp != '\t'); cp++) {
- 			if (*cp == '/')
-				i_name = cp+1;
-		}
-		if (*cp) {
-			*cp++ = '\0';
-			i_arg = cp;
-		}
-		/*
-		 * OK, we've parsed out the interpreter name and
-		 * (optional) argument.
-		 */
-		if (sh_bang++ == 0) {
-			p = copy_strings(envc, envp, page, p, 0);
-			p = copy_strings(--argc, argv+1, page, p, 0);
-		}
-		/*
-		 * Splice in (1) the interpreter's name for argv[0]
-		 *           (2) (optional) argument to interpreter
-		 *           (3) filename of shell script
-		 *
-		 * This is done in reverse order, because of how the
-		 * user environment and arguments are stored.
-		 */
-		p = copy_strings(1, &filename, page, p, 1);
-		argc++;
-		if (i_arg) {
-			p = copy_strings(1, &i_arg, page, p, 2);
-			argc++;
-		}
-		p = copy_strings(1, &i_name, page, p, 2);
-		argc++;
-		if (!p) {
-			retval = -ENOMEM;
-			goto exec_error1;
-		}
-		/*
-		 * OK, now restart the process with the interpreter's inode.
-		 */
-		old_fs = get_fs();
-		set_fs(get_ds());
-		if (!(inode=namei(interp))) { /* get executables inode */
-			set_fs(old_fs);
-			retval = -ENOENT;
-			goto exec_error1;
-		}
-		set_fs(old_fs);
-		goto restart_interp;
+		path_release(&nd);
 	}
-	brelse(bh);
-	if ((N_MAGIC(ex) != ZMAGIC && N_MAGIC(ex) != OMAGIC) ||
-		ex.a_trsize || ex.a_drsize ||
-		ex.a_text+ex.a_data+ex.a_bss>0x3000000 ||
-		inode->i_size < ex.a_text+ex.a_data+ex.a_syms+N_TXTOFF(ex)) {
-		retval = -ENOEXEC;
-		goto exec_error2;
+	goto out;
+}
+
+int kernel_read(struct file *file, unsigned long offset,
+	char * addr, unsigned long count)
+{
+	mm_segment_t old_fs;
+	loff_t pos = offset;
+	int result = -ENOSYS;
+
+	if (!file->f_op->read)
+		goto fail;
+	old_fs = get_fs();
+	set_fs(get_ds());
+	result = file->f_op->read(file, addr, count, &pos);
+	set_fs(old_fs);
+fail:
+	return result;
+}
+
+static int exec_mmap(void)
+{
+	struct mm_struct * mm, * old_mm;
+
+	old_mm = current->mm;
+	if (old_mm && atomic_read(&old_mm->mm_users) == 1) {
+		flush_cache_mm(old_mm);
+		mm_release();
+		exit_mmap(old_mm);
+		flush_tlb_mm(old_mm);
+		return 0;
 	}
-	if (N_TXTOFF(ex) != BLOCK_SIZE && N_MAGIC(ex) != OMAGIC) {
-		printk("%s: N_TXTOFF != BLOCK_SIZE. See a.out.h.", filename);
-		retval = -ENOEXEC;
-		goto exec_error2;
-	}
-	if (!sh_bang) {
-		p = copy_strings(envc,envp,page,p,0);
-		p = copy_strings(argc,argv,page,p,0);
-		if (!p) {
-			retval = -ENOMEM;
-			goto exec_error2;
+
+	mm = mm_alloc();
+	if (mm) {
+		struct mm_struct *active_mm = current->active_mm;
+
+		if (init_new_context(current, mm)) {
+			mmdrop(mm);
+			return -ENOMEM;
 		}
+
+		/* Add it to the list of mm's */
+		spin_lock(&mmlist_lock);
+		list_add(&mm->mmlist, &init_mm.mmlist);
+		spin_unlock(&mmlist_lock);
+
+		task_lock(current);
+		current->mm = mm;
+		current->active_mm = mm;
+		task_unlock(current);
+		activate_mm(active_mm, mm);
+		mm_release();
+		if (old_mm) {
+			if (active_mm != old_mm) BUG();
+			mmput(old_mm);
+			return 0;
+		}
+		mmdrop(active_mm);
+		return 0;
 	}
-/* OK, This is the point of no return */
-	current->dumpable = 1;
-	for (i=0; (ch = get_fs_byte(filename++)) != '\0';)
+	return -ENOMEM;
+}
+
+/*
+ * This function makes sure the current process has its own signal table,
+ * so that flush_signal_handlers can later reset the handlers without
+ * disturbing other processes.  (Other processes might share the signal
+ * table via the CLONE_SIGNAL option to clone().)
+ */
+ 
+static inline int make_private_signals(void)
+{
+	struct signal_struct * newsig;
+
+	if (atomic_read(&current->sig->count) <= 1)
+		return 0;
+	newsig = kmem_cache_alloc(sigact_cachep, GFP_KERNEL);
+	if (newsig == NULL)
+		return -ENOMEM;
+	spin_lock_init(&newsig->siglock);
+	atomic_set(&newsig->count, 1);
+	memcpy(newsig->action, current->sig->action, sizeof(newsig->action));
+	spin_lock_irq(&current->sigmask_lock);
+	current->sig = newsig;
+	spin_unlock_irq(&current->sigmask_lock);
+	return 0;
+}
+	
+/*
+ * If make_private_signals() made a copy of the signal table, decrement the
+ * refcount of the original table, and free it if necessary.
+ * We don't do that in make_private_signals() so that we can back off
+ * in flush_old_exec() if an error occurs after calling make_private_signals().
+ */
+
+static inline void release_old_signals(struct signal_struct * oldsig)
+{
+	if (current->sig == oldsig)
+		return;
+	if (atomic_dec_and_test(&oldsig->count))
+		kmem_cache_free(sigact_cachep, oldsig);
+}
+
+/*
+ * These functions flushes out all traces of the currently running executable
+ * so that a new one can be started
+ */
+
+static inline void flush_old_files(struct files_struct * files)
+{
+	long j = -1;
+
+	write_lock(&files->file_lock);
+	for (;;) {
+		unsigned long set, i;
+
+		j++;
+		i = j * __NFDBITS;
+		if (i >= files->max_fds || i >= files->max_fdset)
+			break;
+		set = files->close_on_exec->fds_bits[j];
+		if (!set)
+			continue;
+		files->close_on_exec->fds_bits[j] = 0;
+		write_unlock(&files->file_lock);
+		for ( ; set ; i++,set >>= 1) {
+			if (set & 1) {
+				sys_close(i);
+			}
+		}
+		write_lock(&files->file_lock);
+
+	}
+	write_unlock(&files->file_lock);
+}
+
+/*
+ * An execve() will automatically "de-thread" the process.
+ * Note: we don't have to hold the tasklist_lock to test
+ * whether we migth need to do this. If we're not part of
+ * a thread group, there is no way we can become one
+ * dynamically. And if we are, we only need to protect the
+ * unlink - even if we race with the last other thread exit,
+ * at worst the list_del_init() might end up being a no-op.
+ */
+static inline void de_thread(struct task_struct *tsk)
+{
+	if (!list_empty(&tsk->thread_group)) {
+		write_lock_irq(&tasklist_lock);
+		list_del_init(&tsk->thread_group);
+		write_unlock_irq(&tasklist_lock);
+	}
+
+	/* Minor oddity: this might stay the same. */
+	tsk->tgid = tsk->pid;
+}
+
+int flush_old_exec(struct linux_binprm * bprm)
+{
+	char * name;
+	int i, ch, retval;
+	struct signal_struct * oldsig;
+
+	/*
+	 * Make sure we have a private signal table
+	 */
+	oldsig = current->sig;
+	retval = make_private_signals();
+	if (retval) goto flush_failed;
+
+	/* 
+	 * Release all of the old mmap stuff
+	 */
+	retval = exec_mmap();
+	if (retval) goto mmap_failed;
+
+	/* This is the point of no return */
+	release_old_signals(oldsig);
+
+	current->sas_ss_sp = current->sas_ss_size = 0;
+
+	if (current->euid == current->uid && current->egid == current->gid)
+		current->dumpable = 1;
+	name = bprm->filename;
+	for (i=0; (ch = *(name++)) != '\0';) {
 		if (ch == '/')
 			i = 0;
 		else
-			if (i < 8)
+			if (i < 15)
 				current->comm[i++] = ch;
-	if (i < 8)
-		current->comm[i] = '\0';
-	if (current->executable)
-		iput(current->executable);
-	i = current->numlibraries;
-	while (i-- > 0) {
-		iput(current->libraries[i].library);
-		current->libraries[i].library = NULL;
 	}
-	if (e_uid != current->euid || e_gid != current->egid ||
-	    !permission(inode,MAY_READ))
+	current->comm[i] = '\0';
+
+	flush_thread();
+
+	de_thread(current);
+
+	if (bprm->e_uid != current->euid || bprm->e_gid != current->egid || 
+	    permission(bprm->file->f_dentry->d_inode,MAY_READ))
 		current->dumpable = 0;
-	current->numlibraries = 0;
-	current->executable = inode;
-	current->signal = 0;
-	for (i=0 ; i<32 ; i++) {
-		current->sigaction[i].sa_mask = 0;
-		current->sigaction[i].sa_flags = 0;
-		if (current->sigaction[i].sa_handler != SIG_IGN)
-			current->sigaction[i].sa_handler = NULL;
-	}
-	for (i=0 ; i<NR_OPEN ; i++)
-		if ((current->close_on_exec>>i)&1)
-			sys_close(i);
-	current->close_on_exec = 0;
-	free_page_tables(get_base(current->ldt[1]),get_limit(0x0f));
-	free_page_tables(get_base(current->ldt[2]),get_limit(0x17));
-	if (last_task_used_math == current)
-		last_task_used_math = NULL;
-	current->used_math = 0;
-	p += change_ldt(ex.a_text,page);
-	p -= LIBRARY_SIZE + MAX_ARG_PAGES*PAGE_SIZE;
-	p = (unsigned long) create_tables((char *)p,argc,envc);
-	current->brk = ex.a_bss +
-		(current->end_data = ex.a_data +
-		(current->end_code = ex.a_text));
-	current->start_stack = p;
-	current->rss = (LIBRARY_OFFSET - p + PAGE_SIZE-1) / PAGE_SIZE;
-	current->suid = current->euid = e_uid;
-	current->sgid = current->egid = e_gid;
-	if (N_MAGIC(ex) == OMAGIC)
-		read_omagic(inode, ex.a_text+ex.a_data);
-	eip[0] = ex.a_entry;		/* eip, magic happens :-) */
-	eip[3] = p;			/* stack pointer */
-	if (current->flags & PF_PTRACED)
-		send_sig(SIGTRAP, current, 0);
+
+	/* An exec changes our domain. We are no longer part of the thread
+	   group */
+	   
+	current->self_exec_id++;
+			
+	flush_signal_handlers(current);
+	flush_old_files(current->files);
+
 	return 0;
-exec_error2:
-	iput(inode);
-exec_error1:
-	for (i=0 ; i<MAX_ARG_PAGES ; i++)
-		free_page(page[i]);
-	return(retval);
+
+mmap_failed:
+flush_failed:
+	spin_lock_irq(&current->sigmask_lock);
+	if (current->sig != oldsig)
+		kfree(current->sig);
+	current->sig = oldsig;
+	spin_unlock_irq(&current->sigmask_lock);
+	return retval;
+}
+
+/*
+ * We mustn't allow tracing of suid binaries, unless
+ * the tracer has the capability to trace anything..
+ */
+static inline int must_not_trace_exec(struct task_struct * p)
+{
+	return (p->ptrace & PT_PTRACED) && !cap_raised(p->p_pptr->cap_effective, CAP_SYS_PTRACE);
+}
+
+/* 
+ * Fill the binprm structure from the inode. 
+ * Check permissions, then read the first 128 (BINPRM_BUF_SIZE) bytes
+ */
+int prepare_binprm(struct linux_binprm *bprm)
+{
+	int mode;
+	struct inode * inode = bprm->file->f_dentry->d_inode;
+
+	mode = inode->i_mode;
+	/* Huh? We had already checked for MAY_EXEC, WTF do we check this? */
+	if (!(mode & 0111))	/* with at least _one_ execute bit set */
+		return -EACCES;
+	if (bprm->file->f_op == NULL)
+		return -EACCES;
+
+	bprm->e_uid = current->euid;
+	bprm->e_gid = current->egid;
+
+	if(!IS_NOSUID(inode)) {
+		/* Set-uid? */
+		if (mode & S_ISUID)
+			bprm->e_uid = inode->i_uid;
+
+		/* Set-gid? */
+		/*
+		 * If setgid is set but no group execute bit then this
+		 * is a candidate for mandatory locking, not a setgid
+		 * executable.
+		 */
+		if ((mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP))
+			bprm->e_gid = inode->i_gid;
+	}
+
+	/* We don't have VFS support for capabilities yet */
+	cap_clear(bprm->cap_inheritable);
+	cap_clear(bprm->cap_permitted);
+	cap_clear(bprm->cap_effective);
+
+	/*  To support inheritance of root-permissions and suid-root
+         *  executables under compatibility mode, we raise all three
+         *  capability sets for the file.
+         *
+         *  If only the real uid is 0, we only raise the inheritable
+         *  and permitted sets of the executable file.
+         */
+
+	if (!issecure(SECURE_NOROOT)) {
+		if (bprm->e_uid == 0 || current->uid == 0) {
+			cap_set_full(bprm->cap_inheritable);
+			cap_set_full(bprm->cap_permitted);
+		}
+		if (bprm->e_uid == 0) 
+			cap_set_full(bprm->cap_effective);
+	}
+
+	memset(bprm->buf,0,BINPRM_BUF_SIZE);
+	return kernel_read(bprm->file,0,bprm->buf,BINPRM_BUF_SIZE);
+}
+
+/*
+ * This function is used to produce the new IDs and capabilities
+ * from the old ones and the file's capabilities.
+ *
+ * The formula used for evolving capabilities is:
+ *
+ *       pI' = pI
+ * (***) pP' = (fP & X) | (fI & pI)
+ *       pE' = pP' & fE          [NB. fE is 0 or ~0]
+ *
+ * I=Inheritable, P=Permitted, E=Effective // p=process, f=file
+ * ' indicates post-exec(), and X is the global 'cap_bset'.
+ *
+ */
+
+void compute_creds(struct linux_binprm *bprm) 
+{
+	kernel_cap_t new_permitted, working;
+	int do_unlock = 0;
+
+	new_permitted = cap_intersect(bprm->cap_permitted, cap_bset);
+	working = cap_intersect(bprm->cap_inheritable,
+				current->cap_inheritable);
+	new_permitted = cap_combine(new_permitted, working);
+
+	if (bprm->e_uid != current->uid || bprm->e_gid != current->gid ||
+	    !cap_issubset(new_permitted, current->cap_permitted)) {
+                current->dumpable = 0;
+		
+		lock_kernel();
+		if (must_not_trace_exec(current)
+		    || atomic_read(&current->fs->count) > 1
+		    || atomic_read(&current->files->count) > 1
+		    || atomic_read(&current->sig->count) > 1) {
+			if(!capable(CAP_SETUID)) {
+				bprm->e_uid = current->uid;
+				bprm->e_gid = current->gid;
+			}
+			if(!capable(CAP_SETPCAP)) {
+				new_permitted = cap_intersect(new_permitted,
+							current->cap_permitted);
+			}
+		}
+		do_unlock = 1;
+	}
+
+
+	/* For init, we want to retain the capabilities set
+         * in the init_task struct. Thus we skip the usual
+         * capability rules */
+	if (current->pid != 1) {
+		current->cap_permitted = new_permitted;
+		current->cap_effective =
+			cap_intersect(new_permitted, bprm->cap_effective);
+	}
+	
+        /* AUD: Audit candidate if current->cap_effective is set */
+
+        current->suid = current->euid = current->fsuid = bprm->e_uid;
+        current->sgid = current->egid = current->fsgid = bprm->e_gid;
+
+	if(do_unlock)
+		unlock_kernel();
+	current->keep_capabilities = 0;
+}
+
+
+void remove_arg_zero(struct linux_binprm *bprm)
+{
+	if (bprm->argc) {
+		unsigned long offset;
+		char * kaddr;
+		struct page *page;
+
+		offset = bprm->p % PAGE_SIZE;
+		goto inside;
+
+		while (bprm->p++, *(kaddr+offset++)) {
+			if (offset != PAGE_SIZE)
+				continue;
+			offset = 0;
+			kunmap(page);
+inside:
+			page = bprm->page[bprm->p/PAGE_SIZE];
+			kaddr = kmap(page);
+		}
+		kunmap(page);
+		bprm->argc--;
+	}
+}
+
+/*
+ * cycle the list of binary formats handler, until one recognizes the image
+ */
+int search_binary_handler(struct linux_binprm *bprm,struct pt_regs *regs)
+{
+	int try,retval=0;
+	struct linux_binfmt *fmt;
+#ifdef __alpha__
+	/* handle /sbin/loader.. */
+	{
+	    struct exec * eh = (struct exec *) bprm->buf;
+
+	    if (!bprm->loader && eh->fh.f_magic == 0x183 &&
+		(eh->fh.f_flags & 0x3000) == 0x3000)
+	    {
+		char * dynloader[] = { "/sbin/loader" };
+		struct file * file;
+		unsigned long loader;
+
+		allow_write_access(bprm->file);
+		fput(bprm->file);
+		bprm->file = NULL;
+
+	        loader = PAGE_SIZE*MAX_ARG_PAGES-sizeof(void *);
+
+		file = open_exec(dynloader[0]);
+		retval = PTR_ERR(file);
+		if (IS_ERR(file))
+			return retval;
+		bprm->file = file;
+		bprm->loader = loader;
+		retval = prepare_binprm(bprm);
+		if (retval<0)
+			return retval;
+		/* should call search_binary_handler recursively here,
+		   but it does not matter */
+	    }
+	}
+#endif
+	for (try=0; try<2; try++) {
+		read_lock(&binfmt_lock);
+		for (fmt = formats ; fmt ; fmt = fmt->next) {
+			int (*fn)(struct linux_binprm *, struct pt_regs *) = fmt->load_binary;
+			if (!fn)
+				continue;
+			if (!try_inc_mod_count(fmt->module))
+				continue;
+			read_unlock(&binfmt_lock);
+			retval = fn(bprm, regs);
+			if (retval >= 0) {
+				put_binfmt(fmt);
+				allow_write_access(bprm->file);
+				if (bprm->file)
+					fput(bprm->file);
+				bprm->file = NULL;
+				current->did_exec = 1;
+				return retval;
+			}
+			read_lock(&binfmt_lock);
+			put_binfmt(fmt);
+			if (retval != -ENOEXEC)
+				break;
+			if (!bprm->file) {
+				read_unlock(&binfmt_lock);
+				return retval;
+			}
+		}
+		read_unlock(&binfmt_lock);
+		if (retval != -ENOEXEC) {
+			break;
+#ifdef CONFIG_KMOD
+		}else{
+#define printable(c) (((c)=='\t') || ((c)=='\n') || (0x20<=(c) && (c)<=0x7e))
+			char modname[20];
+			if (printable(bprm->buf[0]) &&
+			    printable(bprm->buf[1]) &&
+			    printable(bprm->buf[2]) &&
+			    printable(bprm->buf[3]))
+				break; /* -ENOEXEC */
+			sprintf(modname, "binfmt-%04x", *(unsigned short *)(&bprm->buf[2]));
+			request_module(modname);
+#endif
+		}
+	}
+	return retval;
+}
+
+
+/*
+ * sys_execve() executes a new program.
+ */
+int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs * regs)
+{
+	struct linux_binprm bprm;
+	struct file *file;
+	int retval;
+	int i;
+
+	file = open_exec(filename);
+
+	retval = PTR_ERR(file);
+	if (IS_ERR(file))
+		return retval;
+
+	bprm.p = PAGE_SIZE*MAX_ARG_PAGES-sizeof(void *);
+	memset(bprm.page, 0, MAX_ARG_PAGES*sizeof(bprm.page[0])); 
+
+	bprm.file = file;
+	bprm.filename = filename;
+	bprm.sh_bang = 0;
+	bprm.loader = 0;
+	bprm.exec = 0;
+	if ((bprm.argc = count(argv, bprm.p / sizeof(void *))) < 0) {
+		allow_write_access(file);
+		fput(file);
+		return bprm.argc;
+	}
+
+	if ((bprm.envc = count(envp, bprm.p / sizeof(void *))) < 0) {
+		allow_write_access(file);
+		fput(file);
+		return bprm.envc;
+	}
+
+	retval = prepare_binprm(&bprm);
+	if (retval < 0) 
+		goto out; 
+
+	retval = copy_strings_kernel(1, &bprm.filename, &bprm);
+	if (retval < 0) 
+		goto out; 
+
+	bprm.exec = bprm.p;
+	retval = copy_strings(bprm.envc, envp, &bprm);
+	if (retval < 0) 
+		goto out; 
+
+	retval = copy_strings(bprm.argc, argv, &bprm);
+	if (retval < 0) 
+		goto out; 
+
+	retval = search_binary_handler(&bprm,regs);
+	if (retval >= 0)
+		/* execve success */
+		return retval;
+
+out:
+	/* Something went wrong, return the inode and free the argument pages*/
+	allow_write_access(bprm.file);
+	if (bprm.file)
+		fput(bprm.file);
+
+	for (i = 0 ; i < MAX_ARG_PAGES ; i++) {
+		struct page * page = bprm.page[i];
+		if (page)
+			__free_page(page);
+	}
+
+	return retval;
+}
+
+void set_binfmt(struct linux_binfmt *new)
+{
+	struct linux_binfmt *old = current->binfmt;
+	if (new && new->module)
+		__MOD_INC_USE_COUNT(new->module);
+	current->binfmt = new;
+	if (old && old->module)
+		__MOD_DEC_USE_COUNT(old->module);
+}
+
+int do_coredump(long signr, struct pt_regs * regs)
+{
+	struct linux_binfmt * binfmt;
+	char corename[6+sizeof(current->comm)];
+	struct file * file;
+	struct inode * inode;
+
+	lock_kernel();
+	binfmt = current->binfmt;
+	if (!binfmt || !binfmt->core_dump)
+		goto fail;
+	if (!current->dumpable || atomic_read(&current->mm->mm_users) != 1)
+		goto fail;
+	current->dumpable = 0;
+	if (current->rlim[RLIMIT_CORE].rlim_cur < binfmt->min_coredump)
+		goto fail;
+
+	memcpy(corename,"core.", 5);
+#if 0
+	memcpy(corename+5,current->comm,sizeof(current->comm));
+#else
+	corename[4] = '\0';
+#endif
+	file = filp_open(corename, O_CREAT | 2 | O_TRUNC | O_NOFOLLOW, 0600);
+	if (IS_ERR(file))
+		goto fail;
+	inode = file->f_dentry->d_inode;
+	if (inode->i_nlink > 1)
+		goto close_fail;	/* multiple links - don't dump */
+
+	if (!S_ISREG(inode->i_mode))
+		goto close_fail;
+	if (!file->f_op)
+		goto close_fail;
+	if (!file->f_op->write)
+		goto close_fail;
+	if (!binfmt->core_dump(signr, regs, file))
+		goto close_fail;
+	unlock_kernel();
+	filp_close(file, NULL);
+	return 1;
+
+close_fail:
+	filp_close(file, NULL);
+fail:
+	unlock_kernel();
+	return 0;
 }

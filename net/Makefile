@@ -1,49 +1,55 @@
 #
 # Makefile for the linux networking.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
+# 2 Sep 2000, Christoph Hellwig <hch@caldera.de>
+# Rewritten to use lists instead of if-statements.
 #
-# Note 2! The CFLAGS definition is now in the main makefile...
 
-.c.o:
-	$(CC) $(CFLAGS) -c $<
-.s.o:
-	$(AS) -o $*.o $<
-.c.s:
-	$(CC) $(CFLAGS) -S $<
+O_TARGET :=	network.o
 
-OBJS	=  socket.o unix.o
+mod-subdirs :=	ipv4/netfilter ipv6/netfilter ipx irda atm netlink sched
+export-objs :=	netsyms.o
 
-net.o: $(OBJS)
-	$(LD) -r -o net.o $(OBJS)
+subdir-y :=	core ethernet
+subdir-m :=	ipv4 # hum?
 
-clean:
-	rm -f core *.o *.a tmp_make
-	for i in *.c;do rm -f `basename $$i .c`.s;done
 
-dep:
-	sed '/\#\#\# Dependencies/q' < Makefile > tmp_make
-	for i in *.c;do $(CPP) -M $$i;done >> tmp_make
-	cp tmp_make Makefile
+subdir-$(CONFIG_NET)		+= 802 sched
+subdir-$(CONFIG_INET)		+= ipv4
+subdir-$(CONFIG_NETFILTER)	+= ipv4/netfilter
+subdir-$(CONFIG_UNIX)		+= unix
+subdir-$(CONFIG_IPV6)		+= ipv6
 
-### Dependencies:
-socket.o : socket.c /usr/src/linux/include/signal.h /usr/src/linux/include/sys/types.h \
-  /usr/src/linux/include/stddef.h /usr/src/linux/include/errno.h /usr/src/linux/include/linux/sched.h \
-  /usr/src/linux/include/linux/head.h /usr/src/linux/include/linux/fs.h /usr/src/linux/include/sys/dirent.h \
-  /usr/src/linux/include/limits.h /usr/src/linux/include/sys/vfs.h /usr/src/linux/include/linux/mm.h \
-  /usr/src/linux/include/linux/kernel.h /usr/src/linux/include/sys/param.h /usr/src/linux/include/sys/time.h \
-  /usr/src/linux/include/time.h /usr/src/linux/include/sys/resource.h /usr/src/linux/include/linux/stat.h \
-  /usr/src/linux/include/asm/system.h /usr/src/linux/include/asm/segment.h /usr/src/linux/include/sys/socket.h \
-  /usr/src/linux/include/linux/fcntl.h /usr/src/linux/include/termios.h kern_sock.h \
-  socketcall.h 
-unix.o : unix.c /usr/src/linux/include/signal.h /usr/src/linux/include/sys/types.h \
-  /usr/src/linux/include/stddef.h /usr/src/linux/include/errno.h /usr/src/linux/include/linux/string.h \
-  /usr/src/linux/include/linux/sched.h /usr/src/linux/include/linux/head.h /usr/src/linux/include/linux/fs.h \
-  /usr/src/linux/include/sys/dirent.h /usr/src/linux/include/limits.h /usr/src/linux/include/sys/vfs.h \
-  /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/kernel.h /usr/src/linux/include/sys/param.h \
-  /usr/src/linux/include/sys/time.h /usr/src/linux/include/time.h /usr/src/linux/include/sys/resource.h \
-  /usr/src/linux/include/linux/stat.h /usr/src/linux/include/asm/system.h /usr/src/linux/include/asm/segment.h \
-  /usr/src/linux/include/sys/socket.h /usr/src/linux/include/sys/un.h /usr/src/linux/include/linux/fcntl.h \
-  /usr/src/linux/include/termios.h kern_sock.h 
+ifneq ($(CONFIG_IPV6),n)
+ifneq ($(CONFIG_IPV6),)
+subdir-$(CONFIG_NETFILTER)	+= ipv6/netfilter
+endif
+endif
+
+subdir-$(CONFIG_KHTTPD)		+= khttpd
+subdir-$(CONFIG_NETLINK)	+= netlink
+subdir-$(CONFIG_PACKET)		+= packet
+subdir-$(CONFIG_NET_SCHED)	+= sched
+subdir-$(CONFIG_BRIDGE)		+= bridge
+subdir-$(CONFIG_IPX)		+= ipx
+subdir-$(CONFIG_ATALK)		+= appletalk
+subdir-$(CONFIG_WAN_ROUTER)	+= wanrouter
+subdir-$(CONFIG_X25)		+= x25
+subdir-$(CONFIG_LAPB)		+= lapb
+subdir-$(CONFIG_NETROM)		+= netrom
+subdir-$(CONFIG_ROSE)		+= rose
+subdir-$(CONFIG_AX25)		+= ax25
+subdir-$(CONFIG_IRDA)		+= irda
+subdir-$(CONFIG_SUNRPC)		+= sunrpc
+subdir-$(CONFIG_ATM)		+= atm
+subdir-$(CONFIG_DECNET)		+= decnet
+subdir-$(CONFIG_ECONET)		+= econet
+
+
+obj-y	:= socket.o $(join $(subdir-y), $(patsubst %,/%.o,$(notdir $(subdir-y))))
+ifeq ($(CONFIG_NET),y)
+obj-$(CONFIG_MODULES)		+= netsyms.o
+obj-$(CONFIG_SYSCTL)		+= sysctl_net.o
+endif
+
+include $(TOPDIR)/Rules.make
