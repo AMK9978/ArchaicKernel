@@ -7,30 +7,15 @@
 #include <linux/errno.h>
 #include <asm/segment.h>
 #include <linux/sched.h>
+#include <linux/mm.h>
 #include <linux/sem.h>
 #include <linux/msg.h>
 #include <linux/shm.h>
 #include <linux/stat.h>
 
-void ipc_init (void);
-asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr); 
+#if defined(CONFIG_SYSVIPC) || defined(CONFIG_KERNELD)
 
-#ifdef CONFIG_SYSVIPC
-
-int ipcperms (struct ipc_perm *ipcp, short flag);
 extern void sem_init (void), msg_init (void), shm_init (void);
-extern int sys_semget (key_t key, int nsems, int semflg);
-extern int sys_semop (int semid, struct sembuf *sops, unsigned nsops);
-extern int sys_semctl (int semid, int semnum, int cmd, void *arg);
-extern int sys_msgget (key_t key, int msgflg);
-extern int sys_msgsnd (int msqid, struct msgbuf *msgp, int msgsz, int msgflg);
-extern int sys_msgrcv (int msqid, struct msgbuf *msgp, int msgsz, long msgtyp,
-		       int msgflg);
-extern int sys_msgctl (int msqid, int cmd, struct msqid_ds *buf);
-extern int sys_shmctl (int shmid, int cmd, struct shmid_ds *buf);
-extern int sys_shmget (key_t key, int size, int flag);
-extern int sys_shmat (int shmid, char *shmaddr, int shmflg, ulong *addr);
-extern int sys_shmdt (char *shmaddr);
 
 void ipc_init (void)
 {
@@ -62,90 +47,78 @@ int ipcperms (struct ipc_perm *ipcp, short flag)
 	return 0;
 }
 
-asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr) 
-{
-	
-	if (call <= SEMCTL)
-		switch (call) {
-		case SEMOP:
-			return sys_semop (first, (struct sembuf *)ptr, second);
-		case SEMGET:
-			return sys_semget (first, second, third);
-		case SEMCTL:
-			return sys_semctl (first, second, third, ptr);
-		default:
-			return -EINVAL;
-		}
-	if (call <= MSGCTL) 
-		switch (call) {
-		case MSGSND:
-			return sys_msgsnd (first, (struct msgbuf *) ptr, 
-					   second, third);
-		case MSGRCV: {
-			struct ipc_kludge tmp; 
-			if (!ptr)
-				return -EINVAL;
-			memcpy_fromfs (&tmp,(struct ipc_kludge *) ptr, 
-				       sizeof (tmp));
-			return sys_msgrcv (first, tmp.msgp, second, tmp.msgtyp,
-					 	third);
-			}
-		case MSGGET:
-			return sys_msgget ((key_t) first, second);
-		case MSGCTL:
-			return sys_msgctl (first, second, 
-						(struct msqid_ds *) ptr);
-		default:
-			return -EINVAL;
-		}
-	if (call <= SHMCTL) 
-		switch (call) {
-		case SHMAT: /* returning shmaddr > 2G will screw up */
-			return sys_shmat (first, (char *) ptr, second, 
-							(ulong *) third);
-		case SHMDT: 
-			return sys_shmdt ((char *)ptr);
-		case SHMGET:
-			return sys_shmget (first, second, third);
-		case SHMCTL:
-			return sys_shmctl (first, second, 
-						(struct shmid_ds *) ptr);
-		default:
-			return -EINVAL;
-		}
-	return -EINVAL;
-}
-
-#else /* not CONFIG_SYSVIPC */
-
-asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr) 
-{
-    return -ENOSYS;
-}
-
-int shm_fork (struct task_struct *p1, struct task_struct *p2)
-{
-    return 0;
-}
+#else
+/*
+ * Dummy functions when SYSV IPC isn't configured
+ */
 
 void sem_exit (void)
 {
     return;
 }
 
-void shm_exit (void)
-{
-    return;
-}
-
-int shm_swap (int prio)
+int shm_swap (int prio, unsigned long limit)
 {
     return 0;
 }
 
-void shm_no_page (unsigned long *ptent)
+asmlinkage int sys_semget (key_t key, int nsems, int semflg)
 {
-    return;
+	return -ENOSYS;
 }
 
+asmlinkage int sys_semop (int semid, struct sembuf *sops, unsigned nsops)
+{
+	return -ENOSYS;
+}
+
+asmlinkage int sys_semctl (int semid, int semnum, int cmd, union semun arg)
+{
+	return -ENOSYS;
+}
+
+asmlinkage int sys_msgget (key_t key, int msgflg)
+{
+	return -ENOSYS;
+}
+
+asmlinkage int sys_msgsnd (int msqid, struct msgbuf *msgp, size_t msgsz, int msgflg)
+{
+	return -ENOSYS;
+}
+
+asmlinkage int sys_msgrcv (int msqid, struct msgbuf *msgp, size_t msgsz, long msgtyp,
+		       int msgflg)
+{
+	return -ENOSYS;
+}
+
+asmlinkage int sys_msgctl (int msqid, int cmd, struct msqid_ds *buf)
+{
+	return -ENOSYS;
+}
+
+asmlinkage int sys_shmget (key_t key, int size, int flag)
+{
+	return -ENOSYS;
+}
+
+asmlinkage int sys_shmat (int shmid, char *shmaddr, int shmflg, ulong *addr)
+{
+	return -ENOSYS;
+}
+
+asmlinkage int sys_shmdt (char *shmaddr)
+{
+	return -ENOSYS;
+}
+
+asmlinkage int sys_shmctl (int shmid, int cmd, struct shmid_ds *buf)
+{
+	return -ENOSYS;
+}
+
+void kerneld_exit(void)
+{
+}
 #endif /* CONFIG_SYSVIPC */

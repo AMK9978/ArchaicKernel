@@ -11,17 +11,38 @@
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
-#include <linux/minix_fs.h>
+#include <linux/mm.h>
+#include <linux/proc_fs.h>
 #include <linux/stat.h>
 
 static int proc_readlink(struct inode *, char *, int);
-static int proc_follow_link(struct inode *, struct inode *, int, int, struct inode **);
+static int proc_follow_link(struct inode *, struct inode *, int, int,
+			    struct inode **);
+
+/*
+ * PLAN9_SEMANTICS won't work any more: it used an ugly hack that broke 
+ * when the files[] array was updated only after the open code
+ */
+#undef PLAN9_SEMANTICS
 
 /*
  * links can't do much...
  */
+static struct file_operations proc_fd_link_operations = {
+	NULL,			/* lseek - default */
+	NULL,			/* read - bad */
+	NULL,			/* write - bad */
+	NULL,			/* readdir - bad */
+	NULL,			/* select - default */
+	NULL,			/* ioctl - default */
+	NULL,			/* mmap */
+	NULL,			/* very special open code */
+	NULL,			/* no special release code */
+	NULL			/* can't fsync */
+};
+
 struct inode_operations proc_link_inode_operations = {
-	NULL,			/* no file-operations */
+	&proc_fd_link_operations,/* file-operations */
 	NULL,			/* create */
 	NULL,			/* lookup */
 	NULL,			/* link */
@@ -33,75 +54,84 @@ struct inode_operations proc_link_inode_operations = {
 	NULL,			/* rename */
 	proc_readlink,		/* readlink */
 	proc_follow_link,	/* follow_link */
+	NULL,			/* readpage */
+	NULL,			/* writepage */
 	NULL,			/* bmap */
 	NULL,			/* truncate */
 	NULL			/* permission */
 };
+
 
 static int proc_follow_link(struct inode * dir, struct inode * inode,
 	int flag, int mode, struct inode ** res_inode)
 {
 	unsigned int pid, ino;
 	struct task_struct * p;
-	int i;
+	struct inode * new_inode;
+	int i, error;
 
 	*res_inode = NULL;
 	if (dir)
 		iput(dir);
 	if (!inode)
 		return -ENOENT;
-	if (!permission(inode, MAY_EXEC)) {
+	if ((error = permission(inode, MAY_EXEC)) != 0){
 		iput(inode);
-		return -EACCES;
+		return error;
 	}
 	ino = inode->i_ino;
 	pid = ino >> 16;
 	ino &= 0x0000ffff;
-	iput(inode);
 	for (i = 0 ; i < NR_TASKS ; i++)
 		if ((p = task[i]) && p->pid == pid)
 			break;
-	if (i >= NR_TASKS)
+	if (i >= NR_TASKS) {
+		iput(inode);
 		return -ENOENT;
-	inode = NULL;
+	}
+	new_inode = NULL;
 	switch (ino) {
-		case 4:
-			inode = p->pwd;
+		case PROC_PID_CWD:
+			if (!p->fs)
+				break;
+			new_inode = p->fs->pwd;
 			break;
-		case 5:
-			inode = p->root;
+		case PROC_PID_ROOT:
+			if (!p->fs)
+				break;
+			new_inode = p->fs->root;
 			break;
-		case 6:
-			inode = p->executable;
+		case PROC_PID_EXE: {
+			struct vm_area_struct * vma;
+			if (!p->mm)
+				break;
+			vma = p->mm->mmap;
+			while (vma) {
+				if (vma->vm_flags & VM_EXECUTABLE) {
+					new_inode = vma->vm_inode;
+					break;
+				}
+				vma = vma->vm_next;
+			}
 			break;
+		}
 		default:
 			switch (ino >> 8) {
-				case 1:
-					ino &= 0xff;
-					if (ino < NR_OPEN && p->filp[ino])
-						inode = p->filp[ino]->f_inode;
+			case PROC_PID_FD_DIR:
+				if (!p->files)
 					break;
-				case 2:
-					ino &= 0xff;
-					{ int j = ino;
-					  struct vm_area_struct * mpnt;
-					  for(mpnt = p->mmap; mpnt && j >= 0;
-					      mpnt = mpnt->vm_next){
-					    if(mpnt->vm_inode) {
-					      if(j == 0) {
-						inode = mpnt->vm_inode;
-						break;
-					      };
-					      j--;
-					    }
-					  }
-					};
+				ino &= 0xff;
+				if (ino < NR_OPEN && p->files->fd[ino]) {
+					new_inode = p->files->fd[ino]->f_inode;
+				}
+				break;
 			}
 	}
-	if (!inode)
+	iput(inode);
+	if (!new_inode)
 		return -ENOENT;
-	*res_inode = inode;
-	inode->i_count++;
+	*res_inode = new_inode;
+	new_inode->i_count++;
 	return 0;
 }
 
@@ -120,7 +150,7 @@ static int proc_readlink(struct inode * inode, char * buffer, int buflen)
 		return i;
 	if (!inode)
 		return -EIO;
-	dev = inode->i_dev;
+	dev = kdev_t_to_nr(inode->i_dev);
 	ino = inode->i_ino;
 	iput(inode);
 	i = sprintf(buf,"[%04x]:%u", dev, ino);
@@ -128,6 +158,6 @@ static int proc_readlink(struct inode * inode, char * buffer, int buflen)
 		buflen = i;
 	i = 0;
 	while (i < buflen)
-		put_fs_byte(buf[i++],buffer++);
+		put_user(buf[i++],buffer++);
 	return i;
 }

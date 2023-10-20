@@ -10,6 +10,8 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
+#include <linux/module.h>
+
 #include <linux/sched.h>
 #include <linux/ext_fs.h>
 #include <linux/kernel.h>
@@ -40,6 +42,7 @@ void ext_put_super(struct super_block *sb)
 	if (sb->u.ext_sb.s_firstfreeblock)
 		brelse (sb->u.ext_sb.s_firstfreeblock);
 	unlock_super(sb);
+	MOD_DEC_USE_COUNT;
 	return;
 }
 
@@ -59,14 +62,17 @@ struct super_block *ext_read_super(struct super_block *s,void *data,
 {
 	struct buffer_head *bh;
 	struct ext_super_block *es;
-	int dev = s->s_dev,block;
+	kdev_t dev = s->s_dev;
+	int block;
 
+	MOD_INC_USE_COUNT;
 	lock_super(s);
 	set_blocksize(dev, BLOCK_SIZE);
 	if (!(bh = bread(dev, 1, BLOCK_SIZE))) {
-		s->s_dev=0;
+		s->s_dev = 0;
 		unlock_super(s);
 		printk("EXT-fs: unable to read superblock\n");
+		MOD_DEC_USE_COUNT;
 		return NULL;
 	}
 	es = (struct ext_super_block *) bh->b_data;
@@ -87,8 +93,9 @@ struct super_block *ext_read_super(struct super_block *s,void *data,
 		s->s_dev = 0;
 		unlock_super(s);
 		if (!silent)
-			printk("VFS: Can't find an extfs filesystem on dev 0x%04x.\n",
-				   dev);
+			printk("VFS: Can't find an extfs filesystem on dev "
+			       "%s.\n", kdevname(dev));
+		MOD_DEC_USE_COUNT;
 		return NULL;
 	}
 	if (!s->u.ext_sb.s_firstfreeblocknumber)
@@ -99,6 +106,7 @@ struct super_block *ext_read_super(struct super_block *s,void *data,
 			printk("ext_read_super: unable to read first free block\n");
 			s->s_dev = 0;
 			unlock_super(s);
+			MOD_DEC_USE_COUNT;
 			return NULL;
 		}
 	if (!s->u.ext_sb.s_firstfreeinodenumber)
@@ -110,6 +118,7 @@ struct super_block *ext_read_super(struct super_block *s,void *data,
 			brelse(s->u.ext_sb.s_firstfreeblock);
 			s->s_dev = 0;
 			unlock_super (s);
+			MOD_DEC_USE_COUNT;
 			return NULL;
 		}
 	}
@@ -118,8 +127,9 @@ struct super_block *ext_read_super(struct super_block *s,void *data,
 	s->s_dev = dev;
 	s->s_op = &ext_sops;
 	if (!(s->s_mounted = iget(s,EXT_ROOT_INO))) {
-		s->s_dev=0;
+		s->s_dev = 0;
 		printk("EXT-fs: get root inode failed\n");
+		MOD_DEC_USE_COUNT;
 		return NULL;
 	}
 	return s;
@@ -139,31 +149,29 @@ void ext_write_super (struct super_block *sb)
 	es->s_freeblockscount = sb->u.ext_sb.s_freeblockscount;
 	es->s_firstfreeinode = sb->u.ext_sb.s_firstfreeinodenumber;
 	es->s_freeinodescount = sb->u.ext_sb.s_freeinodescount;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	brelse (bh);
 	sb->s_dirt = 0;
 }
 
-void ext_statfs (struct super_block *sb, struct statfs *buf)
+void ext_statfs (struct super_block *sb, struct statfs *buf, int bufsiz)
 {
-	long tmp;
+	struct statfs tmp;
 
-	put_fs_long(EXT_SUPER_MAGIC, &buf->f_type);
-	put_fs_long(1024, &buf->f_bsize);
-	put_fs_long(sb->u.ext_sb.s_nzones << sb->u.ext_sb.s_log_zone_size,
-		&buf->f_blocks);
-	tmp = ext_count_free_blocks(sb);
-	put_fs_long(tmp, &buf->f_bfree);
-	put_fs_long(tmp, &buf->f_bavail);
-	put_fs_long(sb->u.ext_sb.s_ninodes, &buf->f_files);
-	put_fs_long(ext_count_free_inodes(sb), &buf->f_ffree);
-	put_fs_long(EXT_NAME_LEN, &buf->f_namelen);
-	/* Don't know what value to put in buf->f_fsid */
+	tmp.f_type = EXT_SUPER_MAGIC;
+	tmp.f_bsize = 1024;
+	tmp.f_blocks = sb->u.ext_sb.s_nzones << sb->u.ext_sb.s_log_zone_size;
+	tmp.f_bfree = ext_count_free_blocks(sb);
+	tmp.f_bavail = tmp.f_bfree;
+	tmp.f_files = sb->u.ext_sb.s_ninodes;
+	tmp.f_ffree = ext_count_free_inodes(sb);
+	tmp.f_namelen = EXT_NAME_LEN;
+	memcpy_tofs(buf, &tmp, bufsiz);
 }
 
 #define inode_bmap(inode,nr) ((inode)->u.ext_i.i_data[(nr)])
 
-static int block_bmap(struct buffer_head * bh, int nr)
+static inline int block_bmap(struct buffer_head * bh, int nr)
 {
 	int tmp;
 
@@ -260,10 +268,10 @@ static struct buffer_head * block_getblk(struct inode * inode,
 
 	if (!bh)
 		return NULL;
-	if (!bh->b_uptodate) {
+	if (!buffer_uptodate(bh)) {
 		ll_rw_block(READ, 1, &bh);
 		wait_on_buffer(bh);
-		if (!bh->b_uptodate) {
+		if (!buffer_uptodate(bh)) {
 			brelse(bh);
 			return NULL;
 		}
@@ -296,7 +304,7 @@ repeat:
 		goto repeat;
 	}
 	*p = tmp;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	brelse(bh);
 	return result;
 }
@@ -338,11 +346,11 @@ struct buffer_head * ext_bread(struct inode * inode, int block, int create)
 	struct buffer_head * bh;
 
 	bh = ext_getblk(inode,block,create);
-	if (!bh || bh->b_uptodate) 
+	if (!bh || buffer_uptodate(bh)) 
 		return bh;
 	ll_rw_block(READ, 1, &bh);
 	wait_on_buffer(bh);
-	if (bh->b_uptodate)
+	if (buffer_uptodate(bh))
 		return bh;
 	brelse(bh);
 	return NULL;
@@ -367,7 +375,7 @@ void ext_read_inode(struct inode * inode)
 	inode->i_mtime = inode->i_atime = inode->i_ctime = raw_inode->i_time;
 	inode->i_blocks = inode->i_blksize = 0;
 	if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode))
-		inode->i_rdev = raw_inode->i_zone[0];
+		inode->i_rdev = to_kdev_t(raw_inode->i_zone[0]);
 	else for (block = 0; block < 12; block++)
 		inode->u.ext_i.i_data[block] = raw_inode->i_zone[block];
 	brelse(bh);
@@ -404,10 +412,10 @@ static struct buffer_head * ext_update_inode(struct inode * inode)
 	raw_inode->i_size = inode->i_size;
 	raw_inode->i_time = inode->i_mtime;
 	if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode))
-		raw_inode->i_zone[0] = inode->i_rdev;
+		raw_inode->i_zone[0] = kdev_t_to_nr(inode->i_rdev);
 	else for (block = 0; block < 12; block++)
 		raw_inode->i_zone[block] = inode->u.ext_i.i_data[block];
-	bh->b_dirt=1;
+	mark_buffer_dirty(bh, 1);
 	inode->i_dirt=0;
 	return bh;
 }
@@ -425,14 +433,15 @@ int ext_sync_inode (struct inode *inode)
 	struct buffer_head *bh;
 
 	bh = ext_update_inode(inode);
-	if (bh && bh->b_dirt)
+	if (bh && buffer_dirty(bh))
 	{
 		ll_rw_block(WRITE, 1, &bh);
 		wait_on_buffer(bh);
-		if (bh->b_req && !bh->b_uptodate)
+		if (buffer_req(bh) && !buffer_uptodate(bh))
 		{
-			printk ("IO error syncing ext inode [%04x:%08x]\n",
-				inode->i_dev, inode->i_ino);
+			printk ("IO error syncing ext inode ["
+				"%s:%08lx]\n",
+				kdevname(inode->i_dev), inode->i_ino);
 			err = -1;
 		}
 	}
@@ -442,3 +451,29 @@ int ext_sync_inode (struct inode *inode)
 	return err;
 }
 
+
+static struct file_system_type ext_fs_type = {
+        ext_read_super, "ext", 1, NULL
+};
+
+int init_ext_fs(void)
+{
+        return register_filesystem(&ext_fs_type);
+}
+
+#ifdef MODULE
+int init_module(void)
+{
+	int status;
+
+	if ((status = init_ext_fs()) == 0)
+		register_symtab(0);
+	return status;
+}
+
+void cleanup_module(void)
+{
+        unregister_filesystem(&ext_fs_type);
+}
+
+#endif

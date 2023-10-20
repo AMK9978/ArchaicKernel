@@ -22,8 +22,6 @@
 #include <linux/wait.h>
 #include <linux/socket.h>
 
-
-#define NSOCKETS	128		/* should be dynamic, later...	*/
 #define NPROTO		16		/* should be enough for now..	*/
 
 
@@ -42,6 +40,8 @@
 #define SYS_SHUTDOWN	13		/* sys_shutdown(2)		*/
 #define SYS_SETSOCKOPT	14		/* sys_setsockopt(2)		*/
 #define SYS_GETSOCKOPT	15		/* sys_getsockopt(2)		*/
+#define SYS_SENDMSG	16		/* sys_sendmsg(2)		*/
+#define SYS_RECVMSG	17		/* sys_recvmsg(2)		*/
 
 
 typedef enum {
@@ -53,10 +53,12 @@ typedef enum {
 } socket_state;
 
 #define SO_ACCEPTCON	(1<<16)		/* performed a listen		*/
+#define SO_WAITDATA	(1<<17)		/* wait data to read		*/
+#define SO_NOSPACE	(1<<18)		/* no space to write		*/
 
-
+#ifdef __KERNEL__
 /*
- * Internel representation of a socket. not all the fields are used by
+ * Internal representation of a socket. not all the fields are used by
  * all configurations:
  *
  *		server			client
@@ -77,6 +79,8 @@ struct socket {
   struct socket		*next;
   struct wait_queue	**wait;		/* ptr to place to wait on	*/
   struct inode		*inode;
+  struct fasync_struct  *fasync_list;	/* Asynchronous wake up list	*/
+  struct file		*file;		/* File back pointer for gc	*/
 };
 
 #define SOCK_INODE(S)	((S)->inode)
@@ -96,23 +100,11 @@ struct proto_ops {
 			 int flags);
   int	(*getname)	(struct socket *sock, struct sockaddr *uaddr,
 			 int *usockaddr_len, int peer);
-  int	(*read)		(struct socket *sock, char *ubuf, int size,
-			 int nonblock);
-  int	(*write)	(struct socket *sock, char *ubuf, int size,
-			 int nonblock);
   int	(*select)	(struct socket *sock, int sel_type,
 			 select_table *wait);
   int	(*ioctl)	(struct socket *sock, unsigned int cmd,
 			 unsigned long arg);
   int	(*listen)	(struct socket *sock, int len);
-  int	(*send)		(struct socket *sock, void *buff, int len, int nonblock,
-			 unsigned flags);
-  int	(*recv)		(struct socket *sock, void *buff, int len, int nonblock,
-			 unsigned flags);
-  int	(*sendto)	(struct socket *sock, void *buff, int len, int nonblock,
-			 unsigned flags, struct sockaddr *, int addr_len);
-  int	(*recvfrom)	(struct socket *sock, void *buff, int len, int nonblock,
-			 unsigned flags, struct sockaddr *, int *addr_len);
   int	(*shutdown)	(struct socket *sock, int flags);
   int	(*setsockopt)	(struct socket *sock, int level, int optname,
 			 char *optval, int optlen);
@@ -120,11 +112,19 @@ struct proto_ops {
 			 char *optval, int *optlen);
   int	(*fcntl)	(struct socket *sock, unsigned int cmd,
 			 unsigned long arg);	
+  int   (*sendmsg)	(struct socket *sock, struct msghdr *m, int total_len, int nonblock, int flags);
+  int   (*recvmsg)	(struct socket *sock, struct msghdr *m, int total_len, int nonblock, int flags, int *addr_len);
 };
 
+struct net_proto {
+	const char *name;		/* Protocol name */
+	void (*init_func)(struct net_proto *);	/* Bootstrap */
+};
 
-extern int	sock_awaitconn(struct socket *mysock, struct socket *servsock);
+extern int	sock_wake_async(struct socket *sock, int how);
 extern int	sock_register(int family, struct proto_ops *ops);
-
-
+extern int	sock_unregister(int family);
+extern struct socket *sock_alloc(void);
+extern void	sock_release(struct socket *sock);
+#endif /* __KERNEL__ */
 #endif	/* _LINUX_NET_H */

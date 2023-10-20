@@ -7,7 +7,7 @@
  * 	drew@colorado.edu
  *      +1 (303) 666-5836
  *
- * DISTRIBUTION RELEASE 4
+ * DISTRIBUTION RELEASE 7
  *
  * For more information, please consult 
  *
@@ -23,23 +23,13 @@
 
 /*
  * $Log: NCR5380.h,v $
- * Revision 1.3  1994/01/19  05:24:40  drew
- * Added support for TCR LAST_BYTE_SENT bit.
- *
- * Revision 1.3  1994/01/19  05:24:40  drew
- * Added support for TCR LAST_BYTE_SENT bit.
- *
- * Revision 1.2  1994/01/15  06:14:11  drew
- * REAL DMA support, bug fixes.
- *
- * Revision 1.1  1994/01/15  06:00:54  drew
- * Initial revision
  */
 
 #ifndef NCR5380_H
 #define NCR5380_H
 
-#define NCR5380_PUBLIC_RELEASE 4
+#define NCR5380_PUBLIC_RELEASE 7
+#define NCR53C400_PUBLIC_RELEASE 2
 
 #define NDEBUG_ARBITRATION	0x1
 #define NDEBUG_AUTOSENSE	0x2
@@ -59,12 +49,17 @@
 #define NDEBUG_SELECTION	0x8000
 #define NDEBUG_USLEEP		0x10000
 #define NDEBUG_LAST_BYTE_SENT	0x20000
+#define NDEBUG_RESTART_SELECT	0x40000
+#define NDEBUG_EXTENDED		0x80000
+#define NDEBUG_C400_PREAD	0x100000
+#define NDEBUG_C400_PWRITE	0x200000
+#define NDEBUG_LISTS		0x400000
 
 /* 
  * The contents of the OUTPUT DATA register are asserted on the bus when
- * either arbitration is occuring or the phase-indicating signals (
+ * either arbitration is occurring or the phase-indicating signals (
  * IO, CD, MSG) in the TARGET COMMAND register and the ASSERT DATA
- * bit in the INTITIATOR COMMAND register is set.
+ * bit in the INITIATOR COMMAND register is set.
  */
 
 #define OUTPUT_DATA_REG         0       /* wo DATA lines on SCSI bus */
@@ -98,7 +93,7 @@
 #define MR_TARGET		0x40	/* rw target mode */
 #define MR_ENABLE_PAR_CHECK   0x20	/* rw enable parity checking */
 #define MR_ENABLE_PAR_INTR	0x10	/* rw enable bad parity interrupt */
-#define MR_ENABLE_EOP_INTR	0x08	/* rw enabble eop interrupt */
+#define MR_ENABLE_EOP_INTR	0x08	/* rw enable eop interrupt */
 #define MR_MONITOR_BSY	0x04	/* rw enable int on unexpected bsy fail */
 #define MR_DMA_MODE		0x02	/* rw DMA / pseudo DMA mode */
 #define MR_ARBITRATE		0x01	/* rw start arbitration */
@@ -155,25 +150,53 @@
  */
 #define INPUT_DATA_REG			6	/* ro */
 
-/* Write any value to this register to start a DMA recieve */
-#define START_DMA_TARGET_RECIEVE_REG	6	/* wo */
+/* Write any value to this register to start a DMA receive */
+#define START_DMA_TARGET_RECEIVE_REG	6	/* wo */
 
 /* Read this register to clear interrupt conditions */
 #define RESET_PARITY_INTERRUPT_REG	7	/* ro */
 
-/* Write any value to this register to start an ini mode DMA recieve */
-#define START_DMA_INITIATOR_RECIEVE_REG 7	/* wo */
+/* Write any value to this register to start an ini mode DMA receive */
+#define START_DMA_INITIATOR_RECEIVE_REG 7	/* wo */
+
+#define C400_CONTROL_STATUS_REG NCR53C400_register_offset-8      /* rw */
+
+#define CSR_RESET              0x80    /* wo  Resets 53c400 */
+#define CSR_53C80_REG          0x80    /* ro  5380 registers busy */
+#define CSR_TRANS_DIR          0x40    /* rw  Data transfer direction */
+#define CSR_SCSI_BUFF_INTR     0x20    /* rw  Enable int on transfer ready */
+#define CSR_53C80_INTR         0x10    /* rw  Enable 53c80 interrupts */
+#define CSR_SHARED_INTR        0x08    /* rw  Interrupt sharing */
+#define CSR_HOST_BUF_NOT_RDY   0x04    /* ro  Is Host buffer ready */
+#define CSR_SCSI_BUF_RDY       0x02    /* ro  SCSI buffer read */
+#define CSR_GATED_53C80_IRQ    0x01    /* ro  Last block xferred */
+
+#if 0
+#define CSR_BASE CSR_SCSI_BUFF_INTR | CSR_53C80_INTR
+#else
+#define CSR_BASE CSR_53C80_INTR
+#endif
+
+/* Number of 128-byte blocks to be transferred */
+#define C400_BLOCK_COUNTER_REG   NCR53C400_register_offset-7      /* rw */
+
+/* Resume transfer after disconnect */
+#define C400_RESUME_TRANSFER_REG NCR53C400_register_offset-6      /* wo */
+
+/* Access to host buffer stack */
+#define C400_HOST_BUFFER         NCR53C400_register_offset-4      /* rw */
+
 
 /* Note : PHASE_* macros are based on the values of the STATUS register */
 #define PHASE_MASK 	(SR_MSG | SR_CD | SR_IO)
 
-#define PHASE_DATAOUT	0
-#define PHASE_DATAIN	SR_IO
-#define PHASE_CMDOUT	SR_CD
-#define PHASE_STATIN	(SR_CD | SR_IO)
-#define PHASE_MSGOUT	(SR_MSG | SR_CD)
-#define PHASE_MSGIN	(SR_MSG | SR_CD | SR_IO)
-#define PHASE_UNKNOWN	0xff
+#define PHASE_DATAOUT		0
+#define PHASE_DATAIN		SR_IO
+#define PHASE_CMDOUT		SR_CD
+#define PHASE_STATIN		(SR_CD | SR_IO)
+#define PHASE_MSGOUT		(SR_MSG | SR_CD)
+#define PHASE_MSGIN		(SR_MSG | SR_CD | SR_IO)
+#define PHASE_UNKNOWN		0xff
 
 /* 
  * Convert status register phase to something we can use to set phase in 
@@ -215,11 +238,16 @@
 
 #define FLAG_HAS_LAST_BYTE_SENT		1	/* NCR53c81 or better */
 #define FLAG_CHECK_LAST_BYTE_SENT	2	/* Only test once */
+#define FLAG_NCR53C400			4	/* NCR53c400 */
+#define FLAG_NO_PSEUDO_DMA		8	/* Inhibit DMA */
 
 #ifndef ASM
 struct NCR5380_hostdata {
-    NCR5380_implementation_fields;		/* implmenentation specific */
+    NCR5380_implementation_fields;		/* implementation specific */
     unsigned char id_mask, id_higher_mask;	/* 1 << id, all bits greater */
+    unsigned char targets_present;		/* targets we have connected
+						   to, so we can call a select
+						   failure a retryable condition */
     volatile unsigned char busy[8];		/* index = target, bit = lun */
 #if defined(REAL_DMA) || defined(REAL_DMA_POLL)
     volatile int dma_len;			/* requested length of DMA */
@@ -228,10 +256,23 @@ struct NCR5380_hostdata {
     volatile Scsi_Cmnd *connected;		/* currently connected command */
     volatile Scsi_Cmnd *issue_queue;		/* waiting to be issued */
     volatile Scsi_Cmnd *disconnected_queue;	/* waiting for reconnect */
+    volatile int restart_select;		/* we have disconnected,
+						   used to restart 
+						   NCR5380_select() */
+    volatile unsigned aborted:1;		/* flag, says aborted */
     int flags;
 #ifdef USLEEP
     unsigned long time_expires;			/* in jiffies, set prior to sleeping */
     struct Scsi_Host *next_timer;
+#endif
+#ifdef NCR5380_STATS
+    unsigned timebase;				/* Base for time calcs */
+    long time_read[8];				/* time to do reads */
+    long time_write[8];				/* time to do writes */
+    unsigned long bytes_read[8];		/* bytes read */
+    unsigned long bytes_write[8];		/* bytes written */
+    unsigned pendingr;
+    unsigned pendingw;
 #endif
 };
 
@@ -241,19 +282,23 @@ static struct Scsi_Host *first_instance;		/* linked list of 5380's */
 #if defined(AUTOPROBE_IRQ)
 static int NCR5380_probe_irq (struct Scsi_Host *instance, int possible);
 #endif
-static void NCR5380_init (struct Scsi_Host *instance);
+static void NCR5380_init (struct Scsi_Host *instance, int flags);
 static void NCR5380_information_transfer (struct Scsi_Host *instance);
-static void NCR5380_intr (int irq);
+#ifndef DONT_USE_INTR
+static void NCR5380_intr (int irq, void *dev_id, struct pt_regs * regs);
+#endif
 static void NCR5380_main (void);
 static void NCR5380_print_options (struct Scsi_Host *instance);
+static void NCR5380_print_phase (struct Scsi_Host *instance);
+static void NCR5380_print (struct Scsi_Host *instance);
 #ifndef NCR5380_abort
 static
 #endif
-int NCR5380_abort (Scsi_Cmnd *cmd, int code);
+int NCR5380_abort (Scsi_Cmnd *cmd);
 #ifndef NCR5380_reset
 static
 #endif
-int NCR5380_reset (Scsi_Cmnd *cmd);
+int NCR5380_reset (Scsi_Cmnd *cmd, unsigned int reset_flags);
 #ifndef NCR5380_queue_command
 static 
 #endif
@@ -264,10 +309,10 @@ static void NCR5380_reselect (struct Scsi_Host *instance);
 static int NCR5380_select (struct Scsi_Host *instance, Scsi_Cmnd *cmd, int tag);
 #if defined(PSEUDO_DMA) || defined(REAL_DMA) || defined(REAL_DMA_POLL)
 static int NCR5380_transfer_dma (struct Scsi_Host *instance,
-        unsigned char *phase, int *count, unsigned char **data);
+	unsigned char *phase, int *count, unsigned char **data);
 #endif
 static int NCR5380_transfer_pio (struct Scsi_Host *instance,
-        unsigned char *phase, int *count, unsigned char **data);
+	unsigned char *phase, int *count, unsigned char **data);
 
 #if (defined(REAL_DMA) || defined(REAL_DMA_POLL)) && defined(i386)
 static __inline__ int NCR5380_i386_dma_setup (struct Scsi_Host *instance,
@@ -287,7 +332,7 @@ static __inline__ int NCR5380_i386_dma_setup (struct Scsi_Host *instance,
     if (count > limit) count = limit;
 
     if ((count & 1) || (((unsigned) ptr) & 1))
-	panic ("scsi%d : attmpted unaligned DMA transfer\n", instance->host_no);
+	panic ("scsi%d : attempted unaligned DMA transfer\n", instance->host_no);
     cli();
     disable_dma(instance->dma_channel);
     clear_dma_ff(instance->dma_channel);

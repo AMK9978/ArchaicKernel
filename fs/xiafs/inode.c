@@ -9,6 +9,8 @@
  *  This software may be redistributed per Linux Copyright.
  */
 
+#include <linux/module.h>
+
 #include <linux/sched.h>
 #include <linux/xia_fs.h>
 #include <linux/kernel.h>
@@ -43,6 +45,7 @@ void xiafs_put_super(struct super_block *sb)
     for(i = 0 ; i < _XIAFS_ZMAP_SLOTS ; i++)
         brelse(sb->u.xiafs_sb.s_zmap_buf[i]);
     unlock_super(sb);
+    MOD_DEC_USE_COUNT;
 }
 
 static struct super_operations xiafs_sops = { 
@@ -61,17 +64,20 @@ struct super_block *xiafs_read_super(struct super_block *s, void *data,
 {
     struct buffer_head *bh;
     struct xiafs_super_block *sp;
-    int i, z, dev;
+    int i, z;
+    kdev_t dev;
 
-    dev=s->s_dev;
+    MOD_INC_USE_COUNT;
+    dev = s->s_dev;
     lock_super(s);
 
     set_blocksize(dev, BLOCK_SIZE);
 
     if (!(bh = bread(dev, 0, BLOCK_SIZE))) {
-        s->s_dev=0;
+        s->s_dev = 0;
 	unlock_super(s);
 	printk("XIA-FS: read super_block failed (%s %d)\n", WHERE_ERR);
+	MOD_DEC_USE_COUNT;
 	return NULL;
     }
     sp = (struct xiafs_super_block *) bh->b_data;
@@ -81,8 +87,9 @@ struct super_block *xiafs_read_super(struct super_block *s, void *data,
 	unlock_super(s);
 	brelse(bh);
 	if (!silent)
-		printk("VFS: Can't find a xiafs filesystem on dev 0x%04x.\n",
-		   dev);
+		printk("VFS: Can't find a xiafs filesystem on dev "
+		       "%s.\n", kdevname(dev));
+	MOD_DEC_USE_COUNT;
 	return NULL;
     }
     s->s_blocksize = sp->s_zone_size;
@@ -93,7 +100,10 @@ struct super_block *xiafs_read_super(struct super_block *s, void *data,
       brelse(bh);
       set_blocksize(dev, s->s_blocksize);
       bh = bread (dev, 0,  s->s_blocksize);
-      if(!bh) return NULL;
+      if(!bh) {
+	MOD_DEC_USE_COUNT;
+	return NULL;
+      }
       sp = (struct xiafs_super_block *) (((char *)bh->b_data) + BLOCK_SIZE) ;
     };
     s->u.xiafs_sb.s_nzones = sp->s_nzones;
@@ -149,26 +159,26 @@ xiafs_read_super_fail:
         brelse(s->u.xiafs_sb.s_imap_buf[i]);
     for(i=0; i < _XIAFS_ZMAP_SLOTS; i++)
         brelse(s->u.xiafs_sb.s_zmap_buf[i]);
-    s->s_dev=0;
+    s->s_dev = 0;
     unlock_super(s);
     printk("XIA-FS: read bitmaps failed (%s %d)\n", WHERE_ERR);
+    MOD_DEC_USE_COUNT;
     return NULL;
 }
 
-void xiafs_statfs(struct super_block *sb, struct statfs *buf)
+void xiafs_statfs(struct super_block *sb, struct statfs *buf, int bufsiz)
 {
-    long tmp;
+	struct statfs tmp;
 
-    put_fs_long(_XIAFS_SUPER_MAGIC, &buf->f_type);
-    put_fs_long(XIAFS_ZSIZE(sb), &buf->f_bsize);
-    put_fs_long(sb->u.xiafs_sb.s_ndatazones, &buf->f_blocks);
-    tmp = xiafs_count_free_zones(sb);
-    put_fs_long(tmp, &buf->f_bfree);
-    put_fs_long(tmp, &buf->f_bavail);
-    put_fs_long(sb->u.xiafs_sb.s_ninodes, &buf->f_files);
-    put_fs_long(xiafs_count_free_inodes(sb), &buf->f_ffree);
-    put_fs_long(_XIAFS_NAME_LEN, &buf->f_namelen);
-    /* don't know what should be put in buf->f_fsid */
+	tmp.f_type = _XIAFS_SUPER_MAGIC;
+	tmp.f_bsize = XIAFS_ZSIZE(sb);
+	tmp.f_blocks = sb->u.xiafs_sb.s_ndatazones;
+	tmp.f_bfree = xiafs_count_free_zones(sb);
+	tmp.f_bavail = tmp.f_bfree;
+	tmp.f_files = sb->u.xiafs_sb.s_ninodes;
+	tmp.f_ffree = xiafs_count_free_inodes(sb);
+	tmp.f_namelen = _XIAFS_NAME_LEN;
+	memcpy_tofs(buf, &tmp, bufsiz);
 }
 
 static int zone_bmap(struct buffer_head * bh, int nr)
@@ -270,10 +280,10 @@ indt_getblk(struct inode * inode, struct buffer_head * bh,
 
     if (!bh)
         return NULL;
-    if (!bh->b_uptodate) {
+    if (!buffer_uptodate(bh)) {
         ll_rw_block(READ, 1, &bh);
 	wait_on_buffer(bh);
-	if (!bh->b_uptodate) {
+	if (!buffer_uptodate(bh)) {
 	    brelse(bh);
 	    return NULL;
 	}
@@ -306,7 +316,7 @@ repeat:
     }
     *lp = tmp;
     inode->i_blocks+=2 << XIAFS_ZSHIFT(inode->i_sb);
-    bh->b_dirt = 1;
+    mark_buffer_dirty(bh, 1);
     brelse(bh);
     return result;
 }
@@ -349,11 +359,11 @@ struct buffer_head * xiafs_bread(struct inode * inode, int zone, int create)
     struct buffer_head * bh;
 
     bh = xiafs_getblk(inode, zone, create);
-    if (!bh || bh->b_uptodate)
+    if (!bh || buffer_uptodate(bh))
         return bh;
     ll_rw_block(READ, 1, &bh);
     wait_on_buffer(bh);
-    if (bh->b_uptodate)
+    if (buffer_uptodate(bh))
         return bh;
     brelse(bh);
     return NULL;
@@ -393,7 +403,7 @@ void xiafs_read_inode(struct inode * inode)
     inode->i_blksize = XIAFS_ZSIZE(inode->i_sb);
     if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode)) {
         inode->i_blocks=0;
-        inode->i_rdev = raw_inode->i_zone[0];
+        inode->i_rdev = to_kdev_t(raw_inode->i_zone[0]);
     } else {
         XIAFS_GET_BLOCKS(raw_inode, inode->i_blocks);
         for (zone = 0; zone < 8; zone++)
@@ -454,7 +464,7 @@ static struct buffer_head *  xiafs_update_inode(struct inode * inode)
     raw_inode->i_ctime = inode->i_ctime;
     raw_inode->i_mtime = inode->i_mtime;
     if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode))
-        raw_inode->i_zone[0] = inode->i_rdev;
+        raw_inode->i_zone[0] = kdev_t_to_nr(inode->i_rdev);
     else {
         XIAFS_PUT_BLOCKS(raw_inode, inode->i_blocks);
         for (zone = 0; zone < 8; zone++)
@@ -466,7 +476,7 @@ static struct buffer_head *  xiafs_update_inode(struct inode * inode)
 	                             | (inode->u.xiafs_i.i_dind_zone  & 0xffffff);
     }
     inode->i_dirt=0;
-    bh->b_dirt=1;
+    mark_buffer_dirty(bh, 1);
     return bh;
 }
 
@@ -484,14 +494,14 @@ int xiafs_sync_inode (struct inode *inode)
     struct buffer_head *bh;
 
     bh = xiafs_update_inode(inode);
-    if (bh && bh->b_dirt)
+    if (bh && buffer_dirty(bh))
     {
     	ll_rw_block(WRITE, 1, &bh);
     	wait_on_buffer(bh);
-    	if (bh->b_req && !bh->b_uptodate)
+    	if (buffer_req(bh) && !buffer_uptodate(bh))
     	{
-    	    printk ("IO error syncing xiafs inode [%04X:%lu]\n",
-		    inode->i_dev, inode->i_ino);
+    	    printk ("IO error syncing xiafs inode [%s:%lu]\n",
+		    kdevname(inode->i_dev), inode->i_ino);
     	    err = -1;
     	}
     }
@@ -500,3 +510,31 @@ int xiafs_sync_inode (struct inode *inode)
     brelse (bh);
     return err;
 }
+
+/* Every kernel module contains stuff like this. */
+
+static struct file_system_type xiafs_fs_type = {
+	xiafs_read_super, "xiafs", 1, NULL
+};
+
+int init_xiafs_fs(void)
+{
+        return register_filesystem(&xiafs_fs_type);
+}
+
+#ifdef MODULE
+int init_module(void)
+{
+	int status;
+
+	if ((status = init_xiafs_fs()) == 0)
+		register_symtab(0);
+	return status;
+}
+
+void cleanup_module(void)
+{
+	unregister_filesystem(&xiafs_fs_type);
+}
+
+#endif

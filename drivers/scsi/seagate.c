@@ -11,13 +11,13 @@
  *		the status register flipped, I'll fix this "RSN"
  *
  *      This card does all the I/O via memory mapped I/O, so there is no need
- *      to check or snarf a region of the I/O address space.
+ *      to check or allocate a region of the I/O address space.
  */
 
 /*
  * Configuration : 
  * To use without BIOS -DOVERRIDE=base_address -DCONTROLLER=FD or SEAGATE
- * -DIRQ will overide the default of 5.
+ * -DIRQ will override the default of 5.
  * Note: You can now set these options from the kernel's "command line".
  * The syntax is:
  *
@@ -33,12 +33,12 @@
  * -DFAST or -DFAST32 will use blind transfers where possible
  *
  * -DARBITRATE will cause the host adapter to arbitrate for the 
- *	bus for better SCSI-II compatability, rather than just 
+ *	bus for better SCSI-II compatibility, rather than just 
  *	waiting for BUS FREE and then doing its thing.  Should
  *	let us do one command per Lun when I integrate my 
  *	reorganization changes into the distribution sources.
  *
- * -DSLOW_HANDSHAKE will allow compatability with broken devices that don't 
+ * -DSLOW_HANDSHAKE will allow compatibility with broken devices that don't 
  *	handshake fast enough (ie, some CD ROM's) for the Seagate
  * 	code.
  *
@@ -46,19 +46,27 @@
  *	transfer rate if handshaking isn't working correctly.
  */
 
-#include <linux/config.h>
+#include <linux/module.h>
 
-#if defined(CONFIG_SCSI_SEAGATE) || defined(CONFIG_SCSI_FD_8xx) 
 #include <asm/io.h>
 #include <asm/system.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/string.h>
-#include "../block/blk.h"
+#include <linux/config.h>
+#include <linux/proc_fs.h>
+
+#include <linux/blk.h>
 #include "scsi.h"
 #include "hosts.h"
 #include "seagate.h"
 #include "constants.h"
+#include<linux/stat.h>
+
+struct proc_dir_entry proc_scsi_seagate = {
+    PROC_SCSI_SEAGATE, 7, "seagate",
+    S_IFDIR | S_IRUGO | S_IXUGO, 2
+};
 
 
 #ifndef IRQ
@@ -91,12 +99,14 @@ static int incommand;			/*
 						in some command phase.
 					*/
 
-static void *base_address = NULL;	/*
+static const void *base_address = NULL;	/*
 						Where the card ROM starts,
 						used to calculate memory mapped
 						register location.
 					*/
+#ifdef notyet
 static volatile int abort_confirm = 0;
+#endif
 
 static volatile void *st0x_cr_sr;       /*
 						control register write,
@@ -147,7 +157,7 @@ static const char *  seagate_bases[] = {
 };
 
 typedef struct {
-	char *signature ;
+	const char *signature ;
 	unsigned offset;
 	unsigned length;
 	unsigned char type;
@@ -169,7 +179,7 @@ static const Signature signatures[] = {
 {"SEAGATE SCSI BIOS ",17, 17, SEAGATE},
 
 /*
- * However, future domain makes several incompatable SCSI boards, so specific
+ * However, future domain makes several incompatible SCSI boards, so specific
  * signatures must be used.
  */
 
@@ -179,6 +189,7 @@ static const Signature signatures[] = {
 {"FUTURE DOMAIN CORP. (C) 1986-1990 V6.0209/18/90",5, 47, FD},
 {"FUTURE DOMAIN CORP. (C) 1986-1990 V7.009/18/90", 5, 46, FD},
 {"FUTURE DOMAIN CORP. (C) 1992 V8.00.004/02/92",   5, 44, FD},
+{"IBM F1 BIOS V1.1004/30/92",			   5, 25, FD},
 {"FUTURE DOMAIN TMC-950",                        5, 21, FD},
 #endif /* CONFIG_SCSI_SEAGATE */
 }
@@ -192,7 +203,7 @@ static const Signature signatures[] = {
  */
 
 static int hostno = -1;
-static void seagate_reconnect_intr(int);
+static void seagate_reconnect_intr(int, void *, struct pt_regs *);
 
 #ifdef FAST
 static int fast = 1;
@@ -226,7 +237,7 @@ static int fast = 1;
  * Wait for a low->high transition before continuing with that 
  * transfer.  If we timeout, continue anyways.  We don't need 
  * a long timeout, because REQ should only be asserted until the 
- * corresponding ACK is recieved and processed.
+ * corresponding ACK is received and processed.
  *
  * Note that we can't use the system timer for this, because of 
  * resolution, and we *really* can't use the timer chip since 
@@ -245,7 +256,7 @@ static void borken_init (void) {
 
 /* 
  * Ok, we now have a count for .25 seconds.  Convert to a 
- * count per second and divide by transer rate in K.
+ * count per second and divide by transfer rate in K.
  */
 
   borken_calibration =  (count * 4) / (SLOW_RATE*1024);
@@ -262,33 +273,27 @@ static inline void borken_wait(void) {
   register int count;
   for (count = borken_calibration; count && (STATUS & STAT_REQ); 
   	--count);
-  if (count)
 #if (DEBUG & DEBUG_BORKEN) 
+  if (count)
   	printk("scsi%d : borken timeout\n", hostno);
-#else
-	;
 #endif 
 }
 
 #endif /* def SLOW_HANDSHAKE */
 
-int seagate_st0x_detect (int hostnum)
+int seagate_st0x_detect (Scsi_Host_Template * tpnt)
 	{
+     struct Scsi_Host *instance;
 #ifndef OVERRIDE
 	int i,j;
 #endif 
-static struct sigaction seagate_sigaction = {
-	&seagate_reconnect_intr,
-	0,
-	SA_INTERRUPT,
-	NULL
-};
 
+     tpnt->proc_dir = &proc_scsi_seagate;
 /*
  *	First, we try for the manual override.
  */
 #ifdef DEBUG 
-	printk("Autodetecting seagate ST0x\n");
+	printk("Autodetecting ST0x / TMC-8xx\n");
 #endif
 	
 	if (hostno != -1)
@@ -298,7 +303,7 @@ static struct sigaction seagate_sigaction = {
 		}
 
       /* If the user specified the controller type from the command line,
-         controller_type will be non-zero, so don't try and detect one */
+	 controller_type will be non-zero, so don't try to detect one */
 
 	if (!controller_type) {
 #ifdef OVERRIDE
@@ -314,11 +319,11 @@ static struct sigaction seagate_sigaction = {
 	printk("Base address overridden to %x, controller type is %s\n",
 		base_address,controller_type == SEAGATE ? "SEAGATE" : "FD");
 #endif 
-#else /* OVERIDE */	
+#else /* OVERRIDE */	
 /*
  *	To detect this card, we simply look for the signature
  *	from the BIOS version notice in all the possible locations
- *	of the ROM's.  This has a nice sideeffect of not trashing
+ *	of the ROM's.  This has a nice side effect of not trashing
  * 	any register locations that might be used by something else.
  *
  * XXX - note that we probably should be probing the address
@@ -327,72 +332,105 @@ static struct sigaction seagate_sigaction = {
 
 	for (i = 0; i < (sizeof (seagate_bases) / sizeof (char  * )); ++i)
 		for (j = 0; !base_address && j < NUM_SIGNATURES; ++j)
-		if (!memcmp ((void *) (seagate_bases[i] +
-		    signatures[j].offset), (void *) signatures[j].signature,
+		if (!memcmp ((const void *) (seagate_bases[i] +
+		    signatures[j].offset), (const void *) signatures[j].signature,
 		    signatures[j].length)) {
-			base_address = (void *) seagate_bases[i];
+			base_address = (const void *) seagate_bases[i];
 			controller_type = signatures[j].type;
 		}
-#endif /* OVERIDE */
+#endif /* OVERRIDE */
 	} /* (! controller_type) */
  
-	scsi_hosts[hostnum].this_id = (controller_type == SEAGATE) ? 7 : 6;
+	tpnt->this_id = (controller_type == SEAGATE) ? 7 : 6;
+	tpnt->name = (controller_type == SEAGATE) ? ST0X_ID_STR : FD_ID_STR;
 
 	if (base_address)
 		{
-		st0x_cr_sr =(void *) (((unsigned char *) base_address) + (controller_type == SEAGATE ? 0x1a00 : 0x1c00)); 
-		st0x_dr = (void *) (((unsigned char *) base_address ) + (controller_type == SEAGATE ? 0x1c00 : 0x1e00));
+		st0x_cr_sr =(void *) (((const unsigned char *) base_address) + (controller_type == SEAGATE ? 0x1a00 : 0x1c00)); 
+		st0x_dr = (void *) (((const unsigned char *) base_address ) + (controller_type == SEAGATE ? 0x1c00 : 0x1e00));
 #ifdef DEBUG
-		printk("ST0x detected. Base address = %x, cr = %x, dr = %x\n", base_address, st0x_cr_sr, st0x_dr);
+		printk("%s detected. Base address = %x, cr = %x, dr = %x\n", tpnt->name, base_address, st0x_cr_sr, st0x_dr);
 #endif
 /*
  *	At all times, we will use IRQ 5.  Should also check for IRQ3 if we 
  * 	loose our first interrupt.
  */
-		hostno = hostnum;
-		if (irqaction((int) irq, &seagate_sigaction)) {
+		instance = scsi_register(tpnt, 0);
+		hostno = instance->host_no;
+		if (request_irq((int) irq, seagate_reconnect_intr, SA_INTERRUPT,
+		   (controller_type == SEAGATE) ? "seagate" : "tmc-8xx", NULL)) {
 			printk("scsi%d : unable to allocate IRQ%d\n",
 				hostno, (int) irq);
 			return 0;
 		}
+		instance->irq = irq;
+		instance->io_port = (unsigned int) base_address;
 #ifdef SLOW_HANDSHAKE
 		borken_init();
 #endif
 		
+		printk("%s options:"
+#ifdef ARBITRATE
+		" ARBITRATE"
+#endif
+#ifdef SLOW_HANDSHAKE
+		" SLOW_HANDSHAKE"
+#endif
+#ifdef FAST
+#ifdef FAST32
+		" FAST32"
+#else
+		" FAST"
+#endif
+#endif
+#ifdef LINKED
+		" LINKED"
+#endif
+	      "\n", tpnt->name);
 		return 1;
 		}
 	else
 		{
 #ifdef DEBUG
-		printk("ST0x not detected.\n");
+		printk("ST0x / TMC-8xx not detected.\n");
 #endif
 		return 0;
 		}
 	}
 	 
-const char *seagate_st0x_info(void) {
-      static char buffer[256];
-        sprintf(buffer, "scsi%d : %s at irq %d address %p options :"
-#ifdef ARBITRATE
-" ARBITRATE"
-#endif
-#ifdef SLOW_HANDSHAKE
-" SLOW_HANDSHAKE"
-#endif
-#ifdef FAST
-#ifdef FAST32
-" FAST32"
-#else
-" FAST"
-#endif
-#endif
- 
-#ifdef LINKED
-" LINKED"
-#endif
-              "\n", hostno, (controller_type == SEAGATE) ? "seagate" : 
-              "FD TMC-8xx", irq, base_address);
-        return buffer;
+const char *seagate_st0x_info(struct Scsi_Host * shpnt) {
+      static char buffer[64];
+	sprintf(buffer, "%s at irq %d, address 0x%05X", 
+		(controller_type == SEAGATE) ? ST0X_ID_STR : FD_ID_STR,
+		irq, (unsigned int)base_address);
+	return buffer;
+}
+
+int seagate_st0x_proc_info(char *buffer, char **start, off_t offset,
+                               int length, int hostno, int inout)
+{
+       const char *info = seagate_st0x_info(NULL);
+       int len;
+       int pos;
+       int begin;
+
+       if (inout) return(-ENOSYS);
+
+       begin = 0;
+       strcpy(buffer,info);
+       strcat(buffer,"\n");
+
+       pos = len = strlen(buffer);
+
+       if (pos<offset) {
+               len = 0;
+               begin = pos;
+               }
+
+       *start = buffer + (offset - begin);
+       len -= (offset - begin);
+       if ( len > length ) len = length;
+       return(len);
 }
 
 /*
@@ -409,7 +447,7 @@ static int current_bufflen;
 #ifdef LINKED
 
 /* 
- * linked_connected indicates weather or not we are currently connected to 
+ * linked_connected indicates whether or not we are currently connected to 
  * linked_target, linked_lun and in an INFORMATION TRANSFER phase,
  * using linked commands.
  */
@@ -455,7 +493,7 @@ static int should_reconnect = 0;
  * asserting SEL.
  */
 
-static void seagate_reconnect_intr (int unused)
+static void seagate_reconnect_intr(int irq, void *dev_id, struct pt_regs *regs)
 	{
 	int temp;
 	Scsi_Cmnd * SCtmp;
@@ -533,7 +571,7 @@ int seagate_st0x_queue_command (Scsi_Cmnd * SCpnt,  void (*done)(Scsi_Cmnd *))
  * Set linked command bit in control field of SCSI command.
  */
 
-	  current_cmnd[COMMAND_SIZE(current_cmnd[0])] |= 0x01;
+	  current_cmnd[SCpnt->cmd_len] |= 0x01;
 	  if (linked_connected) {
 #if (DEBUG & DEBUG_LINKED) 
 	    printk("scsi%d : using linked commands, current I_T_L nexus is ",
@@ -615,7 +653,7 @@ static int internal_command(unsigned char target, unsigned char lun, const void 
 	st0x_aborted = 0;
 
 #ifdef SLOW_HANDSHAKE
-	borken = (int) scsi_devices[SCint->index].borken;
+	borken = (int) SCint->device->borken;
 #endif
 
 #if (DEBUG & PRINT_COMMAND)
@@ -652,7 +690,7 @@ static int internal_command(unsigned char target, unsigned char lun, const void 
 
 /*
  *	We work it differently depending on if this is is "the first time,"
- *	or a reconnect.  If this is a reselct phase, then SEL will 
+ *	or a reconnect.  If this is a reselect phase, then SEL will 
  *	be asserted, and we must skip selection / arbitration phases.
  */
 
@@ -667,21 +705,23 @@ static int internal_command(unsigned char target, unsigned char lun, const void 
  *	target's ID on the BUS, with BSY, SEL, and I/O signals asserted.
  *
  *	After ARBITRATION phase is completed, only SEL, BSY, and the 
- *	target ID are asserted.  A valid initator ID is not on the bus
+ *	target ID are asserted.  A valid initiator ID is not on the bus
  *	until IO is asserted, so we must wait for that.
  */
-		
-		for (clock = jiffies + 10, temp = 0; (jiffies < clock) &&
-		     !(STATUS & STAT_IO););
-		
-		if (jiffies >= clock)
-			{
+		clock = jiffies + 10;
+		for (;;) {
+			temp = STATUS;
+			if ((temp & STAT_IO) && !(temp & STAT_BSY))
+				break;
+
+			if (jiffies > clock) {
 #if (DEBUG & PHASE_RESELECT)
-			printk("scsi%d : RESELECT timed out while waiting for IO .\n",
-				hostno);
+				printk("scsi%d : RESELECT timed out while waiting for IO .\n",
+					hostno);
 #endif
-			return (DID_BAD_INTR << 16);
+				return (DID_BAD_INTR << 16);
 			}
+		}
 
 /* 
  * 	After I/O is asserted by the target, we can read our ID and its
@@ -705,9 +745,9 @@ static int internal_command(unsigned char target, unsigned char lun, const void 
 			}
 
 		buffer=current_buffer;	
-                cmnd=current_cmnd;      /* WDE add */
-                data=current_data;      /* WDE add */
-                len=current_bufflen;    /* WDE add */
+		cmnd=current_cmnd;      /* WDE add */
+		data=current_data;      /* WDE add */
+		len=current_bufflen;    /* WDE add */
 		nobuffs=current_nobuffs;
 
 /*
@@ -776,7 +816,7 @@ connect_loop :
 
 #if !defined (ARBITRATE) 
 		while (((STATUS |  STATUS | STATUS) & 
-		         (STAT_BSY | STAT_SEL)) && 
+			 (STAT_BSY | STAT_SEL)) && 
 			 (!st0x_aborted) && (jiffies < clock));
 
 		if (jiffies > clock)
@@ -834,7 +874,7 @@ connect_loop :
  *
  * 	Note : the Seagate ST-01/02 product manual says that we should 
  * 	twiddle the DATA register before the control register.  However,
- *	this does not work reliably so we do it the other way arround.
+ *	this does not work reliably so we do it the other way around.
  *
  *	Probably could be a problem with arbitration too, we really should
  *	try this with a SCSI protocol or logic analyzer to see what is 
@@ -884,7 +924,7 @@ connect_loop :
 			if (STATUS & STAT_BSY) {
 				printk("scsi%d : BST asserted after we've been aborted.\n",
 					hostno);
-				seagate_st0x_reset(NULL);
+				seagate_st0x_reset(NULL, 0);
 				return retcode(DID_RESET);
 			}
 			return retcode(st0x_aborted);
@@ -892,7 +932,7 @@ connect_loop :
 
 /* Establish current pointers.  Take into account scatter / gather */
 
-        if ((nobuffs = SCint->use_sg)) {
+	if ((nobuffs = SCint->use_sg)) {
 #if (DEBUG & DEBUG_SG)
 	{
 	int i;
@@ -904,17 +944,17 @@ connect_loop :
 	}
 #endif
 		
-                buffer = (struct scatterlist *) SCint->buffer;
-                len = buffer->length;
-                data = (unsigned char *) buffer->address;
-        } else {
+		buffer = (struct scatterlist *) SCint->buffer;
+		len = buffer->length;
+		data = (unsigned char *) buffer->address;
+	} else {
 #if (DEBUG & DEBUG_SG)
 	printk("scsi%d : scatter gather not requested.\n", hostno);
 #endif
-                buffer = NULL;
-                len = SCint->request_bufflen;
-                data = (unsigned char *) SCint->request_buffer;
-        }
+		buffer = NULL;
+		len = SCint->request_bufflen;
+		data = (unsigned char *) SCint->request_buffer;
+	}
 
 #if (DEBUG & (PHASE_DATAIN | PHASE_DATAOUT))
 	printk("scsi%d : len = %d\n", hostno, len);
@@ -1032,12 +1072,12 @@ connect_loop :
 #ifdef FAST 
 if (!len) {
 #if 0 
-        printk("scsi%d: underflow to target %d lun %d \n", 
-                hostno, target, lun);
-        st0x_aborted = DID_ERROR;
-        fast = 0;
+	printk("scsi%d: underflow to target %d lun %d \n", 
+		hostno, target, lun);
+	st0x_aborted = DID_ERROR;
+	fast = 0;
 #endif
-        break;
+	break;
 }
 
 if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
@@ -1046,12 +1086,12 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 #endif
 	) {
 #if (DEBUG & DEBUG_FAST) 
-        printk("scsi%d : FAST transfer, underflow = %d, transfersize = %d\n"
-               "         len = %d, data = %08x\n", hostno, SCint->underflow, 
-               SCint->transfersize, len, data);
+	printk("scsi%d : FAST transfer, underflow = %d, transfersize = %d\n"
+	       "         len = %d, data = %08x\n", hostno, SCint->underflow, 
+	       SCint->transfersize, len, data);
 #endif
 
-        __asm__("
+	__asm__("
 	cld;
 "
 #ifdef FAST32
@@ -1061,14 +1101,14 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 "
 #else
 "1:	lodsb;
-        movb %%al, (%%edi);
+	movb %%al, (%%edi);
 "
 #endif
 "	loop 1b;" : :
-        /* input */
-        "D" (st0x_dr), "S" (data), "c" (SCint->transfersize) :
-        /* clobbered */
-        "eax", "ecx", "esi" );
+	/* input */
+	"D" (st0x_dr), "S" (data), "c" (SCint->transfersize) :
+	/* clobbered */
+	"eax", "ecx", "esi" );
 
 	len -= transfersize;
 	data += transfersize;
@@ -1103,8 +1143,8 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 
 	cld
 
-	movl _st0x_cr_sr, %%ebx
-	movl _st0x_dr, %%edi
+	movl " SYMBOL_NAME_STR(st0x_cr_sr) ", %%ebx
+	movl " SYMBOL_NAME_STR(st0x_dr) ", %%edi
 	
 1:	movb (%%ebx), %%al\n"
 /*
@@ -1138,16 +1178,16 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 "eax", "ebx", "edi"); 
 }
 
-                        if (!len && nobuffs) {
-                                --nobuffs;
-                                ++buffer;
-                                len = buffer->length;
-                                data = (unsigned char *) buffer->address;
+			if (!len && nobuffs) {
+				--nobuffs;
+				++buffer;
+				len = buffer->length;
+				data = (unsigned char *) buffer->address;
 #if (DEBUG & DEBUG_SG)
 	printk("scsi%d : next scatter-gather buffer len = %d address = %08x\n",
 		hostno, len, data);
 #endif
-                        }
+			}
 			break;
 
 		case REQ_DATAIN : 
@@ -1173,11 +1213,11 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 #endif
 	) {
 #if (DEBUG & DEBUG_FAST) 
-        printk("scsi%d : FAST transfer, underflow = %d, transfersize = %d\n"
-               "         len = %d, data = %08x\n", hostno, SCint->underflow, 
-               SCint->transfersize, len, data);
+	printk("scsi%d : FAST transfer, underflow = %d, transfersize = %d\n"
+	       "         len = %d, data = %08x\n", hostno, SCint->underflow, 
+	       SCint->transfersize, len, data);
 #endif
-        __asm__("
+	__asm__("
 	cld;
 "
 #ifdef FAST32
@@ -1187,15 +1227,15 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 "
 #else
 "1:	movb (%%esi), %%al;
-        stosb;
+	stosb;
 "
 #endif
 
 "	loop 1b;" : :
-        /* input */
-        "S" (st0x_dr), "D" (data), "c" (SCint->transfersize) :
-        /* clobbered */
-        "eax", "ecx", "edi");
+	/* input */
+	"S" (st0x_dr), "D" (data), "c" (SCint->transfersize) :
+	/* clobbered */
+	"eax", "ecx", "edi");
 
 	len -= transfersize;
 	data += transfersize;
@@ -1239,8 +1279,8 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 	jz 2f
 
 	cld
-	movl _st0x_cr_sr, %%esi
-	movl _st0x_dr, %%ebx
+	movl " SYMBOL_NAME_STR(st0x_cr_sr) ", %%esi
+	movl " SYMBOL_NAME_STR(st0x_dr) ", %%ebx
 
 1:	movb (%%esi), %%al\n"
 /*
@@ -1284,16 +1324,16 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 #endif
 }
 	
-                        if (!len && nobuffs) {
-                                --nobuffs;
-                                ++buffer;
-                                len = buffer->length;
-                                data = (unsigned char *) buffer->address;
+			if (!len && nobuffs) {
+				--nobuffs;
+				++buffer;
+				len = buffer->length;
+				data = (unsigned char *) buffer->address;
 #if (DEBUG & DEBUG_SG)
 	printk("scsi%d : next scatter-gather buffer len = %d address = %08x\n",
 		hostno, len, data);
 #endif
-                        }
+			}
 
 			break;
 
@@ -1301,8 +1341,8 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 			while (((status_read = STATUS) & STAT_BSY) && 
 			       ((status_read & REQ_MASK) == REQ_CMDOUT))
 				if (status_read & STAT_REQ) {
-					DATA = *(unsigned char *) cmnd;
-					cmnd = 1+(unsigned char *) cmnd;
+					DATA = *(const unsigned char *) cmnd;
+					cmnd = 1+(const unsigned char *) cmnd;
 #ifdef SLOW_HANDSHAKE
 					if (borken) 
 						borken_wait();
@@ -1322,7 +1362,7 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 
 			CONTROL = BASE_CMD | CMD_DRVR_ENABLE;
 /*
- * 	If we are reconecting, then we must send an IDENTIFY message in 
+ * 	If we are reconnecting, then we must send an IDENTIFY message in 
  *	 response  to MSGOUT.
  */
 			switch (reselect) {
@@ -1340,7 +1380,7 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 				reselect = CAN_RECONNECT;
 				goto connect_loop;
 #if (DEBUG & (PHASE_MSGOUT | DEBUG_LINKED))
-				printk("scsi%d : sent ABORT message to cancle incorrect I_T_L nexus.\n", hostno);
+				printk("scsi%d : sent ABORT message to cancel incorrect I_T_L nexus.\n", hostno);
 #endif
 #endif /* LINKED */
 #if (DEBUG & DEBUG_LINKED) 
@@ -1356,9 +1396,9 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 			switch (message = DATA) {
 			case DISCONNECT :
 				should_reconnect = 1;
-                                current_data = data;    /* WDE add */
+				current_data = data;    /* WDE add */
 				current_buffer = buffer;
-                                current_bufflen = len;  /* WDE add */
+				current_bufflen = len;  /* WDE add */
 				current_nobuffs = nobuffs;
 #ifdef LINKED
 				linked_connected = 0;
@@ -1390,7 +1430,7 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 				break;
 			case SAVE_POINTERS :
 				current_buffer = buffer;
-                                current_bufflen = len;  /* WDE add */
+				current_bufflen = len;  /* WDE add */
 				current_data = data;	/* WDE mod */
 				current_nobuffs = nobuffs;
 #if (DEBUG & PHASE_MSGIN)
@@ -1469,7 +1509,7 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 	printk("\n");
 #endif
 	printk("scsi%d : status = ", hostno);
-        print_status(status);
+	print_status(status);
 	printk("message = %02x\n", message);
 #endif
 
@@ -1509,7 +1549,7 @@ else {
 				hostno);
 #endif
 /*
- * We also will need to adjust status to accomodate intermediate conditions.
+ * We also will need to adjust status to accommodate intermediate conditions.
  */
 			if ((status == INTERMEDIATE_GOOD) ||
 				(status == INTERMEDIATE_C_GOOD))
@@ -1546,21 +1586,18 @@ else {
 	return retcode (st0x_aborted);
 	}
 
-int seagate_st0x_abort (Scsi_Cmnd * SCpnt, int code)
+int seagate_st0x_abort (Scsi_Cmnd * SCpnt)
 	{
-	if (code)
-		st0x_aborted = code;
-	else
-		st0x_aborted = DID_ABORT;
-
-		return 0;
+	  st0x_aborted = DID_ABORT;
+	  
+	  return SCSI_ABORT_PENDING;
 	}
 
 /*
 	the seagate_st0x_reset function resets the SCSI bus
 */
 	
-int seagate_st0x_reset (Scsi_Cmnd * SCpnt)
+int seagate_st0x_reset (Scsi_Cmnd * SCpnt, unsigned int reset_flags)
 	{
 	unsigned clock;
 	/*
@@ -1590,45 +1627,39 @@ int seagate_st0x_reset (Scsi_Cmnd * SCpnt)
 #ifdef DEBUG
 	printk("SCSI bus reset.\n");
 #endif
-	if(SCpnt) SCpnt->flags |= NEEDS_JUMPSTART;
-	return 0;
+	return SCSI_RESET_WAKEUP;
 	}
-
-#ifdef CONFIG_BLK_DEV_SD
 
 #include <asm/segment.h>
 #include "sd.h"
-#include "scsi_ioctl.h"
+#include <scsi/scsi_ioctl.h>
 
-int seagate_st0x_biosparam(int size, int dev, int* ip) {
+int seagate_st0x_biosparam(Disk * disk, kdev_t dev, int* ip) {
   unsigned char buf[256 + sizeof(int) * 2], cmd[6], *data, *page;
   int *sizes, result, formatted_sectors, total_sectors;
   int cylinders, heads, sectors;
-
-  Scsi_Device *disk;
-
-  disk = rscsi_disks[MINOR(dev) >> 4].device;
+  int capacity;
 
 /*
  * Only SCSI-I CCS drives and later implement the necessary mode sense 
  * pages.  
  */
 
-  if (disk->scsi_level < 2) 
+  if (disk->device->scsi_level < 2) 
 	return -1;
 
   sizes = (int *) buf;
   data = (unsigned char *) (sizes + 2);
 
   cmd[0] = MODE_SENSE;
-  cmd[1] = (disk->lun << 5) & 0xe5;
+  cmd[1] = (disk->device->lun << 5) & 0xe5;
   cmd[2] = 0x04; /* Read page 4, rigid disk geometry page current values */
   cmd[3] = 0;
   cmd[4] = 255;
   cmd[5] = 0;
 
 /*
- * We are transfering 0 bytes in the out direction, and expect to get back
+ * We are transferring 0 bytes in the out direction, and expect to get back
  * 24 bytes for each mode page.
  */
 
@@ -1637,7 +1668,7 @@ int seagate_st0x_biosparam(int size, int dev, int* ip) {
 
   memcpy (data, cmd, 6);
 
-  if (!(result = kernel_scsi_ioctl (disk, SCSI_IOCTL_SEND_COMMAND, (void *) buf))) {
+  if (!(result = kernel_scsi_ioctl (disk->device, SCSI_IOCTL_SEND_COMMAND, (void *) buf))) {
 /*
  * The mode page lies beyond the MODE SENSE header, with length 4, and 
  * the BLOCK DESCRIPTOR, with length header[3].
@@ -1650,7 +1681,7 @@ int seagate_st0x_biosparam(int size, int dev, int* ip) {
     cmd[2] = 0x03; /* Read page 3, format page current values */
     memcpy (data, cmd, 6);
 
-    if (!(result = kernel_scsi_ioctl (disk, SCSI_IOCTL_SEND_COMMAND, (void *) buf))) {
+    if (!(result = kernel_scsi_ioctl (disk->device, SCSI_IOCTL_SEND_COMMAND, (void *) buf))) {
       page = data + 4 + data[3];
       sectors = (page[10] << 8) | page[11];	
 
@@ -1683,17 +1714,27 @@ printk("scsi%d : heads = %d cylinders = %d sectors = %d total = %d formatted = %
 
 /*
  * Now, we need to do a sanity check on the geometry to see if it is 
- * BIOS compatable.  The maximum BIOS geometry is 1024 cylinders * 
+ * BIOS compatible.  The maximum BIOS geometry is 1024 cylinders * 
  * 256 heads * 64 sectors. 
  */
 
-      if ((cylinders > 1024) || (sectors > 64)) 
-	result = -1;
-      else {
-	ip[0] = heads;
-	ip[1] = sectors;
-	ip[2] = cylinders;
+      if ((cylinders > 1024) || (sectors > 64)) {
+	/* The Seagate's seem to have some mapping
+	 * Multiple heads * sectors * cyl to get capacity
+	 * Then start rounding down. */
+	capacity = heads * sectors * cylinders;
+	sectors = 17;	/* Old MFM Drives use this, so does the Seagate */
+	heads = 2;
+	capacity = capacity / sectors;
+	while (cylinders > 1024)
+	{
+		heads *= 2;	/* For some reason, they go in multiples */
+		cylinders = capacity / heads;
+	}
       }
+      ip[0] = heads;
+      ip[1] = sectors;
+      ip[2] = cylinders;
 
 /* 
  * There should be an alternate mapping for things the seagate doesn't
@@ -1705,7 +1746,10 @@ printk("scsi%d : heads = %d cylinders = %d sectors = %d total = %d formatted = %
     
   return result;
 }
-#endif /* CONFIG_BLK_DEV_SD */
 
-#endif	/* defined(CONFIG_SCSI_SEGATE) */
+#ifdef MODULE
+/* Eventually this will go into an include file, but this will be later */
+Scsi_Host_Template driver_template = SEAGATE_ST0X;
 
+#include "scsi_module.c"
+#endif

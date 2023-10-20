@@ -3,6 +3,11 @@
  *
  * Created for Linux based loosely upon Mathius Lattner's minix
  * patches by Peter MacDonald. Heavily edited by Linus.
+ *
+ *  4 February 1994
+ *     COFF/ELF binary emulation. If the process has the STICKY_TIMEOUTS
+ *     flag set in its personality we do *not* modify the given timeout
+ *     parameter to reflect time remaining.
  */
 
 #include <linux/types.h>
@@ -14,6 +19,8 @@
 #include <linux/stat.h>
 #include <linux/signal.h>
 #include <linux/errno.h>
+#include <linux/personality.h>
+#include <linux/mm.h>
 
 #include <asm/segment.h>
 #include <asm/system.h>
@@ -70,12 +77,12 @@ static int check(int flag, select_table * wait, struct file * file)
 	if ((fops = file->f_op) && (select = fops->select))
 		return select(inode, file, flag, wait)
 		    || (wait && select(inode, file, flag, NULL));
-	if (S_ISREG(inode->i_mode))
+	if (flag != SEL_EX)
 		return 1;
 	return 0;
 }
 
-int do_select(int n, fd_set *in, fd_set *out, fd_set *ex,
+static int do_select(int n, fd_set *in, fd_set *out, fd_set *ex,
 	fd_set *res_in, fd_set *res_out, fd_set *res_ex)
 {
 	int count;
@@ -85,8 +92,8 @@ int do_select(int n, fd_set *in, fd_set *out, fd_set *ex,
 	int i,j;
 	int max = -1;
 
-	for (j = 0 ; j < __FDSET_LONGS ; j++) {
-		i = j << 5;
+	for (j = 0 ; j < __FDSET_INTS ; j++) {
+		i = j * __NFDBITS;
 		if (i >= n)
 			break;
 		set = in->fds_bits[j] | out->fds_bits[j] | ex->fds_bits[j];
@@ -95,9 +102,9 @@ int do_select(int n, fd_set *in, fd_set *out, fd_set *ex,
 				goto end_check;
 			if (!(set & 1))
 				continue;
-			if (!current->filp[i])
+			if (!current->files->fd[i])
 				return -EBADF;
-			if (!current->filp[i]->f_inode)
+			if (!current->files->fd[i]->f_inode)
 				return -EBADF;
 			max = i;
 		}
@@ -116,17 +123,17 @@ end_check:
 repeat:
 	current->state = TASK_INTERRUPTIBLE;
 	for (i = 0 ; i < n ; i++) {
-		if (FD_ISSET(i,in) && check(SEL_IN,wait,current->filp[i])) {
+		if (FD_ISSET(i,in) && check(SEL_IN,wait,current->files->fd[i])) {
 			FD_SET(i, res_in);
 			count++;
 			wait = NULL;
 		}
-		if (FD_ISSET(i,out) && check(SEL_OUT,wait,current->filp[i])) {
+		if (FD_ISSET(i,out) && check(SEL_OUT,wait,current->files->fd[i])) {
 			FD_SET(i, res_out);
 			count++;
 			wait = NULL;
 		}
-		if (FD_ISSET(i,ex) && check(SEL_EX,wait,current->filp[i])) {
+		if (FD_ISSET(i,ex) && check(SEL_EX,wait,current->files->fd[i])) {
 			FD_SET(i, res_ex);
 			count++;
 			wait = NULL;
@@ -147,9 +154,10 @@ repeat:
  * We do a VERIFY_WRITE here even though we are only reading this time:
  * we'll write to it eventually..
  */
-static int __get_fd_set(int nr, unsigned long * fs_pointer, unsigned long * fdset)
+static int __get_fd_set(int nr, unsigned int * fs_pointer, fd_set * fdset)
 {
-	int error;
+	int error, i;
+	unsigned int * tmp;
 
 	FD_ZERO(fdset);
 	if (!fs_pointer)
@@ -157,64 +165,60 @@ static int __get_fd_set(int nr, unsigned long * fs_pointer, unsigned long * fdse
 	error = verify_area(VERIFY_WRITE,fs_pointer,sizeof(fd_set));
 	if (error)
 		return error;
-	while (nr > 0) {
-		*fdset = get_fs_long(fs_pointer);
-		fdset++;
+	tmp = fdset->fds_bits;
+	for (i = __FDSET_INTS; i > 0; i--) {
+		if (nr <= 0)
+			break;
+		*tmp = get_user(fs_pointer);
+		tmp++;
 		fs_pointer++;
-		nr -= 32;
+		nr -= 8 * sizeof(unsigned int);
 	}
 	return 0;
 }
 
-static void __set_fd_set(int nr, unsigned long * fs_pointer, unsigned long * fdset)
+static void __set_fd_set(int nr, unsigned int * fs_pointer, unsigned int * fdset)
 {
+	int i;
+
 	if (!fs_pointer)
 		return;
-	while (nr > 0) {
-		put_fs_long(*fdset, fs_pointer);
+	for (i = __FDSET_INTS; i > 0; i--) {
+		if (nr <= 0)
+			break;
+		put_user(*fdset, fs_pointer);
 		fdset++;
 		fs_pointer++;
-		nr -= 32;
+		nr -= 8 * sizeof(unsigned int);
 	}
 }
 
 #define get_fd_set(nr,fsp,fdp) \
-__get_fd_set(nr, (unsigned long *) (fsp), (unsigned long *) (fdp))
+__get_fd_set(nr, (unsigned int *) (fsp), fdp)
 
 #define set_fd_set(nr,fsp,fdp) \
-__set_fd_set(nr, (unsigned long *) (fsp), (unsigned long *) (fdp))
+__set_fd_set(nr, (unsigned int *) (fsp), (unsigned int *) (fdp))
 
 /*
- * We can actually return ERESTARTSYS insetad of EINTR, but I'd
+ * We can actually return ERESTARTSYS instead of EINTR, but I'd
  * like to be certain this leads to no problems. So I return
  * EINTR just for safety.
  *
  * Update: ERESTARTSYS breaks at least the xview clock binary, so
  * I'm trying ERESTARTNOHAND which restart only when you want to.
  */
-asmlinkage int sys_select( unsigned long *buffer )
+asmlinkage int sys_select(int n, fd_set *inp, fd_set *outp, fd_set *exp, struct timeval *tvp)
 {
-/* Perform the select(nd, in, out, ex, tv) system call. */
 	int i;
-	fd_set res_in, in, *inp;
-	fd_set res_out, out, *outp;
-	fd_set res_ex, ex, *exp;
-	int n;
-	struct timeval *tvp;
+	fd_set res_in, in;
+	fd_set res_out, out;
+	fd_set res_ex, ex;
 	unsigned long timeout;
 
-	i = verify_area(VERIFY_READ, buffer, 20);
-	if (i)
-		return i;
-	n = get_fs_long(buffer++);
 	if (n < 0)
 		return -EINVAL;
 	if (n > NR_OPEN)
 		n = NR_OPEN;
-	inp = (fd_set *) get_fs_long(buffer++);
-	outp = (fd_set *) get_fs_long(buffer++);
-	exp = (fd_set *) get_fs_long(buffer++);
-	tvp = (struct timeval *) get_fs_long(buffer);
 	if ((i = get_fd_set(n, inp, &in)) ||
 	    (i = get_fd_set(n, outp, &out)) ||
 	    (i = get_fd_set(n, exp, &ex))) return i;
@@ -223,23 +227,22 @@ asmlinkage int sys_select( unsigned long *buffer )
 		i = verify_area(VERIFY_WRITE, tvp, sizeof(*tvp));
 		if (i)
 			return i;
-		timeout = ROUND_UP(get_fs_long((unsigned long *)&tvp->tv_usec),(1000000/HZ));
-		timeout += get_fs_long((unsigned long *)&tvp->tv_sec) * HZ;
+		timeout = ROUND_UP(get_user(&tvp->tv_usec),(1000000/HZ));
+		timeout += get_user(&tvp->tv_sec) * (unsigned long) HZ;
 		if (timeout)
 			timeout += jiffies + 1;
 	}
 	current->timeout = timeout;
 	i = do_select(n, &in, &out, &ex, &res_in, &res_out, &res_ex);
-	if (current->timeout > jiffies)
-		timeout = current->timeout - jiffies;
-	else
-		timeout = 0;
+	timeout = current->timeout - jiffies - 1;
 	current->timeout = 0;
-	if (tvp) {
-		put_fs_long(timeout/HZ, (unsigned long *) &tvp->tv_sec);
+	if ((long) timeout < 0)
+		timeout = 0;
+	if (tvp && !(current->personality & STICKY_TIMEOUTS)) {
+		put_user(timeout/HZ, &tvp->tv_sec);
 		timeout %= HZ;
 		timeout *= (1000000/HZ);
-		put_fs_long(timeout, (unsigned long *) &tvp->tv_usec);
+		put_user(timeout, &tvp->tv_usec);
 	}
 	if (i < 0)
 		return i;

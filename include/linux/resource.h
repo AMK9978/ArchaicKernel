@@ -1,6 +1,8 @@
 #ifndef _LINUX_RESOURCE_H
 #define _LINUX_RESOURCE_H
 
+#include <linux/time.h>
+
 /*
  * Resource control/accounting header file for linux
  */
@@ -35,37 +37,24 @@ struct	rusage {
 	long	ru_nivcsw;		/* involuntary " */
 };
 
-/*
- * Resource limits
- */
-
-#define RLIMIT_CPU	0		/* CPU time in ms */
-#define RLIMIT_FSIZE	1		/* Maximum filesize */
-#define RLIMIT_DATA	2		/* max data size */
-#define RLIMIT_STACK	3		/* max stack size */
-#define RLIMIT_CORE	4		/* max core file size */
-#define RLIMIT_RSS	5		/* max resident set size */
-
-#ifdef notdef
-#define RLIMIT_MEMLOCK	6		/* max locked-in-memory address space*/
-#define RLIMIT_NPROC	7		/* max number of processes */
-#define RLIMIT_OFILE	8		/* max number of open files */
-#endif
-
-#define RLIM_NLIMITS	6
-
-#define RLIM_INFINITY	0x7FFFFFFF
+#define RLIM_INFINITY	((long)(~0UL>>1))
 
 struct rlimit {
-	int	rlim_cur;
-	int	rlim_max;
+	long	rlim_cur;
+	long	rlim_max;
 };
 
-#define	PRIO_MIN	(-99)
-#define	PRIO_MAX	14
+#define	PRIO_MIN	(-20)
+#define	PRIO_MAX	20
 
 #define	PRIO_PROCESS	0
 #define	PRIO_PGRP	1
 #define	PRIO_USER	2
+
+/*
+ * Due to binary compatibility, the actual resource numbers
+ * may be different for different linux versions..
+ */
+#include <asm/resource.h>
 
 #endif

@@ -14,6 +14,8 @@
  * BEEP_TIMER		console beep timer
  *
  * RS_TIMER		timer for the RS-232 ports
+ *
+ * SWAP_TIMER		timer for the background pageout daemon
  * 
  * HD_TIMER		harddisk timer
  *
@@ -27,16 +29,18 @@
  *
  * COPRO_TIMER		387 timeout for buggy hardware..
  *
- * TAPE_QIC02_TIMER	timer for QIC-02 tape driver (it's not hardcoded)
+ * QIC02_TAPE_TIMER	timer for QIC-02 tape driver (it's not hardcoded)
  *
  * MCD_TIMER		Mitsumi CD-ROM Timer
  *
- * SBPCD_TIMER		SoundBlaster/Matsushita/Panasonic CD-ROM timer
+ * GSCD_TIMER		Goldstar CD-ROM Timer
+ *
  */
 
 #define BLANK_TIMER	0
 #define BEEP_TIMER	1
 #define RS_TIMER	2
+#define SWAP_TIMER	3
 
 #define HD_TIMER	16
 #define FLOPPY_TIMER	17
@@ -45,12 +49,13 @@
 #define SOUND_TIMER	20
 #define COPRO_TIMER	21
 
-#define TAPE_QIC02_TIMER	22	/* hhb */
+#define QIC02_TAPE_TIMER	22	/* hhb */
 #define MCD_TIMER	23
 
 #define HD_TIMER2	24
+#define GSCD_TIMER	25
 
-#define SBPCD_TIMER	25
+#define DIGI_TIMER	29
 
 struct timer_struct {
 	unsigned long expires;
@@ -83,5 +88,13 @@ struct timer_list {
 
 extern void add_timer(struct timer_list * timer);
 extern int  del_timer(struct timer_list * timer);
+
+extern void it_real_fn(unsigned long);
+
+extern inline void init_timer(struct timer_list * timer)
+{
+	timer->next = NULL;
+	timer->prev = NULL;
+}
 
 #endif

@@ -13,11 +13,23 @@
  * WARNING!  Do not delete or change the order of these fields.  If
  * a new field is required then add it to the end.  The version field
  * tracks which fields are present.  This will ensure some measure of
- * mount-to-kernel version compatibilty.  Some of these aren't used yet
+ * mount-to-kernel version compatibility.  Some of these aren't used yet
  * but here they are anyway.
  */
 
-#define NFS_MOUNT_VERSION	1	/* current version */
+#define NFS_NFS_PROGRAM		100003	/* nfsd program number */
+#define NFS_NFS_VERSION		2	/* nfsd version */
+#define NFS_NFS_PORT		2049	/* portnumber on server for nfsd */
+
+#define NFS_MOUNT_PROGRAM	100005	/* mountd program number */
+#define NFS_MOUNT_VERSION	1	/* mountd version */
+#define NFS_MOUNT_PROC		1	/* mount process id */
+#define NFS_MOUNT_PORT		627	/* portnumber on server for mountd */
+
+#define NFS_PMAP_PROGRAM	100000	/* portmap program number */
+#define NFS_PMAP_VERSION	2	/* portmap version */
+#define NFS_PMAP_PROC		3	/* portmap getport id */
+#define NFS_PMAP_PORT		111	/* portnumber on server for portmap */
 
 struct nfs_mount_data {
 	int version;			/* 1 */

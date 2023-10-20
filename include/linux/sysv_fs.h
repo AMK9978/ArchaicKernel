@@ -136,7 +136,7 @@ struct sysv4_super_block {
 	char	       s_fname[6];	/* file system volume name */
 	char	       s_fpack[6];	/* file system pack name */
 	long	       s_fill[12];
-	long	       s_state;		/* file system state */
+	long	       s_state;		/* file system state: 0x7c269d38-s_time means clean */
 	long	       s_magic;		/* version of file system */
 	long	       s_type;		/* type of file system: 1 for 512 byte blocks
 								2 for 1024 byte blocks */
@@ -170,7 +170,7 @@ struct sysv2_super_block {
 	char	       s_fname[6];	/* file system volume name */
 	char	       s_fpack[6];	/* file system pack name */
 	long	       s_fill[14];
-	long	       s_state;		/* file system state */
+	long	       s_state;		/* file system state: 0xcb096f43 means clean */
 	long	       s_magic;		/* version of file system */
 	long	       s_type;		/* type of file system: 1 for 512 byte blocks
 								2 for 1024 byte blocks */
@@ -333,54 +333,27 @@ struct sysv_dir_entry {
 #define SYSV2_SUPER_MAGIC	(SYSV_MAGIC_BASE+FSTYPE_SYSV2)
 #define COH_SUPER_MAGIC		(SYSV_MAGIC_BASE+FSTYPE_COH)
 
-/* Because the block size may be smaller than 1024 (which is the unit used by
-   the disk drivers and the buffer code), many functions must return a pointer
-   to the buffer data additionally to the buffer head pointer.
-*/
-#if 0
-struct bh_data {
-	struct buffer_head * bh;
-	char * bh_data;
-};
-#endif
+#ifdef __KERNEL__
 
-/* sysv_bread(sb,dev,block,...) would be equivalent to
-   bread(dev,block,BLOCK_SIZE)
-   if the block size were always 1024, which is the only one bread() supports.
-*/
+/* sv_get_hash_table(sb,dev,block) is equivalent to  get_hash_table(dev,block,block_size)  */
 static inline struct buffer_head *
-sysv_bread (struct super_block *sb, int dev, unsigned int block, char* * data)
+sv_get_hash_table (struct super_block *sb, kdev_t dev, unsigned int block)
 {
-	struct buffer_head *bh;
-
-	if (!(bh = bread (dev, (block >> sb->sv_block_size_ratio_bits) + sb->sv_block_base, BLOCK_SIZE)))
-		return NULL;
-	*data = bh->b_data + ((block & sb->sv_block_size_ratio_1) << sb->sv_block_size_bits);
-	return bh;
+	return get_hash_table (dev, block + sb->sv_block_base, sb->sv_block_size);
 }
 
-
-/* locks - protect against simultaneous write and truncate */
-
-extern void _coh_wait_on_inode (struct inode * inode);
-
-extern inline void coh_wait_on_inode (struct inode * inode)
+/* sv_getblk(sb,dev,block) is equivalent to  getblk(dev,block,block_size)  */
+static inline struct buffer_head *
+sv_getblk (struct super_block *sb, kdev_t dev, unsigned int block)
 {
-	if (inode->u.sysv_i.i_lock)
-		_coh_wait_on_inode(inode);
+	return getblk (dev, block + sb->sv_block_base, sb->sv_block_size);
 }
 
-extern inline void coh_lock_inode (struct inode * inode)
+/* sv_bread(sb,dev,block) is equivalent to  bread(dev,block,block_size)  */
+static inline struct buffer_head *
+sv_bread (struct super_block *sb, kdev_t dev, unsigned int block)
 {
-	if (inode->u.sysv_i.i_lock)
-		_coh_wait_on_inode(inode);
-	inode->u.sysv_i.i_lock = 1;
-}
-
-extern inline void coh_unlock_inode (struct inode * inode)
-{
-	inode->u.sysv_i.i_lock = 0;
-	wake_up(&inode->u.sysv_i.i_wait);
+	return bread (dev, block + sb->sv_block_base, sb->sv_block_size);
 }
 
 
@@ -389,7 +362,7 @@ extern inline void coh_unlock_inode (struct inode * inode)
  */
 
 extern int sysv_lookup(struct inode * dir,const char * name, int len,
-	struct inode ** result);
+	               struct inode ** result);
 extern int sysv_create(struct inode * dir,const char * name, int len, int mode,
 	struct inode ** result);
 extern int sysv_mkdir(struct inode * dir, const char * name, int len, int mode);
@@ -400,7 +373,7 @@ extern int sysv_symlink(struct inode * inode, const char * name, int len,
 extern int sysv_link(struct inode * oldinode, struct inode * dir, const char * name, int len);
 extern int sysv_mknod(struct inode * dir, const char * name, int len, int mode, int rdev);
 extern int sysv_rename(struct inode * old_dir, const char * old_name, int old_len,
-	struct inode * new_dir, const char * new_name, int new_len);
+	struct inode * new_dir, const char * new_name, int new_len, int must_be_dir);
 extern struct inode * sysv_new_inode(const struct inode * dir);
 extern void sysv_free_inode(struct inode * inode);
 extern unsigned long sysv_count_free_inodes(struct super_block *sb);
@@ -410,28 +383,30 @@ extern unsigned long sysv_count_free_blocks(struct super_block *sb);
 
 extern int sysv_bmap(struct inode *,int);
 
-extern struct buffer_head * sysv_getblk(struct inode *, unsigned int, int, char* *);
-extern struct buffer_head * sysv_file_bread(struct inode *, int, int, char* *);
+extern struct buffer_head * sysv_getblk(struct inode *, unsigned int, int);
+extern struct buffer_head * sysv_file_bread(struct inode *, int, int);
+extern int sysv_file_read(struct inode *, struct file *, char *, int);
 
 extern void sysv_truncate(struct inode *);
 extern void sysv_put_super(struct super_block *);
 extern struct super_block *sysv_read_super(struct super_block *,void *,int);
+extern int init_sysv_fs(void);
 extern void sysv_write_super(struct super_block *);
 extern void sysv_read_inode(struct inode *);
-extern int sysv_notify_change(int,struct inode *);
+extern int sysv_notify_change(struct inode *, struct iattr *);
 extern void sysv_write_inode(struct inode *);
 extern void sysv_put_inode(struct inode *);
-extern void sysv_statfs(struct super_block *, struct statfs *);
+extern void sysv_statfs(struct super_block *, struct statfs *, int);
 extern int sysv_sync_inode(struct inode *);
 extern int sysv_sync_file(struct inode *, struct file *);
-#if 0
-extern int sysv_mmap(struct inode *, struct file *, unsigned long, size_t, int, unsigned long);
-#endif
+extern int sysv_mmap(struct inode *, struct file *, struct vm_area_struct *);
 
 extern struct inode_operations sysv_file_inode_operations;
 extern struct inode_operations sysv_file_inode_operations_with_bmap;
 extern struct inode_operations sysv_dir_inode_operations;
 extern struct inode_operations sysv_symlink_inode_operations;
+
+#endif /* __KERNEL__ */
 
 #endif
 

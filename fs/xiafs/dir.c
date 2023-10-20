@@ -9,7 +9,6 @@
  *  This software may be redistributed per Linux Copyright.
  */
 
-#include <asm/segment.h>
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -17,10 +16,12 @@
 #include <linux/xia_fs.h>
 #include <linux/stat.h>
 
+#include <asm/segment.h>
+
 #include "xiafs_mac.h"
 
 static int xiafs_dir_read(struct inode *, struct file *, char *, int);
-static int xiafs_readdir(struct inode *, struct file *, struct dirent *, int);
+static int xiafs_readdir(struct inode *, struct file *, void *, filldir_t);
 
 static struct file_operations xiafs_dir_operations = {
     NULL,		/* lseek - default */
@@ -51,6 +52,8 @@ struct inode_operations xiafs_dir_inode_operations = {
     xiafs_rename,			/* rename */
     NULL,			/* readlink */
     NULL,			/* follow_link */
+    NULL,			/* readpage */
+    NULL,			/* writepage */
     NULL,			/* bmap */
     xiafs_truncate,		/* truncate */
     NULL			/* permission */
@@ -62,8 +65,8 @@ static int xiafs_dir_read(struct inode * inode,
   return -EISDIR;
 }
 
-static int xiafs_readdir(struct inode * inode, 
-		       struct file * filp, struct dirent * dirent, int count)
+static int xiafs_readdir(struct inode * inode, struct file * filp,
+	void * dirent, filldir_t filldir)
 {
     u_int offset, i;
     struct buffer_head * bh;
@@ -80,7 +83,15 @@ static int xiafs_readdir(struct inode * inode,
 	    filp->f_pos += XIAFS_ZSIZE(inode->i_sb)-offset;
 	    continue;
 	}
+	for (i = 0; i < XIAFS_ZSIZE(inode->i_sb) && i < offset; ) {
+	    de = (struct xiafs_direct *) (bh->b_data + i);
+	    if (!de->d_rec_len)
+		break;
+	    i += de->d_rec_len;
+	}
+	offset = i;
 	de = (struct xiafs_direct *) (offset + bh->b_data);
+	
 	while (offset < XIAFS_ZSIZE(inode->i_sb) && filp->f_pos < inode->i_size) {
 	    if (de->d_ino > inode->i_sb->u.xiafs_sb.s_ninodes ||
 		de->d_rec_len < 12 || 
@@ -92,21 +103,18 @@ static int xiafs_readdir(struct inode * inode,
 		brelse(bh);
 		return 0;
 	    }  
-	    offset += de->d_rec_len;
-	    filp->f_pos += de->d_rec_len;
 	    if (de->d_ino) {
-	        for (i = 0; i < de->d_name_len ; i++)
-		    put_fs_byte(de->d_name[i],i+dirent->d_name);
-		put_fs_byte(0,i+dirent->d_name);
-		put_fs_long(de->d_ino,&dirent->d_ino);
-		put_fs_word(i,&dirent->d_reclen);
-		brelse(bh);
 		if (!IS_RDONLY (inode)) {
-		    inode->i_atime=CURRENT_TIME;		    
+		    inode->i_atime=CURRENT_TIME;
 		    inode->i_dirt=1;
 		}
-		return i;
+		if (filldir(dirent, de->d_name, de->d_name_len, filp->f_pos, de->d_ino) < 0) {
+		    brelse(bh);
+		    return 0;
+		}
 	    }
+	    offset += de->d_rec_len;
+	    filp->f_pos += de->d_rec_len;
 	    de = (struct xiafs_direct *) (offset + bh->b_data);
 	}
 	brelse(bh);

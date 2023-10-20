@@ -62,6 +62,8 @@ struct xiafs_direct {
     char    d_name[_XIAFS_NAME_LEN+1];
 };
 
+#ifdef __KERNEL__
+
 extern int xiafs_lookup(struct inode * dir,const char * name, int len, 
 			struct inode ** result);
 extern int xiafs_create(struct inode * dir,const char * name, int len, int mode,
@@ -77,7 +79,8 @@ extern int xiafs_mknod(struct inode * dir, const char * name, int len,
 		     	int mode, int rdev);
 extern int xiafs_rename(struct inode * old_dir, const char * old_name, 
 		      	int old_len, struct inode * new_dir, 
-		      	const char * new_name, int new_len);
+		      	const char * new_name, int new_len,
+		      	int must_be_dir);
 extern struct inode * xiafs_new_inode(struct inode * dir);
 extern void xiafs_free_inode(struct inode * inode);
 extern unsigned long xiafs_count_free_inodes(struct super_block *sb);
@@ -93,16 +96,19 @@ extern struct buffer_head * xiafs_bread(struct inode *, int, int);
 extern void xiafs_truncate(struct inode *);
 extern void xiafs_put_super(struct super_block *);
 extern struct super_block *xiafs_read_super(struct super_block *,void *,int);
+extern int init_xiafs_fs(void);
 extern void xiafs_read_inode(struct inode *);
 extern void xiafs_write_inode(struct inode *);
 extern void xiafs_put_inode(struct inode *);
-extern void xiafs_statfs(struct super_block *, struct statfs *);
+extern void xiafs_statfs(struct super_block *, struct statfs *, int);
 extern int xiafs_sync_inode(struct inode *);
 extern int xiafs_sync_file(struct inode *, struct file *);
 
 extern struct inode_operations xiafs_file_inode_operations;
 extern struct inode_operations xiafs_dir_inode_operations;
 extern struct inode_operations xiafs_symlink_inode_operations;
+
+#endif /* __KERNEL__ */
 
 #endif  /* _XIA_FS_H */
 

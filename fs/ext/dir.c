@@ -25,7 +25,7 @@ static int ext_dir_read(struct inode * inode, struct file * filp, char * buf, in
 	return -EISDIR;
 }
 
-static int ext_readdir(struct inode *, struct file *, struct dirent *, int);
+static int ext_readdir(struct inode *, struct file *, void *, filldir_t);
 
 static struct file_operations ext_dir_operations = {
 	NULL,			/* lseek - default */
@@ -56,61 +56,64 @@ struct inode_operations ext_dir_inode_operations = {
 	ext_rename,		/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
+	NULL,			/* readpage */
+	NULL,			/* writepage */
 	NULL,			/* bmap */
 	ext_truncate,		/* truncate */
 	NULL			/* permission */
 };
 
 static int ext_readdir(struct inode * inode, struct file * filp,
-	struct dirent * dirent, int count)
+	void * dirent, filldir_t filldir)
 {
-	unsigned int offset,i;
-	char c;
+	int error;
+	unsigned int i;
+	off_t offset;
 	struct buffer_head * bh;
 	struct ext_dir_entry * de;
 
 	if (!inode || !S_ISDIR(inode->i_mode))
 		return -EBADF;
-	if (filp->f_pos % 8 != 0)
+	if ((filp->f_pos & 7) != 0)
 		return -EBADF;
-	while (filp->f_pos < inode->i_size) {
+	error = 0;
+	while (!error && filp->f_pos < inode->i_size) {
 		offset = filp->f_pos & 1023;
 		bh = ext_bread(inode,(filp->f_pos)>>BLOCK_SIZE_BITS,0);
 		if (!bh) {
 			filp->f_pos += 1024-offset;
 			continue;
 		}
+		for (i = 0; i < 1024 && i < offset; ) {
+			de = (struct ext_dir_entry *) (bh->b_data + i);
+			if (!de->rec_len)
+				break;
+			i += de->rec_len;
+		}
+		offset = i;
 		de = (struct ext_dir_entry *) (offset + bh->b_data);
 		while (offset < 1024 && filp->f_pos < inode->i_size) {
 			if (de->rec_len < 8 || de->rec_len % 8 != 0 ||
 			    de->rec_len < de->name_len + 8 ||
-			    (de->rec_len + filp->f_pos - 1) / 1024 > (filp->f_pos / 1024)) {
+			    (de->rec_len + (off_t) filp->f_pos - 1) / 1024 > ((off_t) filp->f_pos / 1024)) {
 				printk ("ext_readdir: bad dir entry, skipping\n");
-				printk ("dev=%d, dir=%d, offset=%d, rec_len=%d, name_len=%d\n",
-					inode->i_dev, inode->i_ino, offset, de->rec_len, de->name_len);
+				printk ("dev=%s, dir=%ld, "
+				    "offset=%ld, rec_len=%d, name_len=%d\n",
+				    kdevname(inode->i_dev), inode->i_ino,
+				    offset, de->rec_len, de->name_len);
 				filp->f_pos += 1024-offset;
 				if (filp->f_pos > inode->i_size)
 					filp->f_pos = inode->i_size;
 				continue;
 			}
+			if (de->inode) {
+				error = filldir(dirent, de->name, de->name_len, filp->f_pos, de->inode);
+				if (error)
+					break;
+			}
 			offset += de->rec_len;
 			filp->f_pos += de->rec_len;
-			if (de->inode) {
-				for (i = 0; i < de->name_len; i++)
-					if ((c = de->name[i]) != 0)
-						put_fs_byte(c,i+dirent->d_name);
-					else
-						break;
-				if (i) {
-					put_fs_long(de->inode,&dirent->d_ino);
-					put_fs_byte(0,i+dirent->d_name);
-					put_fs_word(i,&dirent->d_reclen);
-					brelse(bh);
-					return i;
-				}
-			}
-			de = (struct ext_dir_entry *) ((char *) de 
-				+ de->rec_len);
+			((char *) de) += de->rec_len;
 		}
 		brelse(bh);
 	}

@@ -17,22 +17,33 @@
  * if it doesn't work for your devices, take a look.
  */
 
+#ifdef MODULE
+#include <linux/module.h>
+#endif
+
 #include <linux/kernel.h>
 #include <linux/head.h>
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
-
+#include <linux/proc_fs.h>
 #include <linux/sched.h>
 #include <asm/dma.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
-#include "../block/blk.h"
+#include <linux/blk.h>
 #include "scsi.h"
 #include "hosts.h"
+#include "sd.h"
 
 #include "aha1740.h"
+#include<linux/stat.h>
+
+struct proc_dir_entry proc_scsi_aha1740 = {
+    PROC_SCSI_AHA1740, 7, "aha1740",
+    S_IFDIR | S_IRUGO | S_IXUGO, 2
+};
 
 /* IF YOU ARE HAVING PROBLEMS WITH THIS DRIVER, AND WANT TO WATCH
    IT WORK, THEN:
@@ -84,7 +95,7 @@ sense[0],sense[1],sense[2],sense[3]);
     {
 	if ( (status[1]&0x18) || status_word.sc ) /*Additional info available*/
 	{
-	    /* Use the supplied info for futher diagnostics */
+	    /* Use the supplied info for further diagnostics */
 	    switch ( status[2] )
 	    {
 	    case 0x12:
@@ -119,10 +130,10 @@ sense[0],sense[1],sense[2],sense[3]);
 	    }
 	    else if ( status[0]&0x60 )
 	    {
-		retval = DID_ERROR; /* Didn't found a better error */
+		retval = DID_ERROR; /* Didn't find a better error */
 	    }
 	    /* In any other case return DID_OK so for example
-               CONDITION_CHECKS make it through to the appropriate
+	       CONDITION_CHECKS make it through to the appropriate
 	       device driver */
 	}
     }
@@ -162,14 +173,8 @@ int aha1740_test_port(void)
     return 0;
 }
 
-const char *aha1740_info(void)
-{
-    static char buffer[] = "Adaptec 174x (EISA)";
-    return buffer;
-}
-
 /* A "high" level interrupt handler */
-void aha1740_intr_handle(int foo)
+void aha1740_intr_handle(int irq, void *dev_id, struct pt_regs * regs)
 {
     void (*my_done)(Scsi_Cmnd *);
     int errstatus, adapstat;
@@ -183,19 +188,28 @@ void aha1740_intr_handle(int foo)
     {
 	DEB(printk("aha1740_intr top of loop.\n"));
 	adapstat = inb(G2INTST);
+	ecbptr = (struct ecb *) bus_to_virt(inl(MBOXIN0));
 	outb(G2CNTRL_IRST,G2CNTRL); /* interrupt reset */
       
-        switch ( adapstat & G2INTST_MASK )
+	switch ( adapstat & G2INTST_MASK )
 	{
 	case	G2INTST_CCBRETRY:
 	case	G2INTST_CCBERROR:
 	case	G2INTST_CCBGOOD:
-	    ecbptr = (struct ecb *) (	((ulong) inb(MBOXIN0)) +
-					((ulong) inb(MBOXIN1) <<8) +
-					((ulong) inb(MBOXIN2) <<16) +
-					((ulong) inb(MBOXIN3) <<24) );
 	    outb(G2CNTRL_HRDY,G2CNTRL); /* Host Ready -> Mailbox in complete */
+	    if (!ecbptr)
+	    {
+		printk("Aha1740 null ecbptr in interrupt (%x,%x,%x,%d)\n",
+			inb(G2STAT),adapstat,inb(G2INTST),number_serviced++);
+		continue;
+	    }
 	    SCtmp = ecbptr->SCpnt;
+	    if (!SCtmp)
+	    {
+		printk("Aha1740 null SCtmp in interrupt (%x,%x,%x,%d)\n",
+			inb(G2STAT),adapstat,inb(G2INTST),number_serviced++);
+		continue;
+	    }
 	    if (SCtmp->host_scribble)
 		scsi_free(SCtmp->host_scribble, 512);
 	  /* Fetch the sense data, and tuck it away, in the required slot.  The
@@ -232,7 +246,7 @@ void aha1740_intr_handle(int foo)
 	    break;
 	}
       number_serviced++;
-    };
+    }
 }
 
 int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
@@ -240,6 +254,7 @@ int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
     unchar direction;
     unchar *cmd = (unchar *) SCpnt->cmnd;
     unchar target = SCpnt->target;
+    unsigned long flags;
     void *buff = SCpnt->request_buffer;
     int bufflen = SCpnt->request_bufflen;
     int ecbno;
@@ -248,31 +263,31 @@ int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
     
     if(*cmd == REQUEST_SENSE)
     {
-        if (bufflen != sizeof(SCpnt->sense_buffer))
+	if (bufflen != sizeof(SCpnt->sense_buffer))
 	{
 	    printk("Wrong buffer length supplied for request sense (%d)\n",bufflen);
-	    panic("aha1740.c");
-        }
-        SCpnt->result = 0;
-        done(SCpnt); 
-        return 0;
+	}
+	SCpnt->result = 0;
+	done(SCpnt); 
+	return 0;
     }
 
 #ifdef DEBUG
     if (*cmd == READ_10 || *cmd == WRITE_10)
-        i = xscsi2int(cmd+2);
+	i = xscsi2int(cmd+2);
     else if (*cmd == READ_6 || *cmd == WRITE_6)
-        i = scsi2int(cmd+2);
+	i = scsi2int(cmd+2);
     else
-        i = -1;
+	i = -1;
     printk("aha1740_queuecommand: dev %d cmd %02x pos %d len %d ", target, *cmd, i, bufflen);
     printk("scsi cmd:");
-    for (i = 0; i < (COMMAND_SIZE(*cmd)); i++) printk("%02x ", cmd[i]);
+    for (i = 0; i < SCpnt->cmd_len; i++) printk("%02x ", cmd[i]);
     printk("\n");
 #endif
 
     /* locate an available ecb */
 
+    save_flags(flags);
     cli();
     ecbno = aha1740_last_ecb_used + 1;		/* An optimization */
     if (ecbno >= AHA1740_ECBS) ecbno = 0;
@@ -290,13 +305,13 @@ int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
     ecb[ecbno].cmdw = AHA1740CMD_INIT;	/* SCSI Initiator Command doubles as reserved flag */
 
     aha1740_last_ecb_used = ecbno;    
-    sti();
+    restore_flags(flags);
 
 #ifdef DEBUG
     printk("Sending command (%d %x)...",ecbno, done);
 #endif
 
-    ecb[ecbno].cdblen = COMMAND_SIZE(*cmd);	/* SCSI Command Descriptor Block Length */
+    ecb[ecbno].cdblen = SCpnt->cmd_len;	/* SCSI Command Descriptor Block Length */
 
     direction = 0;
     if (*cmd == READ_10 || *cmd == READ_6)
@@ -308,35 +323,35 @@ int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
 
     if (SCpnt->use_sg)
     {
-        struct scatterlist * sgpnt;
-        struct aha1740_chain * cptr;
-        int i;
+	struct scatterlist * sgpnt;
+	struct aha1740_chain * cptr;
+	int i;
 #ifdef DEBUG
-        unsigned char * ptr;
+	unsigned char * ptr;
 #endif
-        ecb[ecbno].sg = 1;	  /* SCSI Initiator Command  w/scatter-gather*/
-        SCpnt->host_scribble = (unsigned char *) scsi_malloc(512);
-        sgpnt = (struct scatterlist *) SCpnt->request_buffer;
-        cptr = (struct aha1740_chain *) SCpnt->host_scribble; 
-        if (cptr == NULL) panic("aha1740.c: unable to allocate DMA memory\n");
-        for(i=0; i<SCpnt->use_sg; i++)
+	ecb[ecbno].sg = 1;	  /* SCSI Initiator Command  w/scatter-gather*/
+	SCpnt->host_scribble = (unsigned char *) scsi_malloc(512);
+	sgpnt = (struct scatterlist *) SCpnt->request_buffer;
+	cptr = (struct aha1740_chain *) SCpnt->host_scribble; 
+	if (cptr == NULL) panic("aha1740.c: unable to allocate DMA memory\n");
+	for(i=0; i<SCpnt->use_sg; i++)
 	{
 	    cptr[i].dataptr = (long) sgpnt[i].address;
 	    cptr[i].datalen = sgpnt[i].length;
-        }
-        ecb[ecbno].datalen = SCpnt->use_sg * sizeof(struct aha1740_chain);
-        ecb[ecbno].dataptr = (long) cptr;
+	}
+	ecb[ecbno].datalen = SCpnt->use_sg * sizeof(struct aha1740_chain);
+	ecb[ecbno].dataptr = (long) cptr;
 #ifdef DEBUG
-        printk("cptr %x: ",cptr);
-        ptr = (unsigned char *) cptr;
-        for(i=0;i<24;i++) printk("%02x ", ptr[i]);
+	printk("cptr %x: ",cptr);
+	ptr = (unsigned char *) cptr;
+	for(i=0;i<24;i++) printk("%02x ", ptr[i]);
 #endif
     }
     else
     {
-        SCpnt->host_scribble = NULL;
-        ecb[ecbno].datalen = bufflen;
-        ecb[ecbno].dataptr = (long) buff;
+	SCpnt->host_scribble = NULL;
+	ecb[ecbno].datalen = bufflen;
+	ecb[ecbno].dataptr = (long) buff;
     }
     ecb[ecbno].lun = SCpnt->lun;
     ecb[ecbno].ses = 1;	/* Suppress underrun errors */
@@ -350,9 +365,9 @@ int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
 #ifdef DEBUG
     {
 	int i;
-        printk("aha1740_command: sending.. ");
-        for (i = 0; i < sizeof(ecb[ecbno])-10; i++)
-            printk("%02x ", ((unchar *)&ecb[ecbno])[i]);
+	printk("aha1740_command: sending.. ");
+	for (i = 0; i < sizeof(ecb[ecbno])-10; i++)
+	    printk("%02x ", ((unchar *)&ecb[ecbno])[i]);
     }
     printk("\n");
 #endif
@@ -361,26 +376,23 @@ int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
 	  non-terminating while loops with interrupts disabled.  So did
 	  I when I wrote it, but the Adaptec Spec says the card is so fast,
 	  that this problem virtually never occurs so I've kept it.  We
-          do printk a warning first, so that you'll know if it happens.
-	  In practive the only time we've seen this message is when some-
+	  do printk a warning first, so that you'll know if it happens.
+	  In practice the only time we've seen this message is when some-
 	  thing else is in the driver was broken, like _makecode(), or
 	  when a scsi device hung the scsi bus.  Even under these conditions,
 	  The loop actually only cycled < 3 times (we instrumented it). */
-        ulong adrs;
 
 	DEB(printk("aha1740[%d] critical section\n",ecbno));
+	save_flags(flags);
 	cli();
 	if ( ! (inb(G2STAT) & G2STAT_MBXOUT) )
 	{
 	    printk("aha1740[%d]_mbxout wait!\n",ecbno);
 	    cli(); /* printk may have done a sti()! */
 	}
+	mb();
 	while ( ! (inb(G2STAT) & G2STAT_MBXOUT) );	/* Oh Well. */
-	adrs = (ulong) &(ecb[ecbno]);			/* Spit the command */
-	outb((char) (adrs&0xff), MBOXOUT0);		/* out, note this set */
-	outb((char) ((adrs>>8)&0xff), MBOXOUT1);	/* of outb's must be */
-	outb((char) ((adrs>>16)&0xff), MBOXOUT2);	/* atomic */
-	outb((char) ((adrs>>24)&0xff), MBOXOUT3);
+	outl(virt_to_bus(ecb+ecbno), MBOXOUT0);
 	if ( inb(G2STAT) & G2STAT_BUSY )
 	{
 	    printk("aha1740[%d]_attn wait!\n",ecbno);
@@ -388,7 +400,7 @@ int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
 	}
 	while ( inb(G2STAT) & G2STAT_BUSY );		/* And Again! */
 	outb(ATTN_START | (target & 7), ATTN);	/* Start it up */
-	sti();
+	restore_flags(flags);
 	DEB(printk("aha1740[%d] request queued.\n",ecbno));
     }
     else
@@ -423,21 +435,24 @@ void aha1740_getconfig(void)
   static int intab[] = { 9,10,11,12,0,14,15,0 };
 
   irq_level = intab [ inb(INTDEF)&0x7 ];
+  outb(inb(INTDEF) | 0x10, INTDEF);
 }
 
-int aha1740_detect(int hostnum)
+int aha1740_detect(Scsi_Host_Template * tpnt)
 {
+    tpnt->proc_dir = &proc_scsi_aha1740;
+
     memset(&ecb, 0, sizeof(struct ecb));
     DEB(printk("aha1740_detect: \n"));
     
     for ( slot=MINEISA; slot <= MAXEISA; slot++ )
     {
 	base = SLOTBASE(slot);
-
-	/* The ioports for eisa boards are generally beyond that used in the
-	   check,snarf_region code, but this may change at some point, so we
-	   go through the motions. */
-
+	/*
+	 * The ioports for eisa boards are generally beyond that used in the
+	 * check/allocate region code, but this may change at some point,
+	 * so we go through the motions.
+	 */
 	if(check_region(base, 0x5c)) continue;  /* See if in use */
 	if ( aha1740_test_port())  break;
     }
@@ -448,8 +463,8 @@ int aha1740_detect(int hostnum)
 
     if ( (inb(G2STAT) & (G2STAT_MBXOUT | G2STAT_BUSY) ) != G2STAT_MBXOUT )
     {	/* If the card isn't ready, hard reset it */
-        outb(G2CNTRL_HRST,G2CNTRL);
-        outb(0,G2CNTRL);    
+	outb(G2CNTRL_HRST,G2CNTRL);
+	outb(0,G2CNTRL);    
     }
 
     printk("Configuring Adaptec at IO:%x, IRQ %d\n",base,
@@ -457,12 +472,12 @@ int aha1740_detect(int hostnum)
 
     DEB(printk("aha1740_detect: enable interrupt channel %d\n", irq_level));
 
-    if (request_irq(irq_level,aha1740_intr_handle))
+    if (request_irq(irq_level,aha1740_intr_handle, 0, "aha1740", NULL))
     {
-        printk("Unable to allocate IRQ for adaptec controller.\n");
-        return 0;
+	printk("Unable to allocate IRQ for adaptec controller.\n");
+	return 0;
     }
-    snarf_region(base, 0x5c);  /* Reserve the space that we need to use */
+    request_region(base, 0x5c,"aha1740");  /* Reserve the space that we need to use */
     return 1;
 }
 
@@ -474,10 +489,10 @@ but it hasn't happened yet, and doing aborts brings the Adaptec to its
 knees.  I cannot (at this moment in time) think of any reason to reset the
 card once it's running.  So there. */
 
-int aha1740_abort(Scsi_Cmnd * SCpnt, int i)
+int aha1740_abort(Scsi_Cmnd * SCpnt)
 {
     DEB(printk("aha1740_abort called\n"));
-    return 0;
+    return SCSI_ABORT_SNOOZE;
 }
 
 /* We do not implement a reset function here, but the upper level code assumes
@@ -487,12 +502,12 @@ int aha1740_abort(Scsi_Cmnd * SCpnt, int i)
 int aha1740_reset(Scsi_Cmnd * SCpnt)
 {
     DEB(printk("aha1740_reset called\n"));
-    if (SCpnt) SCpnt->flags |= NEEDS_JUMPSTART;
-    return 0;
+    return SCSI_RESET_PUNT;
 }
 
-int aha1740_biosparam(int size, int dev, int* ip)
+int aha1740_biosparam(Disk * disk, kdev_t dev, int* ip)
 {
+  int size = disk->capacity;
 DEB(printk("aha1740_biosparam\n"));
   ip[0] = 64;
   ip[1] = 32;
@@ -500,6 +515,13 @@ DEB(printk("aha1740_biosparam\n"));
 /*  if (ip[2] >= 1024) ip[2] = 1024; */
   return 0;
 }
+
+#ifdef MODULE
+/* Eventually this will go into an include file, but this will be later */
+Scsi_Host_Template driver_template = AHA1740;
+
+#include "scsi_module.c"
+#endif
 
 /* Okay, you made it all the way through.  As of this writing, 3/31/93, I'm
 brad@saturn.gaylord.com or brad@bradpc.gaylord.com.  I'll try to help as time

@@ -12,10 +12,13 @@
  *   linux/fs/isofs  Copyright (C) 1991  Eric Youngdale
  */
 
+#include <linux/module.h>
+
 #include <linux/fs.h>
 #include <linux/hpfs_fs.h>
 #include <linux/errno.h>
 #include <linux/malloc.h>
+#include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/locks.h>
 #include <linux/stat.h>
@@ -24,6 +27,7 @@
 #include <asm/segment.h>
 
 #include "hpfs.h"
+#include "hpfs_caps.h"
 
 /* 
  * HPFS is a mixture of 512-byte blocks and 2048-byte blocks.  The 2k blocks
@@ -123,7 +127,7 @@ typedef void nonconst;
 
 static void hpfs_read_inode(struct inode *);
 static void hpfs_put_super(struct super_block *);
-static void hpfs_statfs(struct super_block *, struct statfs *);
+static void hpfs_statfs(struct super_block *, struct statfs *, int);
 static int hpfs_remount_fs(struct super_block *, int *, char *);
 
 static const struct super_operations hpfs_sops =
@@ -151,7 +155,7 @@ static const struct file_operations hpfs_file_ops =
 	NULL,				/* readdir - bad */
 	NULL,				/* select - default */
 	NULL,				/* ioctl - default */
-	generic_mmap,			/* mmap */
+	generic_file_mmap,		/* mmap */
 	NULL,				/* no special open is needed */
 	NULL,				/* release */
 	file_fsync,			/* fsync */
@@ -171,6 +175,8 @@ static const struct inode_operations hpfs_file_iops =
 	NULL,				/* rename */
 	NULL,				/* readlink */
 	NULL,				/* follow_link */
+	generic_readpage,		/* readpage */
+	NULL,				/* writepage */
 	(int (*)(struct inode *, int))
 	&hpfs_bmap,			/* bmap */
 	NULL,				/* truncate */
@@ -182,7 +188,7 @@ static const struct inode_operations hpfs_file_iops =
 static int hpfs_dir_read(struct inode *inode, struct file *filp,
 			 char *buf, int count);
 static int hpfs_readdir(struct inode *inode, struct file *filp,
-			struct dirent *dirent, int count);
+			void *dirent, filldir_t filldir);
 static int hpfs_lookup(struct inode *, const char *, int, struct inode **);
 
 static const struct file_operations hpfs_dir_ops =
@@ -213,6 +219,8 @@ static const struct inode_operations hpfs_dir_iops =
 	NULL,				/* rename */
 	NULL,				/* readlink */
 	NULL,				/* follow_link */
+	NULL,				/* readpage */
+	NULL,				/* writepage */
 	NULL,				/* bmap */
 	NULL,				/* truncate */
 	NULL,				/* permission */
@@ -228,39 +236,37 @@ struct quad_buffer_head {
 /* forwards */
 
 static int parse_opts(char *opts, uid_t *uid, gid_t *gid, umode_t *umask,
-		      int *lowercase, int *conv);
+		      int *lowercase, int *conv, int *nocheck);
 static int check_warn(int not_ok,
 		      const char *p1, const char *p2, const char *p3);
 static int zerop(void *addr, unsigned len);
 static void count_dnodes(struct inode *inode, dnode_secno dno,
 			 unsigned *n_dnodes, unsigned *n_subdirs);
 static unsigned count_bitmap(struct super_block *s);
-static unsigned count_one_bitmap(dev_t dev, secno secno);
+static unsigned count_one_bitmap(kdev_t dev, secno secno);
 static secno bplus_lookup(struct inode *inode, struct bplus_header *b,
 			  secno file_secno, struct buffer_head **bhp);
 static struct hpfs_dirent *map_dirent(struct inode *inode, dnode_secno dno,
 				    const unsigned char *name, unsigned len,
 				      struct quad_buffer_head *qbh);
-static struct hpfs_dirent *map_pos_dirent(struct inode *inode, off_t *posp,
+static struct hpfs_dirent *map_pos_dirent(struct inode *inode, loff_t *posp,
 					  struct quad_buffer_head *qbh);
-static void write_one_dirent(struct dirent *dirent, const unsigned char *name,
-			     unsigned namelen, ino_t ino, int lowercase);
 static dnode_secno dir_subdno(struct inode *inode, unsigned pos);
-static struct hpfs_dirent *map_nth_dirent(dev_t dev, dnode_secno dno,
+static struct hpfs_dirent *map_nth_dirent(kdev_t dev, dnode_secno dno,
 					  int n,
 					  struct quad_buffer_head *qbh);
 static unsigned choose_conv(unsigned char *p, unsigned len);
 static unsigned convcpy_tofs(unsigned char *out, unsigned char *in,
 			     unsigned len);
-static dnode_secno fnode_dno(dev_t dev, ino_t ino);
-static struct fnode *map_fnode(dev_t dev, ino_t ino,
+static dnode_secno fnode_dno(kdev_t dev, ino_t ino);
+static struct fnode *map_fnode(kdev_t dev, ino_t ino,
 			       struct buffer_head **bhp);
-static struct anode *map_anode(dev_t dev, unsigned secno,
+static struct anode *map_anode(kdev_t dev, unsigned secno,
 			       struct buffer_head **bhp);
-static struct dnode *map_dnode(dev_t dev, unsigned secno,
+static struct dnode *map_dnode(kdev_t dev, unsigned secno,
 			       struct quad_buffer_head *qbh);
-static void *map_sector(dev_t dev, unsigned secno, struct buffer_head **bhp);
-static void *map_4sectors(dev_t dev, unsigned secno,
+static void *map_sector(kdev_t dev, unsigned secno, struct buffer_head **bhp);
+static void *map_4sectors(kdev_t dev, unsigned secno,
 			  struct quad_buffer_head *qbh);
 static void brelse4(struct quad_buffer_head *qbh);
 
@@ -335,21 +341,26 @@ struct super_block *hpfs_read_super(struct super_block *s,
 	struct buffer_head *bh0, *bh1, *bh2;
 	struct quad_buffer_head qbh;
 	dnode_secno root_dno;
-	dev_t dev;
+	kdev_t dev;
 	uid_t uid;
 	gid_t gid;
 	umode_t umask;
 	int lowercase;
 	int conv;
 	int dubious;
+	int nocheck;
+
+	MOD_INC_USE_COUNT;
 
 	/*
 	 * Get the mount options
 	 */
 
-	if (!parse_opts(options, &uid, &gid, &umask, &lowercase, &conv)) {
+	if (!parse_opts(options, &uid, &gid, &umask, &lowercase, &conv,
+				 &nocheck)) {
 		printk("HPFS: syntax error in mount options.  Not mounted.\n");
 		s->s_dev = 0;
+		MOD_DEC_USE_COUNT;
 		return 0;
 	}
 
@@ -409,7 +420,7 @@ struct super_block *hpfs_read_super(struct super_block *s,
 	 * so don't
 	 */
 
-	if (dubious)
+	if (dubious && !nocheck)
 		goto bail2;
 
 	dubious |= check_warn((spareblock->n_dnode_spares !=
@@ -481,6 +492,7 @@ struct super_block *hpfs_read_super(struct super_block *s,
 	if (!s->s_mounted) {
 		printk("HPFS: hpfs_read_super: inode get failed\n");
 		s->s_dev = 0;
+		MOD_DEC_USE_COUNT;
 		return 0;
 	}
 
@@ -495,6 +507,7 @@ struct super_block *hpfs_read_super(struct super_block *s,
 		printk("HPFS: "
 		       "hpfs_read_super: root dir isn't in the root dir\n");
 		s->s_dev = 0;
+		MOD_DEC_USE_COUNT;
 		return 0;
 	}
 
@@ -514,6 +527,7 @@ struct super_block *hpfs_read_super(struct super_block *s,
  bail:
 	s->s_dev = 0;
 	unlock_super(s);
+	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -536,15 +550,16 @@ static int zerop(void *addr, unsigned len)
  */
 
 static int parse_opts(char *opts, uid_t *uid, gid_t *gid, umode_t *umask,
-		      int *lowercase, int *conv)
+		      int *lowercase, int *conv, int *nocheck)
 {
 	char *p, *rhs;
 
 	*uid = current->uid;
 	*gid = current->gid;
-	*umask = current->umask;
+	*umask = current->fs->umask;
 	*lowercase = 1;
 	*conv = CONV_BINARY;
+        *nocheck = 0;
 
 	if (!opts)
 		return 1;
@@ -591,8 +606,10 @@ static int parse_opts(char *opts, uid_t *uid, gid_t *gid, umode_t *umask,
 			else
 				return 0;
 		}
+		else if (!strcmp(p,"nocheck")) 
+			*nocheck=1;
 		else
-			return 0;
+			return 1;
 	}
 
 	return 1;
@@ -715,19 +732,21 @@ static void hpfs_put_super(struct super_block *s)
 	lock_super(s);
 	s->s_dev = 0;
 	unlock_super(s);
+	MOD_DEC_USE_COUNT;
 }
 
 /*
  * statfs.  For free inode counts we report the count of dnodes in the
- * directory band -- not exactly right but pretty analagous.
+ * directory band -- not exactly right but pretty analogous.
  */
 
-static void hpfs_statfs(struct super_block *s, struct statfs *buf)
+static void hpfs_statfs(struct super_block *s, struct statfs *buf, int bufsiz)
 {
+	struct statfs tmp;
+
 	/*
 	 * count the bits in the bitmaps, unless we already have
 	 */
-
 	if (s->s_hpfs_n_free == -1) {
 		s->s_hpfs_n_free = count_bitmap(s);
 		s->s_hpfs_n_free_dnodes =
@@ -737,15 +756,15 @@ static void hpfs_statfs(struct super_block *s, struct statfs *buf)
 	/*
 	 * fill in the user statfs struct
 	 */
-
-	put_fs_long(s->s_magic, &buf->f_type);
-	put_fs_long(512, &buf->f_bsize);
-	put_fs_long(s->s_hpfs_fs_size, &buf->f_blocks);
-	put_fs_long(s->s_hpfs_n_free, &buf->f_bfree);
-	put_fs_long(s->s_hpfs_n_free, &buf->f_bavail);
-	put_fs_long(s->s_hpfs_dirband_size, &buf->f_files);
-	put_fs_long(s->s_hpfs_n_free_dnodes, &buf->f_ffree);
-	put_fs_long(254, &buf->f_namelen);
+	tmp.f_type = s->s_magic;
+	tmp.f_bsize = 512;
+	tmp.f_blocks = s->s_hpfs_fs_size;
+	tmp.f_bfree = s->s_hpfs_n_free;
+	tmp.f_bavail = s->s_hpfs_n_free;
+	tmp.f_files = s->s_hpfs_dirband_size;
+	tmp.f_ffree = s->s_hpfs_n_free_dnodes;
+	tmp.f_namelen = 254;
+	memcpy_tofs(buf, &tmp, bufsiz);
 }
 
 /*
@@ -834,7 +853,7 @@ static unsigned count_bitmap(struct super_block *s)
  * Read in one bit map, count the bits, return the count.
  */
 
-static unsigned count_one_bitmap(dev_t dev, secno secno)
+static unsigned count_one_bitmap(kdev_t dev, secno secno)
 {
 	struct quad_buffer_head qbh;
 	char *bits;
@@ -873,7 +892,7 @@ static int hpfs_file_read(struct inode *inode, struct file *filp,
 	/*
 	 * truncate count at EOF
 	 */
-	if (count > inode->i_size - filp->f_pos)
+	if (count > inode->i_size - (off_t) filp->f_pos)
 		count = inode->i_size - filp->f_pos;
 
 	start = buf;
@@ -919,7 +938,7 @@ static int hpfs_file_read(struct inode *inode, struct file *filp,
 			 * squeeze out \r, output length varies
 			 */
 			n0 = convcpy_tofs(buf, block + r, n);
-			if (count > inode->i_size - filp->f_pos - n + n0)
+			if (count > inode->i_size - (off_t) filp->f_pos - n + n0)
 				count = inode->i_size - filp->f_pos - n + n0;
 		}
 
@@ -980,7 +999,7 @@ static unsigned convcpy_tofs(unsigned char *out, unsigned char *in,
 		unsigned c = *in++;
 		if (c == '\r' && (len == 0 || *in == '\n'));
 		else
-			put_fs_byte(c, out++);
+			put_user(c, out++);
 	}
 
 	return out - start;
@@ -1205,12 +1224,8 @@ static inline int memcasecmp(const unsigned char *s1, const unsigned char *s2,
 
 	if (n != 0)
 		do {
-			unsigned c1 = *s1++;
-			unsigned c2 = *s2++;
-			if (c1 - 'a' < 26)
-				c1 -= 040;
-			if (c2 - 'a' < 26)
-				c2 -= 040;
+			unsigned c1 = linux_char_to_upper_linux (*s1++);
+			unsigned c2 = hpfs_char_to_upper_linux (*s2++);
 			if ((t = c1 - c2) != 0)
 				return t;
 		} while (--n != 0);
@@ -1296,7 +1311,7 @@ static struct hpfs_dirent *map_dirent(struct inode *inode, dnode_secno dno,
 	/*
 	 * name not found.
 	 */
-
+	brelse4(qbh);
 	return 0;
 }
 
@@ -1305,6 +1320,11 @@ static struct hpfs_dirent *map_dirent(struct inode *inode, dnode_secno dno,
  * the interface with libc just does not permit more than 1.  If it gets
  * fixed, throw this out and just walk the tree and write records into
  * the user buffer.)
+ *
+ * [ we now can handle multiple dirents, although the current libc doesn't
+ *   use that. The way hpfs does this is pretty strange, as we need to do
+ *   the name translation etc before calling "filldir()". This is untested,
+ *   as I don't have any hpfs partitions to test against.   Linus ]
  *
  * We keep track of our position in the dnode tree with a sort of
  * dewey-decimal record of subtree locations.  Like so:
@@ -1325,82 +1345,84 @@ static struct hpfs_dirent *map_dirent(struct inode *inode, dnode_secno dno,
  * we won't have to repeatedly scan the top levels of the tree. 
  */
 
-static int hpfs_readdir(struct inode *inode, struct file *filp,
-			struct dirent *dirent, int likely_story)
+/*
+ * Translate the given name: Blam it to lowercase if the mount option said to.
+ */
+
+static void translate_hpfs_name(const unsigned char * from, int len, char * to, int lowercase)
+{
+	while (len > 0) {
+		unsigned t = *from;
+		len--;
+		if (lowercase)
+			t = hpfs_char_to_lower_linux (t);
+		else
+			t = hpfs_char_to_linux (t);
+		*to = t;
+		from++;
+		to++;
+	}
+}
+
+static int hpfs_readdir(struct inode *inode, struct file *filp, void * dirent,
+	filldir_t filldir)
 {
 	struct quad_buffer_head qbh;
 	struct hpfs_dirent *de;
 	int namelen, lc;
 	ino_t ino;
+	char * tempname;
+	long old_pos;
 
 	if (inode == 0
 	    || inode->i_sb == 0
 	    || !S_ISDIR(inode->i_mode))
 		return -EBADF;
 
-	lc = inode->i_sb->s_hpfs_lowercase;
+	tempname = (char *) __get_free_page(GFP_KERNEL);
+	if (!tempname)
+		return -ENOMEM;
 
-	switch (filp->f_pos) {
+	lc = inode->i_sb->s_hpfs_lowercase;
+	switch ((long) filp->f_pos) {
+	case -2:
+		break;
+
 	case 0:
-		write_one_dirent(dirent, ".", 1, inode->i_ino, lc);
+		if (filldir(dirent, ".", 1, filp->f_pos, inode->i_ino) < 0)
+			break;
 		filp->f_pos = -1;
-		return 1;
+		/* fall through */
 
 	case -1:
-		write_one_dirent(dirent, "..", 2,
-				 inode->i_hpfs_parent_dir, lc);
+		if (filldir(dirent, "..", 2, filp->f_pos, inode->i_hpfs_parent_dir) < 0)
+			break;
 		filp->f_pos = 1;
-		return 2;
-
-	case -2:
-		return 0;
+		/* fall through */
 
 	default:
-		de = map_pos_dirent(inode, &filp->f_pos, &qbh);
-		if (!de) {
-			filp->f_pos = -2;
-			return 0;
+		for (;;) {
+			old_pos = filp->f_pos;
+			de = map_pos_dirent(inode, &filp->f_pos, &qbh);
+			if (!de) {
+				filp->f_pos = -2;
+				break;
+			}
+			namelen = de->namelen;
+			translate_hpfs_name(de->name, namelen, tempname, lc);
+			if (de->directory)
+				ino = dir_ino(de->fnode);
+			else
+				ino = file_ino(de->fnode);
+			brelse4(&qbh);
+			if (filldir(dirent, tempname, namelen, old_pos, ino) < 0) {
+				filp->f_pos = old_pos;
+				break;
+			}
 		}
-
-		namelen = de->namelen;
-		if (de->directory)
-			ino = dir_ino(de->fnode);
-		else
-			ino = file_ino(de->fnode);
-		write_one_dirent(dirent, de->name, namelen, ino, lc);
-		brelse4(&qbh);
-
-		return namelen;
 	}
-}
-
-/*
- * Send the given name and ino off to the user dirent struct at *dirent.
- * Blam it to lowercase if the mount option said to.
- *
- * Note that Linux d_reclen is the length of the file name, and has nothing
- * to do with the length of the dirent record.
- */
-
-static void write_one_dirent(struct dirent *dirent, const unsigned char *name,
-			     unsigned namelen, ino_t ino, int lowercase)
-{
-	unsigned n;
-
-	put_fs_long(ino, &dirent->d_ino);
-	put_fs_word(namelen, &dirent->d_reclen);
-
-	if (lowercase)
-		for (n = namelen; n != 0;) {
-			unsigned t = name[--n];
-			if (t - 'A' < 26)
-				t += 040;
-			put_fs_byte(t, &dirent->d_name[n]);
-		}
-	else
-		memcpy_tofs(dirent->d_name, name, namelen);
-
-	put_fs_byte(0, &dirent->d_name[namelen]);
+	free_page((unsigned long) tempname);
+	return 0;
 }
 
 /*
@@ -1408,7 +1430,7 @@ static void write_one_dirent(struct dirent *dirent, const unsigned char *name,
  * increment *posp to point to the following dir entry. 
  */
 
-static struct hpfs_dirent *map_pos_dirent(struct inode *inode, off_t *posp,
+static struct hpfs_dirent *map_pos_dirent(struct inode *inode, loff_t *posp,
 					  struct quad_buffer_head *qbh)
 {
 	unsigned pos, q, r;
@@ -1535,7 +1557,7 @@ static dnode_secno dir_subdno(struct inode *inode, unsigned pos)
  * Return the dir entry at index n in dnode dno, or 0 if there isn't one
  */
 
-static struct hpfs_dirent *map_nth_dirent(dev_t dev, dnode_secno dno,
+static struct hpfs_dirent *map_nth_dirent(kdev_t dev, dnode_secno dno,
 					  int n,
 					  struct quad_buffer_head *qbh)
 {
@@ -1565,7 +1587,7 @@ static int hpfs_dir_read(struct inode *inode, struct file *filp,
 
 /* Return the dnode pointer in a directory fnode */
 
-static dnode_secno fnode_dno(dev_t dev, ino_t ino)
+static dnode_secno fnode_dno(kdev_t dev, ino_t ino)
 {
 	struct buffer_head *bh;
 	struct fnode *fnode;
@@ -1582,7 +1604,7 @@ static dnode_secno fnode_dno(dev_t dev, ino_t ino)
 
 /* Map an fnode into a buffer and return pointers to it and to the buffer. */
 
-static struct fnode *map_fnode(dev_t dev, ino_t ino, struct buffer_head **bhp)
+static struct fnode *map_fnode(kdev_t dev, ino_t ino, struct buffer_head **bhp)
 {
 	struct fnode *fnode;
 
@@ -1603,7 +1625,7 @@ static struct fnode *map_fnode(dev_t dev, ino_t ino, struct buffer_head **bhp)
 
 /* Map an anode into a buffer and return pointers to it and to the buffer. */
 
-static struct anode *map_anode(dev_t dev, unsigned secno,
+static struct anode *map_anode(kdev_t dev, unsigned secno,
 			       struct buffer_head **bhp)
 {
 	struct anode *anode;
@@ -1625,7 +1647,7 @@ static struct anode *map_anode(dev_t dev, unsigned secno,
 
 /* Map a dnode into a buffer and return pointers to it and to the buffer. */
 
-static struct dnode *map_dnode(dev_t dev, unsigned secno,
+static struct dnode *map_dnode(kdev_t dev, unsigned secno,
 			       struct quad_buffer_head *qbh)
 {
 	struct dnode *dnode;
@@ -1647,7 +1669,7 @@ static struct dnode *map_dnode(dev_t dev, unsigned secno,
 
 /* Map a sector into a buffer and return pointers to it and to the buffer. */
 
-static void *map_sector(dev_t dev, unsigned secno, struct buffer_head **bhp)
+static void *map_sector(kdev_t dev, unsigned secno, struct buffer_head **bhp)
 {
 	struct buffer_head *bh;
 
@@ -1661,7 +1683,7 @@ static void *map_sector(dev_t dev, unsigned secno, struct buffer_head **bhp)
 
 /* Map 4 sectors into a 4buffer and return pointers to it and to the buffer. */
 
-static void *map_4sectors(dev_t dev, unsigned secno,
+static void *map_4sectors(kdev_t dev, unsigned secno,
 			  struct quad_buffer_head *qbh)
 {
 	struct buffer_head *bh;
@@ -1676,8 +1698,7 @@ static void *map_4sectors(dev_t dev, unsigned secno,
 	if (!data)
 		goto bail;
 
-	qbh->bh[0] = bh = breada(dev,
-				 secno, secno + 1, secno + 2, secno + 3, -1);
+	qbh->bh[0] = bh = breada(dev, secno, 512, 0, UINT_MAX);
 	if (!bh)
 		goto bail0;
 	memcpy(data, bh->b_data, 512);
@@ -1722,3 +1743,30 @@ static void brelse4(struct quad_buffer_head *qbh)
 	brelse(qbh->bh[0]);
 	kfree_s(qbh->data, 2048);
 }
+
+static struct file_system_type hpfs_fs_type = {
+        hpfs_read_super, "hpfs", 1, NULL
+};
+
+int init_hpfs_fs(void)
+{
+        return register_filesystem(&hpfs_fs_type);
+}
+
+#ifdef MODULE
+int init_module(void)
+{
+	int status;
+
+	if ((status = init_hpfs_fs()) == 0)
+		register_symtab(0);
+	return status;
+}
+
+void cleanup_module(void)
+{
+        unregister_filesystem(&hpfs_fs_type);
+}
+
+#endif
+

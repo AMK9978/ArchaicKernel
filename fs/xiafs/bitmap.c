@@ -18,14 +18,10 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 
+#include <asm/bitops.h>
+
 #include "xiafs_mac.h"
 
-
-#define clear_bit(nr,addr) ({\
-char res; \
-__asm__ __volatile__("btrl %1,%2\n\tsetnb %0": \
-"=q" (res):"r" (nr),"m" (*(addr))); \
-res;})
 
 char internal_error_message[]="XIA-FS: internal error %s %d\n"; 
 
@@ -39,7 +35,6 @@ static int find_first_zero(struct buffer_head *bh, int start_bit, int end_bit)
 
     int end, i, j, tmp;
     u_long *bmap;
-    char res;
 
     bmap=(u_long *)bh->b_data;
     end = end_bit >> 5;
@@ -59,13 +54,11 @@ zone_found:
     for (j=0; j < 32; j++)
         if (tmp & (1 << j))
 	    break;
-    __asm__ ("btsl %1,%2\n\tsetb %0": \
-	     "=q" (res):"r" (j),"m" (bmap[i]));
-    if (res) {
+    if (set_bit(j,bmap+i)) {
         start_bit=j + (i << 5) + 1;
 	goto repeat;
     }
-    bh->b_dirt=1;
+    mark_buffer_dirty(bh, 1);
     return j + (i << 5);
 }
 
@@ -234,18 +227,18 @@ void xiafs_free_zone(struct super_block * sb, int d_addr)
     }
     bh = get_hash_table(sb->s_dev, d_addr, XIAFS_ZSIZE(sb));
     if (bh)
-        bh->b_dirt=0;
+        mark_buffer_clean(bh);
     brelse(bh);
     bit=d_addr - sb->u.xiafs_sb.s_firstdatazone + 1;
     bh = get_zmap_zone(sb, bit, NULL);
     if (!bh)
 	return;
     offset = bit & (XIAFS_BITS_PER_Z(sb) -1);
-    if (clear_bit(offset, bh->b_data))
-        printk("XIA-FS: dev %04x"
+    if (!clear_bit(offset, bh->b_data))
+        printk("XIA-FS: dev %s"
 	       " block bit %u (0x%x) already cleared (%s %d)\n",
-	       sb->s_dev, bit, bit, WHERE_ERR);
-    bh->b_dirt = 1;
+	       kdevname(sb->s_dev), bit, bit, WHERE_ERR);
+    mark_buffer_dirty(bh, 1);
     xiafs_unlock_super(sb, sb->u.xiafs_sb.s_zmap_cached);
 }
 
@@ -276,8 +269,8 @@ int xiafs_new_zone(struct super_block * sb, u_long prev_addr)
 	return 0;
     }
     clear_buf(bh);
-    bh->b_uptodate = 1;
-    bh->b_dirt = 1;
+    mark_buffer_uptodate(bh, 1);
+    mark_buffer_dirty(bh, 1);
     brelse(bh);
     return tmp;
 }
@@ -290,8 +283,9 @@ void xiafs_free_inode(struct inode * inode)
 
     if (!inode)
         return;
-    if (!inode->i_dev || inode->i_count!=1 || inode->i_nlink || !inode->i_sb ||
-	inode->i_ino < 3 || inode->i_ino > inode->i_sb->u.xiafs_sb.s_ninodes) {
+    if (!inode->i_dev || inode->i_count!=1
+	|| inode->i_nlink || !inode->i_sb || inode->i_ino < 3
+	|| inode->i_ino > inode->i_sb->u.xiafs_sb.s_ninodes) {
         printk("XIA-FS: bad inode (%s %d)\n", WHERE_ERR);
 	return;
     }
@@ -301,11 +295,11 @@ void xiafs_free_inode(struct inode * inode)
     if (!bh)
 	return;
     clear_inode(inode);
-    if (clear_bit(ino & (XIAFS_BITS_PER_Z(sb)-1), bh->b_data))
-        printk("XIA-FS: dev %04x"
+    if (!clear_bit(ino & (XIAFS_BITS_PER_Z(sb)-1), bh->b_data))
+        printk("XIA-FS: dev %s"
 	       "inode bit %ld (0x%lx) already cleared (%s %d)\n",
-	       inode->i_dev, ino, ino, WHERE_ERR);
-    bh->b_dirt = 1;
+	       kdevname(inode->i_dev), ino, ino, WHERE_ERR);
+    mark_buffer_dirty(bh, 1);
     xiafs_unlock_super(sb, sb->u.xiafs_sb.s_imap_cached);
 }
 
@@ -329,8 +323,8 @@ struct inode * xiafs_new_inode(struct inode * dir)
     inode->i_count = 1;
     inode->i_nlink = 1;
     inode->i_dev = sb->s_dev;
-    inode->i_uid = current->euid;
-    inode->i_gid = (dir->i_mode & S_ISGID) ? dir->i_gid : current->egid;
+    inode->i_uid = current->fsuid;
+    inode->i_gid = (dir->i_mode & S_ISGID) ? dir->i_gid : current->fsgid;
     inode->i_dirt = 1;
     inode->i_ino = tmp;
     inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;

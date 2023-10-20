@@ -1,11 +1,11 @@
 /*
  *  linux/fs/isofs/rock.c
  *
- *  (C) 1992  Eric Youngdale
+ *  (C) 1992, 1993  Eric Youngdale
  *
  *  Rock Ridge Extensions to iso9660
  */
-#include <linux/config.h>
+
 #include <linux/stat.h>
 #include <linux/sched.h>
 #include <linux/iso_fs.h>
@@ -32,7 +32,7 @@
       if(rr->u.SP.magic[1] != 0xef) FAIL;
 
 /* We define a series of macros because each function must do exactly the
-   same thing in certain places.  We use the macros to ensure that everyting
+   same thing in certain places.  We use the macros to ensure that everything
    is done correctly */
 
 #define CONTINUE_DECLS \
@@ -56,6 +56,7 @@
     int block, offset, offset1; \
     struct buffer_head * bh; \
     buffer = kmalloc(cont_size,GFP_KERNEL); \
+    if (!buffer) goto out; \
     block = cont_extent; \
     offset = cont_offset; \
     offset1 = 0; \
@@ -65,23 +66,28 @@
       offset &= 1023; \
       if(offset + cont_size >= 1024) { \
 	  bh = bread(DEV->i_dev, block++, ISOFS_BUFFER_SIZE(DEV)); \
-	  memcpy(buffer, bh->b_data + offset, 1024 - offset); \
-          brelse(bh); \
-	  offset1 = 1024 - offset; \
-	  offset = 0; \
+	  if(!bh) {printk("Unable to read continuation Rock Ridge record\n"); \
+		     kfree(buffer); \
+		     buffer = NULL; } else { \
+	    memcpy(buffer, bh->b_data + offset, 1024 - offset); \
+            brelse(bh); \
+	    offset1 = 1024 - offset; \
+	    offset = 0;} \
       }  \
     };     \
-    bh = bread(DEV->i_dev, block, ISOFS_BUFFER_SIZE(DEV)); \
-    if(bh){       \
-      memcpy(buffer + offset1, bh->b_data + offset, cont_size - offset1); \
-      brelse(bh); \
-      chr = (unsigned char *) buffer; \
-      len = cont_size; \
-      cont_extent = 0; \
-      cont_size = 0; \
-      cont_offset = 0; \
-      goto LABEL; \
-    };    \
+    if(buffer) { \
+      bh = bread(DEV->i_dev, block, ISOFS_BUFFER_SIZE(DEV)); \
+      if(bh){       \
+        memcpy(buffer + offset1, bh->b_data + offset, cont_size - offset1); \
+        brelse(bh); \
+        chr = (unsigned char *) buffer; \
+        len = cont_size; \
+        cont_extent = 0; \
+        cont_size = 0; \
+        cont_offset = 0; \
+        goto LABEL; \
+      };    \
+    } \
     printk("Unable to read rock-ridge attributes\n");    \
   }}
 
@@ -209,6 +215,7 @@ int get_rock_ridge_filename(struct iso_directory_record * de,
 	     deallocate the mem fairly soon
 	     after control is returned */
 
+	  if (!retname) goto out;
 	  *retname = 0; /* Zero length string */
 	  retnamlen = 0;
 	};
@@ -248,6 +255,7 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 			   struct inode * inode){
   int len;
   unsigned char * chr;
+  int symlink_len = 0;
   CONTINUE_DECLS;
 
   if (!inode->i_sb->u.isofs_sb.s_rock) return 0;
@@ -295,12 +303,23 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 	{ int high, low;
 	  high = isonum_733(rr->u.PN.dev_high);
 	  low = isonum_733(rr->u.PN.dev_low);
-	  inode->i_rdev = ((high << 8) | (low & 0xff)) & 0xffff;
+	  /*
+	   * The Rock Ridge standard specifies that if sizeof(dev_t) <= 4,
+	   * then the high field is unused, and the device number is completely
+	   * stored in the low field.  Some writers may ignore this subtlety,
+	   * and as a result we test to see if the entire device number is
+	   * stored in the low field, and use that.
+	   */
+	  if((low & ~0xff) && high == 0) {
+	    inode->i_rdev = MKDEV(low >> 8, low & 0xff);
+	  } else {
+	    inode->i_rdev = MKDEV(high, low);
+	  }
 	};
 	break;
       case SIG('T','F'):
 	/* Some RRIP writers incorrectly place ctime in the TF_CREATE field.
-	   Try and handle this correctly for either case. */
+	   Try to handle this correctly for either case. */
 	cnt = 0; /* Rock ridge never appears on a High Sierra disk */
 	if(rr->u.TF.flags & TF_CREATE) 
 	  inode->i_ctime = iso_date(rr->u.TF.times[cnt++].time, 0);
@@ -314,9 +333,10 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
       case SIG('S','L'):
 	{int slen;
 	 struct SL_component * slp;
+	 struct SL_component * oldslp;
 	 slen = rr->len - 5;
 	 slp = &rr->u.SL.link;
-	 inode->i_size = 0;
+	 inode->i_size = symlink_len;
 	 while (slen > 1){
 	   rootflag = 0;
 	   switch(slp->flags &~1){
@@ -337,12 +357,23 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 	     printk("Symlink component flag not implemented\n");
 	   };
 	   slen -= slp->len + 2;
+	   oldslp = slp;
 	   slp = (struct SL_component *) (((char *) slp) + slp->len + 2);
 
-	   if(slen < 2) break;
-	   if(!rootflag) inode->i_size += 1;
-	 };
-       };
+	   if(slen < 2) {
+	     if(    ((rr->u.SL.flags & 1) != 0) 
+		    && ((oldslp->flags & 1) == 0) ) inode->i_size += 1;
+	     break;
+	   }
+
+	   /*
+	    * If this component record isn't continued, then append a '/'.
+	    */
+	   if(   (!rootflag)
+		 && ((oldslp->flags & 1) == 0) ) inode->i_size += 1;
+	 }
+	}
+	symlink_len = inode->i_size;
 	break;
       case SIG('R','E'):
 	printk("Attempt to read inode for relocated directory\n");
@@ -352,8 +383,8 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 	printk("RR CL (%x)\n",inode->i_ino);
 #endif
 	inode->u.isofs_i.i_first_extent = isonum_733(rr->u.CL.location) <<
-		(ISOFS_BLOCK_BITS - ISOFS_BUFFER_BITS(inode));
-	reloc = iget(inode->i_sb, inode->u.isofs_i.i_first_extent << ISOFS_BUFFER_BITS(inode));
+		inode -> i_sb -> u.isofs_sb.s_log_zone_size;
+	reloc = iget(inode->i_sb, inode->u.isofs_i.i_first_extent);
 	inode->i_mode = reloc->i_mode;
 	inode->i_nlink = reloc->i_nlink;
 	inode->i_uid = reloc->i_uid;
@@ -414,16 +445,22 @@ char * get_rock_ridge_symlink(struct inode * inode)
   raw_inode = ((struct iso_directory_record *) pnt);
   
   if ((inode->i_ino & (bufsize - 1)) + *pnt > bufsize){
-    cpnt = kmalloc(1 << ISOFS_BLOCK_BITS, GFP_KERNEL);
-    memcpy(cpnt, bh->b_data, bufsize);
+    int frag1, offset;
+    
+    offset = (inode->i_ino & (bufsize - 1));
+    frag1 = bufsize - offset;
+    cpnt = kmalloc(*pnt,GFP_KERNEL);
+    if(!cpnt) return NULL;
+    memcpy(cpnt, bh->b_data + offset, frag1);
     brelse(bh);
     if (!(bh = bread(inode->i_dev,++block, bufsize))) {
-      kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+      kfree(cpnt);
       printk("unable to read i-node block");
       return NULL;
     };
-    memcpy((char *)cpnt+bufsize, bh->b_data, bufsize);
-    pnt = ((unsigned char *) cpnt) + (inode->i_ino & (bufsize - 1));
+    offset += *pnt - bufsize;
+    memcpy((char *)cpnt+frag1, bh->b_data, offset);
+    pnt = ((unsigned char *) cpnt);
     raw_inode = ((struct iso_directory_record *) pnt);
   };
   
@@ -434,7 +471,6 @@ char * get_rock_ridge_symlink(struct inode * inode)
   
  repeat:
   while (len > 1){ /* There may be one byte for padding somewhere */
-    if (rpnt) break;
     rr = (struct rock_ridge *) chr;
     if (rr->len == 0) goto out; /* Something got screwed up here */
     sig = (chr[0] << 8) + chr[1];
@@ -450,12 +486,14 @@ char * get_rock_ridge_symlink(struct inode * inode)
       break;
     case SIG('S','L'):
       {int slen;
+       struct SL_component * oldslp;
        struct SL_component * slp;
        slen = rr->len - 5;
        slp = &rr->u.SL.link;
        while (slen > 1){
 	 if (!rpnt){
 	   rpnt = (char *) kmalloc (inode->i_size +1, GFP_KERNEL);
+	   if (!rpnt) goto out;
 	   *rpnt = 0;
 	 };
 	 rootflag = 0;
@@ -477,11 +515,29 @@ char * get_rock_ridge_symlink(struct inode * inode)
 	   printk("Symlink component flag not implemented (%d)\n",slen);
 	 };
 	 slen -= slp->len + 2;
+	 oldslp = slp;
 	 slp = (struct SL_component *) (((char *) slp) + slp->len + 2);
 
-	 if(slen < 2) break;
-	 if(!rootflag) strcat(rpnt,"/");
+	 if(slen < 2) {
+	   /*
+	    * If there is another SL record, and this component record
+	    * isn't continued, then add a slash.
+	    */
+	   if(    ((rr->u.SL.flags & 1) != 0) 
+	       && ((oldslp->flags & 1) == 0) ) strcat(rpnt,"/");
+	   break;
+	 }
+
+	 /*
+	  * If this component record isn't continued, then append a '/'.
+	  */
+	 if(   (!rootflag)
+	    && ((oldslp->flags & 1) == 0) ) strcat(rpnt,"/");
+
        };
+       break;
+     case SIG('C','E'):
+       CHECK_CE; /* This tells is if there is a continuation record */
        break;
      default:
        break;

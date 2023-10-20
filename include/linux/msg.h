@@ -6,15 +6,6 @@
 #define MSG_NOERROR     010000  /* no error if message is too big */
 #define MSG_EXCEPT      020000  /* recv any msg except of specified type.*/
 
-
-/* one msg structure for each message */
-struct msg {
-    struct msg *msg_next;   /* next message on queue */
-    long  msg_type;          
-    char *msg_spot;         /* message text address */
-    short msg_ts;           /* message text size */
-};
-
 /* one msqid structure for each queue on the system */
 struct msqid_ds {
     struct ipc_perm msg_perm;
@@ -32,14 +23,13 @@ struct msqid_ds {
     ushort msg_lrpid;       /* last receive pid */
 };
 
-
 /* message buffer for msgsnd and msgrcv calls */
 struct msgbuf {
     long mtype;         /* type of message */
     char mtext[1];      /* message text */
 };
 
-
+/* buffer for msgctl calls IPC_INFO, MSG_INFO */
 struct msginfo {
     int msgpool;
     int msgmap; 
@@ -65,9 +55,24 @@ struct msginfo {
 
 #ifdef __KERNEL__
 
+/* one msg structure for each message */
+struct msg {
+    struct msg *msg_next;   /* next message on queue */
+    long  msg_type;          
+    char *msg_spot;         /* message text address */
+    time_t msg_stime;       /* msgsnd time */
+    short msg_ts;           /* message text size */
+};
+
 /* ipcs ctl commands */
 #define MSG_STAT 11
 #define MSG_INFO 12
+
+asmlinkage int sys_msgget (key_t key, int msgflg);
+asmlinkage int sys_msgsnd (int msqid, struct msgbuf *msgp, size_t msgsz, int msgflg);
+asmlinkage int sys_msgrcv (int msqid, struct msgbuf *msgp, size_t msgsz, long msgtyp,
+		       int msgflg);
+asmlinkage int sys_msgctl (int msqid, int cmd, struct msqid_ds *buf);
 
 #endif /* __KERNEL__ */
 

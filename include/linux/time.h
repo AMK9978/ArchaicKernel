@@ -1,9 +1,17 @@
 #ifndef _LINUX_TIME_H
 #define _LINUX_TIME_H
 
-struct timeval {
+#ifndef _STRUCT_TIMESPEC
+#define _STRUCT_TIMESPEC
+struct timespec {
 	long	tv_sec;		/* seconds */
-	long	tv_usec;	/* microseconds */
+	long	tv_nsec;	/* nanoseconds */
+};
+#endif /* _STRUCT_TIMESPEC */
+
+struct timeval {
+	int	tv_sec;		/* seconds */
+	int	tv_usec;	/* microseconds */
 };
 
 struct timezone {
@@ -12,6 +20,11 @@ struct timezone {
 };
 
 #define NFDBITS			__NFDBITS
+
+#ifdef __KERNEL__
+void do_gettimeofday(struct timeval *tv);
+void do_settimeofday(struct timeval *tv);
+#endif
 
 #define FD_SETSIZE		__FD_SETSIZE
 #define FD_SET(fd,fdsetp)	__FD_SET(fd,fdsetp)
@@ -26,6 +39,11 @@ struct timezone {
 #define	ITIMER_REAL	0
 #define	ITIMER_VIRTUAL	1
 #define	ITIMER_PROF	2
+
+struct  itimerspec {
+        struct  timespec it_interval;    /* timer period */
+        struct  timespec it_value;       /* timer expiration */
+};
 
 struct	itimerval {
 	struct	timeval it_interval;	/* timer interval */

@@ -6,9 +6,8 @@
  *  convert numbers according to section 7.3.3, etc.
  *
  *  isofs special functions.  This file was lifted in its entirety from
- * the bsd386 iso9660 filesystem, by Pace Williamson.
+ *  the 386bsd iso9660 filesystem, by Pace Willisson <pace@blitz.com>.
  */
-
 
 int
 isonum_711 (char * p)

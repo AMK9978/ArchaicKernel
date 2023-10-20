@@ -1,8 +1,6 @@
 #ifndef _LINUX_SCHED_H
 #define _LINUX_SCHED_H
 
-#define NEW_SWAP
-
 /*
  * define DEBUG if you want the wait-queues to have some extra
  * debugging code. It's not normally used, but might catch some
@@ -11,36 +9,30 @@
  *  #define DEBUG
  */
 
-#define HZ 100
+#include <asm/param.h>	/* for HZ */
 
-/*
- * System setup flags..
- */
-extern int hard_math;
-extern int x86;
-extern int ignore_irq13;
-extern int wp_works_ok;
+extern unsigned long event;
 
-/*
- * Bus types (default is ISA, but people can check others with these..)
- * MCA_bus hardcoded to 0 for now.
- */
-extern int EISA_bus;
-#define MCA_bus 0
-
+#include <linux/binfmts.h>
+#include <linux/personality.h>
 #include <linux/tasks.h>
+#include <linux/kernel.h>
 #include <asm/system.h>
+#include <asm/page.h>
+
+#include <linux/smp.h>
+#include <linux/tty.h>
+#include <linux/sem.h>
 
 /*
- * User space process size: 3GB. This is hardcoded into a few places,
- * so don't change it unless you know what you are doing.
+ * cloning flags:
  */
-#define TASK_SIZE	0xc0000000
-
-/*
- * Size of io_bitmap in longwords: 32 is ports 0-0x3ff.
- */
-#define IO_BITMAP_SIZE	32
+#define CSIGNAL		0x000000ff	/* signal mask to be sent at exit */
+#define CLONE_VM	0x00000100	/* set if VM shared between processes */
+#define CLONE_FS	0x00000200	/* set if fs info shared between processes */
+#define CLONE_FILES	0x00000400	/* set if open files shared between processes */
+#define CLONE_SIGHAND	0x00000800	/* set if signal handlers shared */
+#define CLONE_PID	0x00001000	/* set if pid shared */
 
 /*
  * These are the constant used to fake the fixed-point load-average
@@ -69,18 +61,22 @@ extern unsigned long avenrun[];		/* Load averages */
 #define CT_TO_SECS(x)	((x) / HZ)
 #define CT_TO_USECS(x)	(((x) % HZ) * 1000000/HZ)
 
+extern int nr_running, nr_tasks;
+extern int last_pid;
+
 #define FIRST_TASK task[0]
 #define LAST_TASK task[NR_TASKS-1]
 
 #include <linux/head.h>
 #include <linux/fs.h>
-#include <linux/mm.h>
 #include <linux/signal.h>
 #include <linux/time.h>
 #include <linux/param.h>
 #include <linux/resource.h>
-#include <linux/vm86.h>
-#include <linux/math_emu.h>
+#include <linux/ptrace.h>
+#include <linux/timer.h>
+
+#include <asm/processor.h>
 
 #define TASK_RUNNING		0
 #define TASK_INTERRUPTIBLE	1
@@ -88,6 +84,17 @@ extern unsigned long avenrun[];		/* Load averages */
 #define TASK_ZOMBIE		3
 #define TASK_STOPPED		4
 #define TASK_SWAPPING		5
+
+/*
+ * Scheduling policies
+ */
+#define SCHED_OTHER		0
+#define SCHED_FIFO		1
+#define SCHED_RR		2
+
+struct sched_param {
+	int sched_priority;
+};
 
 #ifndef NULL
 #define NULL ((void *) 0)
@@ -101,68 +108,67 @@ extern void trap_init(void);
 
 asmlinkage void schedule(void);
 
-#endif /* __KERNEL__ */
-
-struct i387_hard_struct {
-	long	cwd;
-	long	swd;
-	long	twd;
-	long	fip;
-	long	fcs;
-	long	foo;
-	long	fos;
-	long	st_space[20];	/* 8*10 bytes for each FP-reg = 80 bytes */
+/* ??? */
+struct files_struct {
+	/* ??? */
+	int count;
+	/* bit mask to close fds on exec */
+	fd_set close_on_exec;
+	/* do we have at most NR_OPEN available fds? I assume fd i maps into
+ 	 * each open file */	
+	struct file * fd[NR_OPEN];
 };
 
-struct i387_soft_struct {
-	long	cwd;
-	long	swd;
-	long	twd;
-	long	fip;
-	long	fcs;
-	long	foo;
-	long	fos;
-	long    top;
-	struct fpu_reg	regs[8];	/* 8*16 bytes for each FP-reg = 128 bytes */
-	unsigned char	lookahead;
-	struct info	*info;
-	unsigned long	entry_eip;
+#define INIT_FILES { \
+	1, \
+	{ { 0, } }, \
+	{ NULL, } \
+}
+
+struct fs_struct {
+	int count;
+	unsigned short umask;
+	struct inode * root, * pwd;
 };
 
-union i387_union {
-	struct i387_hard_struct hard;
-	struct i387_soft_struct soft;
+#define INIT_FS { \
+	1, \
+	0022, \
+	NULL, NULL \
+}
+
+struct mm_struct {
+	int count;
+	pgd_t * pgd;
+	unsigned long context;
+	unsigned long start_code, end_code, start_data, end_data;
+	unsigned long start_brk, brk, start_stack, start_mmap;
+	unsigned long arg_start, arg_end, env_start, env_end;
+	unsigned long rss, total_vm, locked_vm;
+	unsigned long def_flags;
+	struct vm_area_struct * mmap;
+	struct vm_area_struct * mmap_avl;
 };
 
-struct tss_struct {
-	unsigned short	back_link,__blh;
-	unsigned long	esp0;
-	unsigned short	ss0,__ss0h;
-	unsigned long	esp1;
-	unsigned short	ss1,__ss1h;
-	unsigned long	esp2;
-	unsigned short	ss2,__ss2h;
-	unsigned long	cr3;
-	unsigned long	eip;
-	unsigned long	eflags;
-	unsigned long	eax,ecx,edx,ebx;
-	unsigned long	esp;
-	unsigned long	ebp;
-	unsigned long	esi;
-	unsigned long	edi;
-	unsigned short	es, __esh;
-	unsigned short	cs, __csh;
-	unsigned short	ss, __ssh;
-	unsigned short	ds, __dsh;
-	unsigned short	fs, __fsh;
-	unsigned short	gs, __gsh;
-	unsigned short	ldt, __ldth;
-	unsigned short	trace, bitmap;
-	unsigned long	io_bitmap[IO_BITMAP_SIZE+1];
-	unsigned long	tr;
-	unsigned long	cr2, trap_no, error_code;
-	union i387_union i387;
+#define INIT_MM { \
+		1, \
+		swapper_pg_dir, \
+		0, \
+		0, 0, 0, 0, \
+		0, 0, 0, 0, \
+		0, 0, 0, 0, \
+		0, 0, 0, \
+		0, \
+		&init_mmap, &init_mmap }
+
+struct signal_struct {
+	int count;
+	struct sigaction action[32];
 };
+
+#define INIT_SIGNALS { \
+		1, \
+		{ {0,}, } }
 
 struct task_struct {
 /* these are hardcoded - don't touch */
@@ -173,70 +179,75 @@ struct task_struct {
 	unsigned long blocked;	/* bitmap of masked signals */
 	unsigned long flags;	/* per process flags, defined below */
 	int errno;
-	int debugreg[8];  /* Hardware debugging registers */
+	long debugreg[8];  /* Hardware debugging registers */
+	struct exec_domain *exec_domain;
 /* various fields */
+	struct linux_binfmt *binfmt;
 	struct task_struct *next_task, *prev_task;
-	struct sigaction sigaction[32];
+	struct task_struct *next_run,  *prev_run;
 	unsigned long saved_kernel_stack;
 	unsigned long kernel_stack_page;
 	int exit_code, exit_signal;
-	int elf_executable:1;
+	/* ??? */
+	unsigned long personality;
 	int dumpable:1;
-	int swappable:1;
 	int did_exec:1;
-	unsigned long start_code,end_code,end_data,start_brk,brk,start_stack,start_mmap;
-	unsigned long arg_start, arg_end, env_start, env_end;
-	int pid,pgrp,session,leader;
+	/* shouldn't this be pid_t? */
+	int pid;
+	int pgrp;
+	int tty_old_pgrp;
+	int session;
+	/* boolean value for session group leader */
+	int leader;
 	int	groups[NGROUPS];
 	/* 
 	 * pointers to (original) parent process, youngest child, younger sibling,
 	 * older sibling, respectively.  (p->father can be replaced with 
 	 * p->p_pptr->pid)
 	 */
-	struct task_struct *p_opptr,*p_pptr, *p_cptr, *p_ysptr, *p_osptr;
+	struct task_struct *p_opptr, *p_pptr, *p_cptr, *p_ysptr, *p_osptr;
 	struct wait_queue *wait_chldexit;	/* for wait4() */
-	/*
-	 * For ease of programming... Normal sleeps don't need to
-	 * keep track of a wait-queue: every task has an entry of its own
-	 */
-	unsigned short uid,euid,suid;
-	unsigned short gid,egid,sgid;
-	unsigned long timeout;
+	unsigned short uid,euid,suid,fsuid;
+	unsigned short gid,egid,sgid,fsgid;
+	unsigned long timeout, policy, rt_priority;
 	unsigned long it_real_value, it_prof_value, it_virt_value;
 	unsigned long it_real_incr, it_prof_incr, it_virt_incr;
-	long utime,stime,cutime,cstime,start_time;
-	unsigned long min_flt, maj_flt;
-	unsigned long cmin_flt, cmaj_flt;
-	struct rlimit rlim[RLIM_NLIMITS]; 
-	unsigned short used_math;
-	unsigned short rss;	/* number of resident pages */
-	char comm[16];
-	struct vm86_struct * vm86_info;
-	unsigned long screen_bitmap;
-/* file system info */
-	int link_count;
-	int tty;		/* -1 if no tty, so it must be signed */
-	unsigned short umask;
-	struct inode * pwd;
-	struct inode * root;
-	struct inode * executable;
-	struct vm_area_struct * mmap;
-	struct shm_desc *shm;
-	struct sem_undo *semun;
-	struct file * filp[NR_OPEN];
-	fd_set close_on_exec;
-/* ldt for this task - used by Wine.  If NULL, default_ldt is used */
-	struct desc_struct *ldt;
-/* tss for this task */
-	struct tss_struct tss;
-#ifdef NEW_SWAP
+	struct timer_list real_timer;
+	long utime, stime, cutime, cstime, start_time;
+/* mm fault and swap info: this can arguably be seen as either mm-specific or thread-specific */
+	unsigned long min_flt, maj_flt, nswap, cmin_flt, cmaj_flt, cnswap;
+	int swappable:1;
+	unsigned long swap_address;
 	unsigned long old_maj_flt;	/* old value of maj_flt */
 	unsigned long dec_flt;		/* page fault count of the last time */
 	unsigned long swap_cnt;		/* number of pages to swap on next pass */
-	short swap_table;		/* current page table */
-	short swap_page;		/* current page */
-#endif NEW_SWAP
-	struct vm_area_struct *stk_vma;
+/* limits */
+	struct rlimit rlim[RLIM_NLIMITS];
+	unsigned short used_math;
+	char comm[16];
+/* file system info */
+	int link_count;
+	struct tty_struct *tty; /* NULL if no tty */
+/* ipc stuff */
+	struct sem_undo *semundo;
+	struct sem_queue *semsleeping;
+/* ldt for this task - used by Wine.  If NULL, default_ldt is used */
+	struct desc_struct *ldt;
+/* tss for this task */
+	struct thread_struct tss;
+/* filesystem information */
+	struct fs_struct *fs;
+/* open file information */
+	struct files_struct *files;
+/* memory management info */
+	struct mm_struct *mm;
+/* signal handlers */
+	struct signal_struct *sig;
+#ifdef __SMP__
+	int processor;
+	int last_processor;
+	int lock_depth;		/* Lock depth. We can context switch in and out of holding a syscall kernel lock... */	
+#endif	
 };
 
 /*
@@ -246,67 +257,81 @@ struct task_struct {
 					/* Not implemented yet, only for 486*/
 #define PF_PTRACED	0x00000010	/* set if ptrace (0) has been called. */
 #define PF_TRACESYS	0x00000020	/* tracing system calls */
+#define PF_FORKNOEXEC	0x00000040	/* forked but didn't exec */
+#define PF_SUPERPRIV	0x00000100	/* used super-user privileges */
+#define PF_DUMPCORE	0x00000200	/* dumped core */
+#define PF_SIGNALED	0x00000400	/* killed by a signal */
+
+#define PF_STARTING	0x00000100	/* being created */
+#define PF_EXITING	0x00000200	/* getting shut down */
+
+#define PF_USEDFPU	0x00100000	/* Process used the FPU this quantum (SMP only) */
+#define PF_DTRACE	0x00200000	/* delayed trace (used on m68k) */
 
 /*
- * cloning flags:
+ * Limit the stack by to some sane default: root can always
+ * increase this limit if needed..  8MB seems reasonable.
  */
-#define CSIGNAL		0x000000ff	/* signal mask to be sent at exit */
-#define COPYVM		0x00000100	/* set if VM copy desired (like normal fork()) */
-#define COPYFD		0x00000200	/* set if fd's should be copied, not shared (NI) */
+#define _STK_LIM	(8*1024*1024)
+
+#define DEF_PRIORITY	(20*HZ/100)	/* 200 ms time slices */
 
 /*
  *  INIT_TASK is used to set up the first task table, touch at
  * your own risk!. Base=0, limit=0x1fffff (=2MB)
  */
 #define INIT_TASK \
-/* state etc */	{ 0,15,15,0,0,0,0, \
+/* state etc */	{ 0,DEF_PRIORITY,DEF_PRIORITY,0,0,0,0, \
 /* debugregs */ { 0, },            \
-/* schedlink */	&init_task,&init_task, \
-/* signals */	{{ 0, },}, \
+/* exec domain */&default_exec_domain, \
+/* binfmt */	NULL, \
+/* schedlink */	&init_task,&init_task, &init_task, &init_task, \
 /* stack */	0,(unsigned long) &init_kernel_stack, \
-/* ec,brk... */	0,0,0,0,0,0,0,0,0,0,0,0,0, \
-/* argv.. */	0,0,0,0, \
-/* pid etc.. */	0,0,0,0, \
+/* ec,brk... */	0,0,0,0,0, \
+/* pid etc.. */	0,0,0,0,0, \
 /* suppl grps*/ {NOGROUP,}, \
 /* proc links*/ &init_task,&init_task,NULL,NULL,NULL,NULL, \
-/* uid etc */	0,0,0,0,0,0, \
-/* timeout */	0,0,0,0,0,0,0,0,0,0,0,0, \
-/* min_flt */	0,0,0,0, \
-/* rlimits */   { {LONG_MAX, LONG_MAX}, {LONG_MAX, LONG_MAX},  \
-		  {LONG_MAX, LONG_MAX}, {LONG_MAX, LONG_MAX},  \
-		  {       0, LONG_MAX}, {LONG_MAX, LONG_MAX}}, \
+/* uid etc */	0,0,0,0,0,0,0,0, \
+/* timeout */	0,SCHED_OTHER,0,0,0,0,0,0,0, \
+/* timer */	{ NULL, NULL, 0, 0, it_real_fn }, \
+/* utime */	0,0,0,0,0, \
+/* flt */	0,0,0,0,0,0, \
+/* swp */	0,0,0,0,0, \
+/* rlimits */   INIT_RLIMITS, \
 /* math */	0, \
-/* rss */	2, \
 /* comm */	"swapper", \
-/* vm86_info */	NULL, 0, \
-/* fs info */	0,-1,0022,NULL,NULL,NULL,NULL, \
+/* fs info */	0,NULL, \
 /* ipc */	NULL, NULL, \
-/* filp */	{NULL,}, \
-/* cloe */	{{ 0, }}, \
 /* ldt */	NULL, \
-/*tss*/	{0,0, \
-	 sizeof(init_kernel_stack) + (long) &init_kernel_stack, KERNEL_DS, 0, \
-	 0,0,0,0,0,0, \
-	 (long) &swapper_pg_dir, \
-	 0,0,0,0,0,0,0,0,0,0, \
-	 USER_DS,0,USER_DS,0,USER_DS,0,USER_DS,0,USER_DS,0,USER_DS,0, \
-	 _LDT(0),0, \
-	 0, 0x8000, \
-/* ioperm */ 	{~0, }, \
-	 _TSS(0), 0, 0,0, \
-/* 387 state */	{ { 0, }, } \
-	} \
+/* tss */	INIT_TSS, \
+/* fs */	&init_fs, \
+/* files */	&init_files, \
+/* mm */	&init_mm, \
+/* signals */	&init_signals, \
 }
 
+extern struct   mm_struct init_mm;
 extern struct task_struct init_task;
 extern struct task_struct *task[NR_TASKS];
 extern struct task_struct *last_task_used_math;
-extern struct task_struct *current;
+extern struct task_struct *current_set[NR_CPUS];
+/*
+ *	On a single processor system this comes out as current_set[0] when cpp
+ *	has finished with it, which gcc will optimise away.
+ */
+#define current (0+current_set[smp_processor_id()])	/* Current on this processor */
 extern unsigned long volatile jiffies;
 extern unsigned long itimer_ticks;
 extern unsigned long itimer_next;
 extern struct timeval xtime;
 extern int need_resched;
+extern void do_timer(struct pt_regs *);
+
+extern unsigned int * prof_buffer;
+extern unsigned long prof_len;
+extern unsigned long prof_shift;
+
+extern int securelevel;	/* system security level */
 
 #define CURRENT_TIME (xtime.tv_sec)
 
@@ -314,90 +339,62 @@ extern void sleep_on(struct wait_queue ** p);
 extern void interruptible_sleep_on(struct wait_queue ** p);
 extern void wake_up(struct wait_queue ** p);
 extern void wake_up_interruptible(struct wait_queue ** p);
+extern void wake_up_process(struct task_struct * tsk);
 
 extern void notify_parent(struct task_struct * tsk);
+extern void force_sig(unsigned long sig,struct task_struct * p);
 extern int send_sig(unsigned long sig,struct task_struct * p,int priv);
 extern int in_group_p(gid_t grp);
 
-extern int request_irq(unsigned int irq,void (*handler)(int));
-extern void free_irq(unsigned int irq);
-extern int irqaction(unsigned int irq,struct sigaction * sa);
+extern int request_irq(unsigned int irq,
+		       void (*handler)(int, void *, struct pt_regs *),
+		       unsigned long flags, 
+		       const char *device,
+		       void *dev_id);
+extern void free_irq(unsigned int irq, void *dev_id);
 
 /*
- * Entry into gdt where to find first TSS. GDT layout:
- *   0 - nul
- *   1 - kernel code segment
- *   2 - kernel data segment
- *   3 - user code segment
- *   4 - user data segment
- * ...
- *   8 - TSS #0
- *   9 - LDT #0
- *  10 - TSS #1
- *  11 - LDT #1
+ * This has now become a routine instead of a macro, it sets a flag if
+ * it returns true (to do BSD-style accounting where the process is flagged
+ * if it uses root privs). The implication of this is that you should do
+ * normal permissions checks first, and check suser() last.
  */
-#define FIRST_TSS_ENTRY 8
-#define FIRST_LDT_ENTRY (FIRST_TSS_ENTRY+1)
-#define _TSS(n) ((((unsigned long) n)<<4)+(FIRST_TSS_ENTRY<<3))
-#define _LDT(n) ((((unsigned long) n)<<4)+(FIRST_LDT_ENTRY<<3))
-#define load_TR(n) __asm__("ltr %%ax": /* no output */ :"a" (_TSS(n)))
-#define load_ldt(n) __asm__("lldt %%ax": /* no output */ :"a" (_LDT(n)))
-#define store_TR(n) \
-__asm__("str %%ax\n\t" \
-	"subl %2,%%eax\n\t" \
-	"shrl $4,%%eax" \
-	:"=a" (n) \
-	:"0" (0),"i" (FIRST_TSS_ENTRY<<3))
-/*
- *	switch_to(n) should switch tasks to task nr n, first
- * checking that n isn't the current task, in which case it does nothing.
- * This also clears the TS-flag if the task we switched to has used
- * tha math co-processor latest.
+extern inline int suser(void)
+{
+	if (current->euid == 0) {
+		current->flags |= PF_SUPERPRIV;
+		return 1;
+	}
+	return 0;
+}
+
+extern void copy_thread(int, unsigned long, unsigned long, struct task_struct *, struct pt_regs *);
+extern void flush_thread(void);
+extern void exit_thread(void);
+
+extern void exit_mm(struct task_struct *);
+extern void exit_fs(struct task_struct *);
+extern void exit_files(struct task_struct *);
+extern void exit_sighand(struct task_struct *);
+extern void release_thread(struct task_struct *);
+
+extern int do_execve(char *, char **, char **, struct pt_regs *);
+extern int do_fork(unsigned long, unsigned long, struct pt_regs *);
+
+
+/* See if we have a valid user level fd.
+ * If it makes sense, return the file structure it references.
+ * Otherwise return NULL.
  */
-#define switch_to(tsk) \
-__asm__("cmpl %%ecx,_current\n\t" \
-	"je 1f\n\t" \
-	"cli\n\t" \
-	"xchgl %%ecx,_current\n\t" \
-	"ljmp %0\n\t" \
-	"sti\n\t" \
-	"cmpl %%ecx,_last_task_used_math\n\t" \
-	"jne 1f\n\t" \
-	"clts\n" \
-	"1:" \
-	: /* no output */ \
-	:"m" (*(((char *)&tsk->tss.tr)-4)), \
-	 "c" (tsk) \
-	:"cx")
+extern inline struct file *file_from_fd(const unsigned int fd)
+{
 
-#define _set_base(addr,base) \
-__asm__("movw %%dx,%0\n\t" \
-	"rorl $16,%%edx\n\t" \
-	"movb %%dl,%1\n\t" \
-	"movb %%dh,%2" \
-	: /* no output */ \
-	:"m" (*((addr)+2)), \
-	 "m" (*((addr)+4)), \
-	 "m" (*((addr)+7)), \
-	 "d" (base) \
-	:"dx")
-
-#define _set_limit(addr,limit) \
-__asm__("movw %%dx,%0\n\t" \
-	"rorl $16,%%edx\n\t" \
-	"movb %1,%%dh\n\t" \
-	"andb $0xf0,%%dh\n\t" \
-	"orb %%dh,%%dl\n\t" \
-	"movb %%dl,%1" \
-	: /* no output */ \
-	:"m" (*(addr)), \
-	 "m" (*((addr)+6)), \
-	 "d" (limit) \
-	:"dx")
-
-#define set_base(ldt,base) _set_base( ((char *)&(ldt)) , base )
-#define set_limit(ldt,limit) _set_limit( ((char *)&(ldt)) , (limit-1)>>12 )
-
+	if (fd >= NR_OPEN)
+		return NULL;
+	/* either valid or null */
+	return current->files->fd[fd];
+}
+	
 /*
  * The wait-queues are circular lists, and you have to be *very* sure
  * to keep them correct. Use only these two functions to add/remove
@@ -409,10 +406,11 @@ extern inline void add_wait_queue(struct wait_queue ** p, struct wait_queue * wa
 
 #ifdef DEBUG
 	if (wait->next) {
+		__label__ here;
 		unsigned long pc;
-		__asm__ __volatile__("call 1f\n"
-			"1:\tpopl %0":"=r" (pc));
-		printk("add_wait_queue (%08x): wait->next = %08x\n",pc,(unsigned long) wait->next);
+		pc = (unsigned long) &&here;
+	      here:
+		printk("add_wait_queue (%08lx): wait->next = %08lx\n",pc,(unsigned long) wait->next);
 	}
 #endif
 	save_flags(flags);
@@ -458,10 +456,12 @@ extern inline void remove_wait_queue(struct wait_queue ** p, struct wait_queue *
 	restore_flags(flags);
 #ifdef DEBUG
 	if (!ok) {
+		__label__ here;
+		ok = (unsigned long) &&here;
 		printk("removed wait_queue not on list.\n");
-		printk("list = %08x, queue = %08x\n",(unsigned long) p, (unsigned long) wait);
-		__asm__("call 1f\n1:\tpopl %0":"=r" (ok));
-		printk("eip = %08x\n",ok);
+		printk("list = %08lx, queue = %08lx\n",(unsigned long) p, (unsigned long) wait);
+	      here:
+		printk("eip = %08lx\n",ok);
 	}
 #endif
 }
@@ -484,6 +484,9 @@ extern inline void select_wait(struct wait_queue ** wait_address, select_table *
 
 extern void __down(struct semaphore * sem);
 
+/*
+ * These are not yet interrupt-safe
+ */
 extern inline void down(struct semaphore * sem)
 {
 	if (sem->count <= 0)
@@ -496,30 +499,6 @@ extern inline void up(struct semaphore * sem)
 	sem->count++;
 	wake_up(&sem->wait);
 }	
-
-static inline unsigned long _get_base(char * addr)
-{
-	unsigned long __base;
-	__asm__("movb %3,%%dh\n\t"
-		"movb %2,%%dl\n\t"
-		"shll $16,%%edx\n\t"
-		"movw %1,%%dx"
-		:"=&d" (__base)
-		:"m" (*((addr)+2)),
-		 "m" (*((addr)+4)),
-		 "m" (*((addr)+7)));
-	return __base;
-}
-
-#define get_base(ldt) _get_base( ((char *)&(ldt)) )
-
-static inline unsigned long get_limit(unsigned long segment)
-{
-	unsigned long __limit;
-	__asm__("lsll %1,%0"
-		:"=r" (__limit):"r" (segment));
-	return __limit+1;
-}
 
 #define REMOVE_LINKS(p) do { unsigned long flags; \
 	save_flags(flags) ; cli(); \
@@ -550,19 +529,6 @@ static inline unsigned long get_limit(unsigned long segment)
 #define for_each_task(p) \
 	for (p = &init_task ; (p = p->next_task) != &init_task ; )
 
-/*
- * This is the ldt that every process will get unless we need
- * something other than this.
- */
-extern struct desc_struct default_ldt;
-
-/* This special macro can be used to load a debugging register */
-
-#define loaddebug(register) \
-		__asm__("movl %0,%%edx\n\t" \
-			"movl %%edx,%%db" #register "\n\t" \
-			: /* no output */ \
-			:"m" (current->debugreg[register]) \
-			:"dx");
+#endif /* __KERNEL__ */
 
 #endif

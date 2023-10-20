@@ -13,19 +13,20 @@
  *  SystemV/Coherent directory handling functions
  */
 
-#include <asm/segment.h>
-
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/sysv_fs.h>
 #include <linux/stat.h>
+#include <linux/string.h>
+
+#include <asm/segment.h>
 
 static int sysv_dir_read(struct inode * inode, struct file * filp, char * buf, int count)
 {
 	return -EISDIR;
 }
 
-static int sysv_readdir(struct inode *, struct file *, struct dirent *, int);
+static int sysv_readdir(struct inode *, struct file *, void *, filldir_t);
 
 static struct file_operations sysv_dir_operations = {
 	NULL,			/* lseek - default */
@@ -56,20 +57,21 @@ struct inode_operations sysv_dir_inode_operations = {
 	sysv_rename,		/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
+	NULL,			/* readpage */
+	NULL,			/* writepage */
 	NULL,			/* bmap */
 	sysv_truncate,		/* truncate */
 	NULL			/* permission */
 };
 
 static int sysv_readdir(struct inode * inode, struct file * filp,
-	struct dirent * dirent, int count)
+	void * dirent, filldir_t filldir)
 {
 	struct super_block * sb;
 	unsigned int offset,i;
-	char c;
 	struct buffer_head * bh;
 	char* bh_data;
-	struct sysv_dir_entry * de;
+	struct sysv_dir_entry * de, sde;
 
 	if (!inode || !(sb = inode->i_sb) || !S_ISDIR(inode->i_mode))
 		return -EBADF;
@@ -77,32 +79,34 @@ static int sysv_readdir(struct inode * inode, struct file * filp,
 		return -EBADF;
 	while (filp->f_pos < inode->i_size) {
 		offset = filp->f_pos & sb->sv_block_size_1;
-		bh = sysv_file_bread(inode, filp->f_pos >> sb->sv_block_size_bits, 0, &bh_data);
+		bh = sysv_file_bread(inode, filp->f_pos >> sb->sv_block_size_bits, 0);
 		if (!bh) {
 			filp->f_pos += sb->sv_block_size - offset;
 			continue;
 		}
+		bh_data = bh->b_data;
 		while (offset < sb->sv_block_size && filp->f_pos < inode->i_size) {
 			de = (struct sysv_dir_entry *) (offset + bh_data);
-			offset += SYSV_DIRSIZE;
-			filp->f_pos += SYSV_DIRSIZE;
 			if (de->inode) {
-				for (i = 0; i < SYSV_NAMELEN; i++)
-					if ((c = de->name[i]) != 0)
-						put_fs_byte(c,i+dirent->d_name);
-					else
-						break;
-				if (i) {
-					if (de->inode > inode->i_sb->sv_ninodes)
-						printk("sysv_readdir: Bad inode number on dev 0x%04x, ino %ld, offset 0x%04lx: %d is out of range\n",
-				                        inode->i_dev, inode->i_ino, filp->f_pos - SYSV_DIRSIZE, de->inode);
-					put_fs_long(de->inode,&dirent->d_ino);
-					put_fs_byte(0,i+dirent->d_name);
-					put_fs_word(i,&dirent->d_reclen);
+				/* Copy the directory entry first, because the directory
+				 * might be modified while we sleep in filldir()...
+				 */
+				memcpy(&sde, de, sizeof(struct sysv_dir_entry));
+
+				if (sde.inode > inode->i_sb->sv_ninodes)
+					printk("sysv_readdir: Bad inode number on dev "
+					       "%s, ino %ld, offset 0x%04lx: %d is out of range\n",
+					       kdevname(inode->i_dev),
+					       inode->i_ino, (off_t) filp->f_pos, sde.inode);
+
+				i = strnlen(sde.name, SYSV_NAMELEN);
+				if (filldir(dirent, sde.name, i, filp->f_pos, sde.inode) < 0) {
 					brelse(bh);
-					return i;
+					return 0;
 				}
 			}
+			offset += SYSV_DIRSIZE;
+			filp->f_pos += SYSV_DIRSIZE;
 		}
 		brelse(bh);
 	}

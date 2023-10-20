@@ -1,35 +1,21 @@
 /*
  * sound/sb_dsp.c
- * 
+ *
  * The low level driver for the SoundBlaster DS chips.
- * 
- * Copyright by Hannu Savolainen 1993
- * 
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met: 1. Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer. 2.
- * Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- * 
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * 
  */
+/*
+ * Copyright (C) by Hannu Savolainen 1993-1996
+ *
+ * USS/Lite for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
+ * Version 2 (June 1991). See the "COPYING" file distributed with this software
+ * for more info.
+ */
+#include <linux/config.h>
+
 
 #include "sound_config.h"
 
-#if defined(CONFIGURE_SOUNDCARD) && !defined(EXCLUDE_SB) && !defined(EXCLUDE_MIDI)
+#if defined(CONFIG_SBDSP) && defined(CONFIG_MIDI)
 
 #include "sb.h"
 #undef SB_TEST_IRQ
@@ -42,18 +28,7 @@
  * future version of this driver.
  */
 
-extern int      sb_dsp_ok;	/* Set to 1 after successful initialization */
-
-extern int      sb_midi_mode;
-extern int      sb_midi_busy;	/* 1 if the process has output to MIDI */
-extern int      sb_dsp_busy;
-extern int      sb_dsp_highspeed;
-
-extern volatile int sb_irq_mode;	/* IMODE_INPUT, IMODE_OUTPUT
-					 * or IMODE_NONE */
-extern int      sb_dsp_model;	/* 1=SB, 2=SB Pro */
-extern int      sb_duplex_midi;
-extern int      sb_intr_active;
+void            (*midi_input_intr) (int dev, unsigned char data);
 
 static int
 sb_midi_open (int dev, int mode,
@@ -61,53 +36,39 @@ sb_midi_open (int dev, int mode,
 	      void            (*output) (int dev)
 )
 {
-  int             ret;
+  sb_devc        *devc = midi_devs[dev]->devc;
+  unsigned long   flags;
 
-  if (!sb_dsp_ok)
+  if (devc == NULL)
+    return -(ENXIO);
+
+  save_flags (flags);
+  cli ();
+  if (devc->opened)
     {
-      printk ("SB Error: MIDI hardware not installed\n");
-      return RET_ERROR (ENXIO);
+      restore_flags (flags);
+      return -(EBUSY);
+    }
+  devc->opened = 1;
+  restore_flags (flags);
+
+  devc->irq_mode = IMODE_MIDI;
+
+  sb_dsp_reset (devc);
+
+  if (!sb_dsp_command (devc, 0x35))	/* Start MIDI UART mode */
+    {
+      devc->opened = 0;
+      return -(EIO);
     }
 
-  if (mode != OPEN_WRITE && !sb_duplex_midi)
+  devc->intr_active = 1;
+
+  if (mode & OPEN_READ)
     {
-      if (num_midis == 1)
-	printk ("SoundBlaster: Midi input not currently supported\n");
-      return RET_ERROR (EPERM);
+      devc->input_opened = 1;
+      devc->midi_input_intr = input;
     }
-
-  sb_midi_mode = NORMAL_MIDI;
-  if (mode != OPEN_WRITE)
-    {
-      if (sb_dsp_busy || sb_intr_active)
-	return RET_ERROR (EBUSY);
-      sb_midi_mode = UART_MIDI;
-    }
-
-  if (sb_dsp_highspeed)
-    {
-      printk ("SB Error: Midi output not possible during stereo or high speed audio\n");
-      return RET_ERROR (EBUSY);
-    }
-
-  if (sb_midi_mode == UART_MIDI)
-    {
-      sb_irq_mode = IMODE_MIDI;
-
-      sb_reset_dsp ();
-
-      if (!sb_dsp_command (0x35))
-	return RET_ERROR (EIO);	/* Enter the UART mode */
-      sb_intr_active = 1;
-
-      if ((ret = sb_get_irq ()) < 0)
-	{
-	  sb_reset_dsp ();
-	  return 0;		/* IRQ not free */
-	}
-    }
-
-  sb_midi_busy = 1;
 
   return 0;
 }
@@ -115,33 +76,29 @@ sb_midi_open (int dev, int mode,
 static void
 sb_midi_close (int dev)
 {
-  if (sb_midi_mode == UART_MIDI)
-    {
-      sb_reset_dsp ();		/* The only way to kill the UART mode */
-      sb_free_irq ();
-    }
-  sb_intr_active = 0;
-  sb_midi_busy = 0;
+  sb_devc        *devc = midi_devs[dev]->devc;
+  unsigned long   flags;
+
+  if (devc == NULL)
+    return;
+
+  save_flags (flags);
+  cli ();
+  sb_dsp_reset (devc);
+  devc->intr_active = 0;
+  devc->input_opened = 0;
+  restore_flags (flags);
 }
 
 static int
 sb_midi_out (int dev, unsigned char midi_byte)
 {
-  unsigned long   flags;
+  sb_devc        *devc = midi_devs[dev]->devc;
 
-  sb_midi_busy = 1;		/* Kill all notes after close */
+  if (devc == NULL)
+    return -(ENXIO);
 
-  if (sb_midi_mode == NORMAL_MIDI)
-    {
-      DISABLE_INTR (flags);
-      if (sb_dsp_command (0x38))
-	sb_dsp_command (midi_byte);
-      else
-	printk ("SB Error: Unable to send a MIDI byte\n");
-      RESTORE_INTR (flags);
-    }
-  else
-    sb_dsp_command (midi_byte);	/* UART write */
+  sb_dsp_command (devc, midi_byte);
 
   return 1;
 }
@@ -149,49 +106,117 @@ sb_midi_out (int dev, unsigned char midi_byte)
 static int
 sb_midi_start_read (int dev)
 {
-  if (sb_midi_mode != UART_MIDI)
-    {
-      printk ("SoundBlaster: MIDI input not implemented.\n");
-      return RET_ERROR (EPERM);
-    }
   return 0;
 }
 
 static int
 sb_midi_end_read (int dev)
 {
-  if (sb_midi_mode == UART_MIDI)
-    {
-      sb_reset_dsp ();
-      sb_intr_active = 0;
-    }
+  sb_devc        *devc = midi_devs[dev]->devc;
+
+  if (devc == NULL)
+    return -(ENXIO);
+
+  sb_dsp_reset (devc);
+  devc->intr_active = 0;
   return 0;
 }
 
 static int
-sb_midi_ioctl (int dev, unsigned cmd, unsigned arg)
+sb_midi_ioctl (int dev, unsigned cmd, caddr_t arg)
 {
-  return RET_ERROR (EPERM);
+  return -(EPERM);
 }
+
+void
+sb_midi_interrupt (sb_devc * devc)
+{
+  unsigned long   flags;
+  unsigned char   data;
+
+  if (devc == NULL)
+    return;
+
+  save_flags (flags);
+  cli ();
+
+  data = inb (DSP_READ);
+  if (devc->input_opened)
+    devc->midi_input_intr (devc->my_mididev, data);
+
+  restore_flags (flags);
+}
+
+#define MIDI_SYNTH_NAME	"SoundBlaster Midi"
+#define MIDI_SYNTH_CAPS	0
+#include "midi_synth.h"
 
 static struct midi_operations sb_midi_operations =
 {
   {"SoundBlaster", 0, 0, SNDCARD_SB},
+  &std_midi_synth,
+  {0},
   sb_midi_open,
   sb_midi_close,
   sb_midi_ioctl,
   sb_midi_out,
   sb_midi_start_read,
   sb_midi_end_read,
-  NULL,				/* Kick */
-  NULL,				/* command */
-  NULL				/* buffer_status */
+  NULL,
+  NULL,
+  NULL,
+  NULL
 };
 
 void
-sb_midi_init(int model)
+sb_dsp_midi_init (sb_devc * devc)
 {
-  midi_devs[num_midis++] = &sb_midi_operations;
+  if (devc->model < 2)		/* No MIDI support for SB 1.x */
+    return;
+
+  if (num_midis >= MAX_MIDI_DEV)
+    {
+      printk ("Sound: Too many midi devices detected\n");
+      return;
+    }
+
+  std_midi_synth.midi_dev = num_midis;
+  devc->my_mididev = num_midis;
+
+  std_midi_synth.midi_dev = devc->my_mididev = num_midis;
+
+
+  midi_devs[num_midis] = (struct midi_operations *) (sound_mem_blocks[sound_nblocks] = vmalloc (sizeof (struct midi_operations)));
+
+  if (sound_nblocks < 1024)
+    sound_nblocks++;;
+  if (midi_devs[num_midis] == NULL)
+    {
+      printk ("sb MIDI: Failed to allocate memory\n");
+      return;
+    }
+
+  memcpy ((char *) midi_devs[num_midis], (char *) &sb_midi_operations,
+	  sizeof (struct midi_operations));
+
+  midi_devs[num_midis]->devc = devc;
+
+
+  midi_devs[num_midis]->converter = (struct synth_operations *) (sound_mem_blocks[sound_nblocks] = vmalloc (sizeof (struct synth_operations)));
+
+  if (sound_nblocks < 1024)
+    sound_nblocks++;;
+
+  if (midi_devs[num_midis]->converter == NULL)
+    {
+      printk ("sb MIDI: Failed to allocate memory\n");
+      return;
+    }
+
+  memcpy ((char *) midi_devs[num_midis]->converter, (char *) &std_midi_synth,
+	  sizeof (struct synth_operations));
+
+  num_midis++;
 }
 
 #endif

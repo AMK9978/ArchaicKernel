@@ -7,6 +7,7 @@
 #include <asm/segment.h>
 
 #include <linux/sched.h>
+#include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/stat.h>
@@ -41,16 +42,16 @@ static int file_ioctl(struct file *filp,unsigned int cmd,unsigned long arg)
 			    (long *) arg);
 			return 0;
 		case FIONREAD:
-			error = verify_area(VERIFY_WRITE,(void *) arg,4);
+			error = verify_area(VERIFY_WRITE,(void *) arg,sizeof(int));
 			if (error)
 				return error;
 			put_fs_long(filp->f_inode->i_size - filp->f_pos,
-			    (long *) arg);
+			    (int *) arg);
 			return 0;
 	}
 	if (filp->f_op && filp->f_op->ioctl)
-		return filp->f_op->ioctl(filp->f_inode, filp, cmd,arg);
-	return -EINVAL;
+		return filp->f_op->ioctl(filp->f_inode, filp, cmd, arg);
+	return -ENOTTY;
 }
 
 
@@ -59,19 +60,23 @@ asmlinkage int sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 	struct file * filp;
 	int on;
 
-	if (fd >= NR_OPEN || !(filp = current->filp[fd]))
+	if (fd >= NR_OPEN || !(filp = current->files->fd[fd]))
 		return -EBADF;
 	switch (cmd) {
 		case FIOCLEX:
-			FD_SET(fd, &current->close_on_exec);
+			FD_SET(fd, &current->files->close_on_exec);
 			return 0;
 
 		case FIONCLEX:
-			FD_CLR(fd, &current->close_on_exec);
+			FD_CLR(fd, &current->files->close_on_exec);
 			return 0;
 
 		case FIONBIO:
-			on = get_fs_long((unsigned long *) arg);
+			on = verify_area(VERIFY_READ, (unsigned int *)arg,
+				sizeof(unsigned int));
+			if(on)	
+				return on;
+			on = get_user((unsigned int *) arg);
 			if (on)
 				filp->f_flags |= O_NONBLOCK;
 			else
@@ -80,7 +85,11 @@ asmlinkage int sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 
 		case FIOASYNC: /* O_SYNC is not yet implemented,
 				  but it's here for completeness. */
-			on = get_fs_long ((unsigned long *) arg);
+			on = verify_area(VERIFY_READ, (unsigned int *)arg,
+				sizeof(unsigned int));
+			if(on)	
+				return on;
+			on = get_user ((unsigned int *) arg);
 			if (on)
 				filp->f_flags |= O_SYNC;
 			else
@@ -89,11 +98,11 @@ asmlinkage int sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 
 		default:
 			if (filp->f_inode && S_ISREG(filp->f_inode->i_mode))
-				return file_ioctl(filp,cmd,arg);
+				return file_ioctl(filp, cmd, arg);
 
 			if (filp->f_op && filp->f_op->ioctl)
-				return filp->f_op->ioctl(filp->f_inode, filp, cmd,arg);
+				return filp->f_op->ioctl(filp->f_inode, filp, cmd, arg);
 
-			return -EINVAL;
+			return -ENOTTY;
 	}
 }

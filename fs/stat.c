@@ -5,45 +5,61 @@
  */
 
 #include <linux/errno.h>
+#include <linux/string.h>
 #include <linux/stat.h>
 #include <linux/fs.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <linux/mm.h>
+
 #include <asm/segment.h>
 
+#ifndef __alpha__
+
+/*
+ * For backward compatibility?  Maybe this should be moved
+ * into arch/i386 instead?
+ */
 static void cp_old_stat(struct inode * inode, struct old_stat * statbuf)
 {
 	struct old_stat tmp;
 
 	printk("VFS: Warning: %s using old stat() call. Recompile your binary.\n",
 		current->comm);
-	tmp.st_dev = inode->i_dev;
+	tmp.st_dev = kdev_t_to_nr(inode->i_dev);
 	tmp.st_ino = inode->i_ino;
 	tmp.st_mode = inode->i_mode;
 	tmp.st_nlink = inode->i_nlink;
 	tmp.st_uid = inode->i_uid;
 	tmp.st_gid = inode->i_gid;
-	tmp.st_rdev = inode->i_rdev;
+	tmp.st_rdev = kdev_t_to_nr(inode->i_rdev);
 	tmp.st_size = inode->i_size;
+	if (inode->i_pipe)
+		tmp.st_size = PIPE_SIZE(*inode);
 	tmp.st_atime = inode->i_atime;
 	tmp.st_mtime = inode->i_mtime;
 	tmp.st_ctime = inode->i_ctime;
 	memcpy_tofs(statbuf,&tmp,sizeof(tmp));
 }
 
+#endif
+
 static void cp_new_stat(struct inode * inode, struct new_stat * statbuf)
 {
-	struct new_stat tmp = {0, };
+	struct new_stat tmp;
 	unsigned int blocks, indirect;
 
-	tmp.st_dev = inode->i_dev;
+	memset(&tmp, 0, sizeof(tmp));
+	tmp.st_dev = kdev_t_to_nr(inode->i_dev);
 	tmp.st_ino = inode->i_ino;
 	tmp.st_mode = inode->i_mode;
 	tmp.st_nlink = inode->i_nlink;
 	tmp.st_uid = inode->i_uid;
 	tmp.st_gid = inode->i_gid;
-	tmp.st_rdev = inode->i_rdev;
+	tmp.st_rdev = kdev_t_to_nr(inode->i_rdev);
 	tmp.st_size = inode->i_size;
+	if (inode->i_pipe)
+		tmp.st_size = PIPE_SIZE(*inode);
 	tmp.st_atime = inode->i_atime;
 	tmp.st_mtime = inode->i_mtime;
 	tmp.st_ctime = inode->i_ctime;
@@ -86,6 +102,11 @@ static void cp_new_stat(struct inode * inode, struct new_stat * statbuf)
 	memcpy_tofs(statbuf,&tmp,sizeof(tmp));
 }
 
+#ifndef __alpha__
+/*
+ * For backward compatibility?  Maybe this should be moved
+ * into arch/i386 instead?
+ */
 asmlinkage int sys_stat(char * filename, struct old_stat * statbuf)
 {
 	struct inode * inode;
@@ -101,6 +122,7 @@ asmlinkage int sys_stat(char * filename, struct old_stat * statbuf)
 	iput(inode);
 	return 0;
 }
+#endif
 
 asmlinkage int sys_newstat(char * filename, struct new_stat * statbuf)
 {
@@ -118,6 +140,12 @@ asmlinkage int sys_newstat(char * filename, struct new_stat * statbuf)
 	return 0;
 }
 
+#ifndef __alpha__
+
+/*
+ * For backward compatibility?  Maybe this should be moved
+ * into arch/i386 instead?
+ */
 asmlinkage int sys_lstat(char * filename, struct old_stat * statbuf)
 {
 	struct inode * inode;
@@ -133,6 +161,8 @@ asmlinkage int sys_lstat(char * filename, struct old_stat * statbuf)
 	iput(inode);
 	return 0;
 }
+
+#endif
 
 asmlinkage int sys_newlstat(char * filename, struct new_stat * statbuf)
 {
@@ -150,6 +180,12 @@ asmlinkage int sys_newlstat(char * filename, struct new_stat * statbuf)
 	return 0;
 }
 
+#ifndef __alpha__
+
+/*
+ * For backward compatibility?  Maybe this should be moved
+ * into arch/i386 instead?
+ */
 asmlinkage int sys_fstat(unsigned int fd, struct old_stat * statbuf)
 {
 	struct file * f;
@@ -159,11 +195,13 @@ asmlinkage int sys_fstat(unsigned int fd, struct old_stat * statbuf)
 	error = verify_area(VERIFY_WRITE,statbuf,sizeof (*statbuf));
 	if (error)
 		return error;
-	if (fd >= NR_OPEN || !(f=current->filp[fd]) || !(inode=f->f_inode))
+	if (fd >= NR_OPEN || !(f=current->files->fd[fd]) || !(inode=f->f_inode))
 		return -EBADF;
 	cp_old_stat(inode,statbuf);
 	return 0;
 }
+
+#endif
 
 asmlinkage int sys_newfstat(unsigned int fd, struct new_stat * statbuf)
 {
@@ -174,7 +212,7 @@ asmlinkage int sys_newfstat(unsigned int fd, struct new_stat * statbuf)
 	error = verify_area(VERIFY_WRITE,statbuf,sizeof (*statbuf));
 	if (error)
 		return error;
-	if (fd >= NR_OPEN || !(f=current->filp[fd]) || !(inode=f->f_inode))
+	if (fd >= NR_OPEN || !(f=current->files->fd[fd]) || !(inode=f->f_inode))
 		return -EBADF;
 	cp_new_stat(inode,statbuf);
 	return 0;

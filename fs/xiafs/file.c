@@ -9,9 +9,6 @@
  *  This software may be redistributed per Linux Copyright.
  */
 
-#include <asm/segment.h>
-#include <asm/system.h>
-
 #include <linux/sched.h>
 #include <linux/fs.h>
 #include <linux/xia_fs.h>
@@ -20,6 +17,10 @@
 #include <linux/fcntl.h>
 #include <linux/stat.h>
 #include <linux/locks.h>
+#include <linux/pagemap.h>
+
+#include <asm/segment.h>
+#include <asm/system.h>
 
 #include "xiafs_mac.h"
 
@@ -29,7 +30,7 @@
 #define MAX(a,b) (((a)>(b))?(a):(b))
 
 static int xiafs_file_read(struct inode *, struct file *, char *, int);
-static int xiafs_file_write(struct inode *, struct file *, char *, int);
+static int xiafs_file_write(struct inode *, struct file *, const char *, int);
 
 /*
  * We have mostly NULL's here: the current defaults are ok for
@@ -42,7 +43,7 @@ static struct file_operations xiafs_file_operations = {
     NULL,			/* readdir - bad */
     NULL,			/* select - default */
     NULL,			/* ioctl - default */
-    generic_mmap,      		/* mmap */
+    generic_file_mmap,		/* mmap */
     NULL,			/* no special open is needed */
     NULL,			/* release */
     xiafs_sync_file		/* fsync */
@@ -61,6 +62,8 @@ struct inode_operations xiafs_file_inode_operations = {
     NULL,			/* rename */
     NULL,			/* readlink */
     NULL,			/* follow_link */
+    generic_readpage,		/* readpage */
+    NULL,			/* writepage */
     xiafs_bmap,			/* bmap */
     xiafs_truncate,		/* truncate */
     NULL			/* permission */
@@ -97,14 +100,15 @@ xiafs_file_read(struct inode * inode, struct file * filp, char * buf, int count)
     zones = (left+offset+XIAFS_ZSIZE(inode->i_sb)-1) >> XIAFS_ZSIZE_BITS(inode->i_sb);
     bhb = bhe = buflist;
     if (filp->f_reada) {
-        zones += read_ahead[MAJOR(inode->i_dev)] >> (1+XIAFS_ZSHIFT(inode->i_sb));
+        if(zones < read_ahead[MAJOR(inode->i_dev)] >> (1+XIAFS_ZSHIFT(inode->i_sb)))
+	  zones = read_ahead[MAJOR(inode->i_dev)] >> (1+XIAFS_ZSHIFT(inode->i_sb));
 	if (zone_nr + zones > f_zones)
 	    zones = f_zones - zone_nr;
     }
 
-    /* We do this in a two stage process.  We first try and request
+    /* We do this in a two stage process.  We first try to request
        as many blocks as we can, then we wait for the first one to
-       complete, and then we try and wrap up as many as are actually
+       complete, and then we try to wrap up as many as are actually
        done.  This routine is rather generic, in that it can be used
        in a filesystem by substituting the appropriate function in
        for getblk.
@@ -117,7 +121,7 @@ xiafs_file_read(struct inode * inode, struct file * filp, char * buf, int count)
 	uptodate = 1;
 	while (zones--) {
 	    *bhb = xiafs_getblk(inode, zone_nr++, 0);
-	    if (*bhb && !(*bhb)->b_uptodate) {
+	    if (*bhb && !buffer_uptodate(*bhb)) {
 	        uptodate = 0;
 		bhreq[bhrequest++] = *bhb;
 	    }
@@ -140,7 +144,7 @@ xiafs_file_read(struct inode * inode, struct file * filp, char * buf, int count)
 	do { /* Finish off all I/O that has actually completed */
 	    if (*bhe) {
 	        wait_on_buffer(*bhe);
-		if (!(*bhe)->b_uptodate) {	/* read error? */
+		if (!buffer_uptodate(*bhe)) {	/* read error? */
 		    brelse(*bhe);
 		    if (++bhe == &buflist[NBUF])
 		      bhe = buflist;
@@ -161,12 +165,12 @@ xiafs_file_read(struct inode * inode, struct file * filp, char * buf, int count)
 		buf += chars;
 	    } else {
 	        while (chars-->0)
-		    put_fs_byte(0,buf++);
+		    put_user(0,buf++);
 	    }
 	    offset = 0;
 	    if (++bhe == &buflist[NBUF])
 	        bhe = buflist;
-	} while (left > 0 && bhe != bhb && (!*bhe || !(*bhe)->b_lock));
+	} while (left > 0 && bhe != bhb && (!*bhe || !buffer_locked(*bhe)));
     } while (left > 0);
 
 /* Release the read-ahead blocks */
@@ -186,7 +190,7 @@ xiafs_file_read(struct inode * inode, struct file * filp, char * buf, int count)
 }
 
 static int 
-xiafs_file_write(struct inode * inode, struct file * filp, char * buf, int count)
+xiafs_file_write(struct inode * inode, struct file * filp, const char * buf, int count)
 {
     off_t pos;
     int written, c;
@@ -220,10 +224,10 @@ xiafs_file_write(struct inode * inode, struct file * filp, char * buf, int count
 	c = XIAFS_ZSIZE(inode->i_sb) - (pos & (XIAFS_ZSIZE(inode->i_sb) - 1));
 	if (c > count-written)
 	    c = count-written;
-	if (c != XIAFS_ZSIZE(inode->i_sb) && !bh->b_uptodate) {
+	if (c != XIAFS_ZSIZE(inode->i_sb) && !buffer_uptodate(bh)) {
 	    ll_rw_block(READ, 1, &bh);
 	    wait_on_buffer(bh);
-	    if (!bh->b_uptodate) {
+	    if (!buffer_uptodate(bh)) {
 	        brelse(bh);
 		if (!written)
 		    written = -EIO;
@@ -231,16 +235,17 @@ xiafs_file_write(struct inode * inode, struct file * filp, char * buf, int count
 	    }
 	}
 	cp = (pos & (XIAFS_ZSIZE(inode->i_sb)-1)) + bh->b_data;
+	memcpy_fromfs(cp,buf,c);
+	update_vm_cache(inode,pos,cp,c);
 	pos += c;
 	if (pos > inode->i_size) {
 	    inode->i_size = pos;
 	    inode->i_dirt = 1;
 	}
 	written += c;
-	memcpy_fromfs(cp,buf,c);
 	buf += c;
-	bh->b_uptodate = 1;
-	bh->b_dirt = 1;
+	mark_buffer_uptodate(bh, 1);
+	mark_buffer_dirty(bh, 0);
 	brelse(bh);
     }
     inode->i_mtime = inode->i_ctime = CURRENT_TIME;
