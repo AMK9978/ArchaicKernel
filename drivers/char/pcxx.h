@@ -68,7 +68,6 @@ struct board_info	{
 
 #define FEPTIMEOUT 200000  
 #define SERIAL_TYPE_NORMAL	1
-#define SERIAL_TYPE_CALLOUT	2
 #define PCXE_EVENT_HANGUP   1
 #define PCXX_MAGIC	0x5c6df104L
 
@@ -78,8 +77,6 @@ struct channel {
 	unchar						boardnum;
 	unchar						channelnum;
 	uint						dev;
-	long						session;
-	long						pgrp;
 	struct tty_struct			*tty;
 	struct board_info			*board;
 	volatile struct board_chan	*brdchan;
@@ -88,10 +85,10 @@ struct channel {
 	int							count;
 	int							blocked_open;
 	int							close_delay;
-	int							event;
+	unsigned long						event;
 	wait_queue_head_t			open_wait;
 	wait_queue_head_t			close_wait;
-	struct tq_struct			tqueue;
+	struct work_struct			tqueue;
 							/* ------------ Async control data ------------- */
 	unchar						modemfake;      /* Modem values to be forced */
 	unchar						modem;          /* Force values */
@@ -126,8 +123,6 @@ struct channel {
 	ulong						c_cflag;
 	ulong						c_lflag;
 	ulong						c_oflag;
-	struct termios				normal_termios;
-	struct termios				callout_termios;
 	struct digi_struct			digiext;
 	ulong						dummy[8];
 };

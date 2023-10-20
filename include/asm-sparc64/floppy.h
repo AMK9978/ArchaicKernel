@@ -62,8 +62,6 @@ struct sun_floppy_ops {
 	void		(*fd_set_dma_addr) (char *);
 	void		(*fd_set_dma_count) (int);
 	unsigned int	(*get_dma_residue) (void);
-	void		(*fd_enable_irq) (void);
-	void		(*fd_disable_irq) (void);
 	int		(*fd_request_irq) (void);
 	void		(*fd_free_irq) (void);
 	int		(*fd_eject) (int);
@@ -82,8 +80,6 @@ static struct sun_floppy_ops sun_fdops;
 #define fd_set_dma_addr(addr)     sun_fdops.fd_set_dma_addr(addr)
 #define fd_set_dma_count(count)   sun_fdops.fd_set_dma_count(count)
 #define get_dma_residue(x)        sun_fdops.get_dma_residue()
-#define fd_enable_irq()           sun_fdops.fd_enable_irq()
-#define fd_disable_irq()          sun_fdops.fd_disable_irq()
 #define fd_cacheflush(addr, size) /* nothing... */
 #define fd_request_irq()          sun_fdops.fd_request_irq()
 #define fd_free_irq()             sun_fdops.fd_free_irq()
@@ -214,7 +210,7 @@ static void sun_fd_enable_dma(void)
 }
 
 /* Our low-level entry point in arch/sparc/kernel/entry.S */
-extern void floppy_hardint(int irq, void *unused, struct pt_regs *regs);
+extern irqreturn_t floppy_hardint(int irq, void *unused, struct pt_regs *regs);
 
 static int sun_fd_request_irq(void)
 {
@@ -230,14 +226,6 @@ static int sun_fd_request_irq(void)
 		return ((error == 0) ? 0 : -1);
 	}
 	return 0;
-}
-
-static void sun_fd_enable_irq(void)
-{
-}
-
-static void sun_fd_disable_irq(void)
-{
 }
 
 static void sun_fd_free_irq(void)
@@ -264,7 +252,7 @@ static int sun_fd_eject(int drive)
 #include <asm/isa.h>
 #include <asm/ns87303.h>
 
-static struct linux_ebus_dma *sun_pci_fd_ebus_dma;
+static struct ebus_dma_info sun_pci_fd_ebus_dma;
 static struct pci_dev *sun_pci_ebus_dev;
 static int sun_pci_broken_drive = -1;
 
@@ -277,7 +265,7 @@ struct sun_pci_dma_op {
 static struct sun_pci_dma_op sun_pci_dma_current = { -1U, 0, 0, NULL};
 static struct sun_pci_dma_op sun_pci_dma_pending = { -1U, 0, 0, NULL};
 
-extern void floppy_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+extern irqreturn_t floppy_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 
 static unsigned char sun_pci_fd_inb(unsigned long port)
 {
@@ -330,26 +318,12 @@ static void sun_pci_fd_lde_broken_outb(unsigned char val, unsigned long port)
 }
 #endif /* PCI_FDC_SWAP_DRIVES */
 
-static void sun_pci_fd_reset_dma(void)
-{
-	unsigned int dcsr;
-
-	writel(EBUS_DCSR_RESET, &sun_pci_fd_ebus_dma->dcsr);
-	udelay(1);
-	dcsr = EBUS_DCSR_BURST_SZ_16 | EBUS_DCSR_TCI_DIS |
-	       EBUS_DCSR_EN_CNT;
-	writel(dcsr, (unsigned long)&sun_pci_fd_ebus_dma->dcsr);
-}
-
 static void sun_pci_fd_enable_dma(void)
 {
-	unsigned int dcsr;
-
-	if((NULL == sun_pci_dma_pending.buf) 	||
-	   (0	== sun_pci_dma_pending.len) 	||
-	   (0	== sun_pci_dma_pending.direction)) {
-		goto enable; /* TODO: BUG() */
-	}
+	if ((NULL == sun_pci_dma_pending.buf) 	||
+	    (0	  == sun_pci_dma_pending.len) 	||
+	    (0	  == sun_pci_dma_pending.direction))
+		BUG();
 
 	sun_pci_dma_current.buf = sun_pci_dma_pending.buf;
 	sun_pci_dma_current.len = sun_pci_dma_pending.len;
@@ -361,36 +335,22 @@ static void sun_pci_fd_enable_dma(void)
 	sun_pci_dma_pending.addr = -1U;
 
 	sun_pci_dma_current.addr = 
-		pci_map_single(	sun_pci_ebus_dev,
-				sun_pci_dma_current.buf,
-				sun_pci_dma_current.len,
-				sun_pci_dma_current.direction);
-	writel(sun_pci_dma_current.addr, &sun_pci_fd_ebus_dma->dacr);
+		pci_map_single(sun_pci_ebus_dev,
+			       sun_pci_dma_current.buf,
+			       sun_pci_dma_current.len,
+			       sun_pci_dma_current.direction);
 
-enable:
-	dcsr = readl(&sun_pci_fd_ebus_dma->dcsr);
-	dcsr |= EBUS_DCSR_EN_DMA;
-	writel(dcsr, &sun_pci_fd_ebus_dma->dcsr);
+	ebus_dma_enable(&sun_pci_fd_ebus_dma, 1);
+
+	if (ebus_dma_request(&sun_pci_fd_ebus_dma,
+			     sun_pci_dma_current.addr,
+			     sun_pci_dma_current.len))
+		BUG();
 }
 
 static void sun_pci_fd_disable_dma(void)
 {
-	unsigned int dcsr;
-
-	dcsr = readl(&sun_pci_fd_ebus_dma->dcsr);
-	if (dcsr & EBUS_DCSR_EN_DMA) {
-		while (dcsr & EBUS_DCSR_DRAIN) {
-			udelay(1);
-			dcsr = readl(&sun_pci_fd_ebus_dma->dcsr);
-		}
-		dcsr &= ~(EBUS_DCSR_EN_DMA);
-		writel(dcsr, &sun_pci_fd_ebus_dma->dcsr);
-		if (dcsr & EBUS_DCSR_ERR_PEND) {
-			sun_pci_fd_reset_dma();
-			dcsr &= ~(EBUS_DCSR_ERR_PEND);
-			writel(dcsr, &sun_pci_fd_ebus_dma->dcsr);
-		}
-	}
+	ebus_dma_enable(&sun_pci_fd_ebus_dma, 0);
 	if (sun_pci_dma_current.addr != -1U)
 		pci_unmap_single(sun_pci_ebus_dev,
 				 sun_pci_dma_current.addr,
@@ -401,33 +361,17 @@ static void sun_pci_fd_disable_dma(void)
 
 static void sun_pci_fd_set_dma_mode(int mode)
 {
-	unsigned int dcsr;
-
-	dcsr = readl(&sun_pci_fd_ebus_dma->dcsr);
-	if (readl(&sun_pci_fd_ebus_dma->dbcr)) {
-		sun_pci_fd_reset_dma();
-		writel(dcsr, &sun_pci_fd_ebus_dma->dcsr);
-	}
-
-	dcsr |= EBUS_DCSR_EN_CNT | EBUS_DCSR_TC;
-	/*
-	 * For EBus WRITE means to system memory, which is
-	 * READ for us.
-	 */
-	if (mode == DMA_MODE_WRITE) {
-		dcsr &= ~(EBUS_DCSR_WRITE);
+	if (mode == DMA_MODE_WRITE)
 		sun_pci_dma_pending.direction = PCI_DMA_TODEVICE;
-	} else {
-		dcsr |= EBUS_DCSR_WRITE;
+	else
 		sun_pci_dma_pending.direction = PCI_DMA_FROMDEVICE;
-	}
-	writel(dcsr, &sun_pci_fd_ebus_dma->dcsr);
+
+	ebus_dma_prepare(&sun_pci_fd_ebus_dma, mode != DMA_MODE_WRITE);
 }
 
 static void sun_pci_fd_set_dma_count(int length)
 {
 	sun_pci_dma_pending.len = length;
-	writel(length, &sun_pci_fd_ebus_dma->dbcr);
 }
 
 static void sun_pci_fd_set_dma_addr(char *buffer)
@@ -437,51 +381,17 @@ static void sun_pci_fd_set_dma_addr(char *buffer)
 
 static unsigned int sun_pci_get_dma_residue(void)
 {
-	unsigned int dcsr, res;
-
-	res = readl(&sun_pci_fd_ebus_dma->dbcr);
-	if (res != 0) {
-		dcsr = readl(&sun_pci_fd_ebus_dma->dcsr);
-		sun_pci_fd_reset_dma();
-		writel(dcsr, &sun_pci_fd_ebus_dma->dcsr);
-	}
-	return res;
-}
-
-static void sun_pci_fd_enable_irq(void)
-{
-	unsigned int dcsr;
-
-	dcsr = readl(&sun_pci_fd_ebus_dma->dcsr);
-	dcsr |= EBUS_DCSR_INT_EN;
-	writel(dcsr, &sun_pci_fd_ebus_dma->dcsr);
-}
-
-static void sun_pci_fd_disable_irq(void)
-{
-	unsigned int dcsr;
-
-	dcsr = readl(&sun_pci_fd_ebus_dma->dcsr);
-	dcsr &= ~(EBUS_DCSR_INT_EN);
-	writel(dcsr, &sun_pci_fd_ebus_dma->dcsr);
+	return ebus_dma_residue(&sun_pci_fd_ebus_dma);
 }
 
 static int sun_pci_fd_request_irq(void)
 {
-	int err;
-
-	err = request_irq(FLOPPY_IRQ, floppy_interrupt, SA_SHIRQ,
-			  "floppy", sun_fdc);
-	if (err)
-		return -1;
-	sun_pci_fd_enable_irq();
-	return 0;
+	return ebus_dma_irq_enable(&sun_pci_fd_ebus_dma, 1);
 }
 
 static void sun_pci_fd_free_irq(void)
 {
-	sun_pci_fd_disable_irq();
-	free_irq(FLOPPY_IRQ, sun_fdc);
+	ebus_dma_irq_enable(&sun_pci_fd_ebus_dma, 0);
 }
 
 static int sun_pci_fd_eject(int drive)
@@ -489,6 +399,10 @@ static int sun_pci_fd_eject(int drive)
 	return -EINVAL;
 }
 
+void sun_pci_fd_dma_callback(struct ebus_dma_info *p, int event, void *cookie)
+{
+	floppy_interrupt(0, NULL, NULL);
+}
 
 /*
  * Floppy probing, we'd like to use /dev/fd0 for a single Floppy on PCI,
@@ -608,16 +522,18 @@ static int __init ebus_fdthree_p(struct linux_ebus_device *edev)
 #ifdef ISA_FLOPPY_WORKS
 static unsigned long __init isa_floppy_init(void)
 {
-	struct isa_bridge *isa_br;
-	struct isa_device *isa_dev = NULL;
+	struct sparc_isa_bridge *isa_br;
+	struct sparc_isa_device *isa_dev = NULL;
 
 	for_each_isa(isa_br) {
 		for_each_isadev(isa_dev, isa_br) {
 			if (!strcmp(isa_dev->prom_name, "dma")) {
-				struct isa_device *child = isa_dev->child;
+				struct sparc_isa_device *child =
+					isa_dev->child;
 
 				while (child) {
-					if (!strcmp(child->prom_name, "floppy")) {
+					if (!strcmp(child->prom_name,
+						    "floppy")) {
 						isa_dev = child;
 						goto isa_done;
 					}
@@ -653,8 +569,6 @@ isa_done:
 	sun_fdops.fd_set_dma_count = sun_fd_set_dma_count;
 	sun_fdops.get_dma_residue = sun_get_dma_residue;
 
-	sun_fdops.fd_enable_irq = sun_fd_enable_irq;
-	sun_fdops.fd_disable_irq = sun_fd_disable_irq;
 	sun_fdops.fd_request_irq = sun_fd_request_irq;
 	sun_fdops.fd_free_irq = sun_fd_free_irq;
 
@@ -721,10 +635,9 @@ static unsigned long __init sun_floppy_init(void)
 
 		prom_getproperty(edev->prom_node, "status",
 				 state, sizeof(state));
-		if(!strncmp(state, "disabled", 8))
+		if (!strncmp(state, "disabled", 8))
 			return 0;
 			
-		sun_fdc = (struct sun_flpy_controller *)edev->resource[0].start;
 		FLOPPY_IRQ = edev->irqs[0];
 
 		/* Make sure the high density bit is set, some systems
@@ -735,9 +648,24 @@ static unsigned long __init sun_floppy_init(void)
 
 		sun_pci_ebus_dev = ebus->self;
 
-		sun_pci_fd_ebus_dma = (struct linux_ebus_dma *)
-			edev->resource[1].start;
-		sun_pci_fd_reset_dma();
+		spin_lock_init(&sun_pci_fd_ebus_dma.lock);
+
+		/* XXX ioremap */
+		sun_pci_fd_ebus_dma.regs = edev->resource[1].start;
+		if (!sun_pci_fd_ebus_dma.regs)
+			return 0;
+
+		sun_pci_fd_ebus_dma.flags = (EBUS_DMA_FLAG_USE_EBDMA_HANDLER |
+					     EBUS_DMA_FLAG_TCI_DISABLE);
+		sun_pci_fd_ebus_dma.callback = sun_pci_fd_dma_callback;
+		sun_pci_fd_ebus_dma.client_cookie = NULL;
+		sun_pci_fd_ebus_dma.irq = FLOPPY_IRQ;
+		strcpy(sun_pci_fd_ebus_dma.name, "floppy");
+		if (ebus_dma_register(&sun_pci_fd_ebus_dma))
+			return 0;
+
+		/* XXX ioremap */
+		sun_fdc = (struct sun_flpy_controller *)edev->resource[0].start;
 
 		sun_fdops.fd_inb = sun_pci_fd_inb;
 		sun_fdops.fd_outb = sun_pci_fd_outb;
@@ -750,8 +678,6 @@ static unsigned long __init sun_floppy_init(void)
 		sun_fdops.fd_set_dma_count = sun_pci_fd_set_dma_count;
 		sun_fdops.get_dma_residue = sun_pci_get_dma_residue;
 
-		sun_fdops.fd_enable_irq = sun_pci_fd_enable_irq;
-		sun_fdops.fd_disable_irq = sun_pci_fd_disable_irq;
 		sun_fdops.fd_request_irq = sun_pci_fd_request_irq;
 		sun_fdops.fd_free_irq = sun_pci_fd_free_irq;
 
@@ -866,8 +792,6 @@ static unsigned long __init sun_floppy_init(void)
 	sun_fdops.fd_set_dma_count = sun_fd_set_dma_count;
 	sun_fdops.get_dma_residue = sun_get_dma_residue;
 
-	sun_fdops.fd_enable_irq = sun_fd_enable_irq;
-	sun_fdops.fd_disable_irq = sun_fd_disable_irq;
 	sun_fdops.fd_request_irq = sun_fd_request_irq;
 	sun_fdops.fd_free_irq = sun_fd_free_irq;
 

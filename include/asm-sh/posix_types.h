@@ -7,7 +7,6 @@
  * assume GCC is being used.
  */
 
-typedef unsigned short	__kernel_dev_t;
 typedef unsigned long	__kernel_ino_t;
 typedef unsigned short	__kernel_mode_t;
 typedef unsigned short	__kernel_nlink_t;
@@ -22,6 +21,8 @@ typedef int		__kernel_ptrdiff_t;
 typedef long		__kernel_time_t;
 typedef long		__kernel_suseconds_t;
 typedef long		__kernel_clock_t;
+typedef int		__kernel_timer_t;
+typedef int		__kernel_clockid_t;
 typedef int		__kernel_daddr_t;
 typedef char *		__kernel_caddr_t;
 typedef unsigned short	__kernel_uid16_t;
@@ -31,6 +32,7 @@ typedef unsigned int	__kernel_gid32_t;
 
 typedef unsigned short	__kernel_old_uid_t;
 typedef unsigned short	__kernel_old_gid_t;
+typedef unsigned short	__kernel_old_dev_t;
 
 #ifdef __GNUC__
 typedef long long	__kernel_loff_t;

@@ -19,6 +19,7 @@
 #include <linux/in6.h>
 #include <linux/route.h>
 #include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 
 #include <net/sock.h>
 
@@ -48,7 +49,8 @@
 static atomic_t fl_size = ATOMIC_INIT(0);
 static struct ip6_flowlabel *fl_ht[FL_HASH_MASK+1];
 
-static struct timer_list ip6_fl_gc_timer;
+static void ip6_fl_gc(unsigned long dummy);
+static struct timer_list ip6_fl_gc_timer = TIMER_INITIALIZER(ip6_fl_gc, 0, 0);
 
 /* FL hash table lock: it protects only of GC */
 
@@ -92,10 +94,12 @@ static void fl_free(struct ip6_flowlabel *fl)
 
 static void fl_release(struct ip6_flowlabel *fl)
 {
+	write_lock_bh(&ip6_fl_lock);
+
 	fl->lastuse = jiffies;
 	if (atomic_dec_and_test(&fl->users)) {
 		unsigned long ttd = fl->lastuse + fl->linger;
-		if ((long)(ttd - fl->expires) > 0)
+		if (time_after(ttd, fl->expires))
 			fl->expires = ttd;
 		ttd = fl->expires;
 		if (fl->opt && fl->share == IPV6_FL_S_EXCL) {
@@ -103,11 +107,12 @@ static void fl_release(struct ip6_flowlabel *fl)
 			fl->opt = NULL;
 			kfree(opt);
 		}
-		if (!del_timer(&ip6_fl_gc_timer) ||
-		    (long)(ip6_fl_gc_timer.expires - ttd) > 0)
-			ip6_fl_gc_timer.expires = ttd;
-		add_timer(&ip6_fl_gc_timer);
+		if (!timer_pending(&ip6_fl_gc_timer) ||
+		    time_after(ip6_fl_gc_timer.expires, ttd))
+			mod_timer(&ip6_fl_gc_timer, ttd);
 	}
+
+	write_unlock_bh(&ip6_fl_lock);
 }
 
 static void ip6_fl_gc(unsigned long dummy)
@@ -124,16 +129,16 @@ static void ip6_fl_gc(unsigned long dummy)
 		while ((fl=*flp) != NULL) {
 			if (atomic_read(&fl->users) == 0) {
 				unsigned long ttd = fl->lastuse + fl->linger;
-				if ((long)(ttd - fl->expires) > 0)
+				if (time_after(ttd, fl->expires))
 					fl->expires = ttd;
 				ttd = fl->expires;
-				if ((long)(now - ttd) >= 0) {
+				if (time_after_eq(now, ttd)) {
 					*flp = fl->next;
 					fl_free(fl);
 					atomic_dec(&fl_size);
 					continue;
 				}
-				if (!sched || (long)(ttd - sched) < 0)
+				if (!sched || time_before(ttd, sched))
 					sched = ttd;
 			}
 			flp = &fl->next;
@@ -180,7 +185,7 @@ static int fl_intern(struct ip6_flowlabel *fl, __u32 label)
 struct ip6_flowlabel * fl6_sock_lookup(struct sock *sk, u32 label)
 {
 	struct ipv6_fl_socklist *sfl;
-	struct ipv6_pinfo *np = &sk->net_pinfo.af_inet6;
+	struct ipv6_pinfo *np = inet6_sk(sk);
 
 	label &= IPV6_FLOWLABEL_MASK;
 
@@ -197,7 +202,7 @@ struct ip6_flowlabel * fl6_sock_lookup(struct sock *sk, u32 label)
 
 void fl6_free_socklist(struct sock *sk)
 {
-	struct ipv6_pinfo *np = &sk->net_pinfo.af_inet6;
+	struct ipv6_pinfo *np = inet6_sk(sk);
 	struct ipv6_fl_socklist *sfl;
 
 	while ((sfl = np->ipv6_fl_list) != NULL) {
@@ -244,7 +249,7 @@ struct ipv6_txoptions *fl6_merge_options(struct ipv6_txoptions * opt_space,
 	return opt_space;
 }
 
-static __u32 check_linger(__u16 ttl)
+static unsigned long check_linger(unsigned long ttl)
 {
 	if (ttl < FL_MIN_LINGER)
 		return FL_MIN_LINGER*HZ;
@@ -253,7 +258,7 @@ static __u32 check_linger(__u16 ttl)
 	return ttl*HZ;
 }
 
-static int fl6_renew(struct ip6_flowlabel *fl, unsigned linger, unsigned expires)
+static int fl6_renew(struct ip6_flowlabel *fl, unsigned long linger, unsigned long expires)
 {
 	linger = check_linger(linger);
 	if (!linger)
@@ -262,11 +267,11 @@ static int fl6_renew(struct ip6_flowlabel *fl, unsigned linger, unsigned expires
 	if (!expires)
 		return -EPERM;
 	fl->lastuse = jiffies;
-	if (fl->linger < linger)
+	if (time_before(fl->linger, linger))
 		fl->linger = linger;
-	if (expires < fl->linger)
+	if (time_before(expires, fl->linger))
 		expires = fl->linger;
-	if ((long)(fl->expires - (fl->lastuse+expires)) < 0)
+	if (time_before(fl->expires, fl->lastuse + expires))
 		fl->expires = fl->lastuse + expires;
 	return 0;
 }
@@ -354,6 +359,7 @@ done:
 
 static int mem_check(struct sock *sk)
 {
+	struct ipv6_pinfo *np = inet6_sk(sk);
 	struct ipv6_fl_socklist *sfl;
 	int room = FL_MAX_SIZE - atomic_read(&fl_size);
 	int count = 0;
@@ -361,7 +367,7 @@ static int mem_check(struct sock *sk)
 	if (room > FL_MAX_SIZE - FL_MAX_PER_SOCK)
 		return 0;
 
-	for (sfl = sk->net_pinfo.af_inet6.ipv6_fl_list; sfl; sfl = sfl->next)
+	for (sfl = np->ipv6_fl_list; sfl; sfl = sfl->next)
 		count++;
 
 	if (room <= 0 ||
@@ -404,7 +410,7 @@ static int ipv6_opt_cmp(struct ipv6_txoptions *o1, struct ipv6_txoptions *o2)
 int ipv6_flowlabel_opt(struct sock *sk, char *optval, int optlen)
 {
 	int err;
-	struct ipv6_pinfo *np = &sk->net_pinfo.af_inet6;
+	struct ipv6_pinfo *np = inet6_sk(sk);
 	struct in6_flowlabel_req freq;
 	struct ipv6_fl_socklist *sfl1=NULL;
 	struct ipv6_fl_socklist *sfl, **sflp;
@@ -553,66 +559,143 @@ done:
 
 #ifdef CONFIG_PROC_FS
 
+struct ip6fl_iter_state {
+	int bucket;
+};
 
-static int ip6_fl_read_proc(char *buffer, char **start, off_t offset,
-			    int length, int *eof, void *data)
+#define ip6fl_seq_private(seq)	((struct ip6fl_iter_state *)(seq)->private)
+
+static struct ip6_flowlabel *ip6fl_get_first(struct seq_file *seq)
 {
-	off_t pos=0;
-	off_t begin=0;
-	int len=0;
-	int i, k;
-	struct ip6_flowlabel *fl;
+	struct ip6_flowlabel *fl = NULL;
+	struct ip6fl_iter_state *state = ip6fl_seq_private(seq);
 
-	len+= sprintf(buffer,"Label S Owner  Users  Linger Expires  "
-		      "Dst                              Opt\n");
-
-	read_lock_bh(&ip6_fl_lock);
-	for (i=0; i<=FL_HASH_MASK; i++) {
-		for (fl = fl_ht[i]; fl; fl = fl->next) {
-			len+=sprintf(buffer+len,"%05X %-1d %-6d %-6d %-6d %-8ld ",
-				     (unsigned)ntohl(fl->label),
-				     fl->share,
-				     (unsigned)fl->owner,
-				     atomic_read(&fl->users),
-				     fl->linger/HZ,
-				     (long)(fl->expires - jiffies)/HZ);
-
-			for (k=0; k<16; k++)
-				len+=sprintf(buffer+len, "%02x", fl->dst.s6_addr[k]);
-			buffer[len++]=' ';
-			len+=sprintf(buffer+len, "%-4d", fl->opt ? fl->opt->opt_nflen : 0);
-			buffer[len++]='\n';
-
-			pos=begin+len;
-			if(pos<offset) {
-				len=0;
-				begin=pos;
-			}
-			if(pos>offset+length)
-				goto done;
+	for (state->bucket = 0; state->bucket <= FL_HASH_MASK; ++state->bucket) {
+		if (fl_ht[state->bucket]) {
+			fl = fl_ht[state->bucket];
+			break;
 		}
 	}
-	*eof = 1;
-
-done:
-	read_unlock_bh(&ip6_fl_lock);
-	*start=buffer+(offset-begin);
-	len-=(offset-begin);
-	if(len>length)
-		len=length;
-	if(len<0)
-		len=0;
-	return len;
+	return fl;
 }
+
+static struct ip6_flowlabel *ip6fl_get_next(struct seq_file *seq, struct ip6_flowlabel *fl)
+{
+	struct ip6fl_iter_state *state = ip6fl_seq_private(seq);
+
+	fl = fl->next;
+	while (!fl) {
+		if (++state->bucket <= FL_HASH_MASK)
+			fl = fl_ht[state->bucket];
+	}
+	return fl;
+}
+
+static struct ip6_flowlabel *ip6fl_get_idx(struct seq_file *seq, loff_t pos)
+{
+	struct ip6_flowlabel *fl = ip6fl_get_first(seq);
+	if (fl)
+		while (pos && (fl = ip6fl_get_next(seq, fl)) != NULL)
+			--pos;
+	return pos ? NULL : fl;
+}
+
+static void *ip6fl_seq_start(struct seq_file *seq, loff_t *pos)
+{
+	read_lock_bh(&ip6_fl_lock);
+	return *pos ? ip6fl_get_idx(seq, *pos - 1) : SEQ_START_TOKEN;
+}
+
+static void *ip6fl_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	struct ip6_flowlabel *fl;
+
+	if (v == SEQ_START_TOKEN)
+		fl = ip6fl_get_first(seq);
+	else
+		fl = ip6fl_get_next(seq, v);
+	++*pos;
+	return fl;
+}
+
+static void ip6fl_seq_stop(struct seq_file *seq, void *v)
+{
+	read_unlock_bh(&ip6_fl_lock);
+}
+
+static void ip6fl_fl_seq_show(struct seq_file *seq, struct ip6_flowlabel *fl)
+{
+	while(fl) {
+		seq_printf(seq,
+			   "%05X %-1d %-6d %-6d %-6ld %-8ld "
+			   "%02x%02x%02x%02x%02x%02x%02x%02x "
+			   "%-4d\n",
+			   (unsigned)ntohl(fl->label),
+			   fl->share,
+			   (unsigned)fl->owner,
+			   atomic_read(&fl->users),
+			   fl->linger/HZ,
+			   (long)(fl->expires - jiffies)/HZ,
+			   NIP6(fl->dst),
+			   fl->opt ? fl->opt->opt_nflen : 0);
+		fl = fl->next;
+	}
+}
+
+static int ip6fl_seq_show(struct seq_file *seq, void *v)
+{
+	if (v == SEQ_START_TOKEN)
+		seq_printf(seq, "Label S Owner  Users  Linger Expires  "
+				"Dst                              Opt\n");
+	else
+		ip6fl_fl_seq_show(seq, v);
+	return 0;
+}
+
+static struct seq_operations ip6fl_seq_ops = {
+	.start	=	ip6fl_seq_start,
+	.next	=	ip6fl_seq_next,
+	.stop	=	ip6fl_seq_stop,
+	.show	=	ip6fl_seq_show,
+};
+
+static int ip6fl_seq_open(struct inode *inode, struct file *file)
+{
+	struct seq_file *seq;
+	int rc = -ENOMEM;
+	struct ip6fl_iter_state *s = kmalloc(sizeof(*s), GFP_KERNEL);
+
+	if (!s)
+		goto out;
+
+	rc = seq_open(file, &ip6fl_seq_ops);
+	if (rc)
+		goto out_kfree;
+
+	seq = file->private_data;
+	seq->private = s;
+	memset(s, 0, sizeof(*s));
+out:
+	return rc;
+out_kfree:
+	kfree(s);
+	goto out;
+}
+
+static struct file_operations ip6fl_seq_fops = {
+	.owner		=	THIS_MODULE,
+	.open		=	ip6fl_seq_open,
+	.read		=	seq_read,
+	.llseek		=	seq_lseek,
+	.release	=	seq_release_private,
+};
 #endif
 
 
 void ip6_flowlabel_init()
 {
-	init_timer(&ip6_fl_gc_timer);
-	ip6_fl_gc_timer.function = ip6_fl_gc;
 #ifdef CONFIG_PROC_FS
-	create_proc_read_entry("net/ip6_flowlabel", 0, 0, ip6_fl_read_proc, NULL);
+	proc_net_fops_create("ip6_flowlabel", S_IRUGO, &ip6fl_seq_fops);
 #endif
 }
 
@@ -620,6 +703,6 @@ void ip6_flowlabel_cleanup()
 {
 	del_timer(&ip6_fl_gc_timer);
 #ifdef CONFIG_PROC_FS
-	remove_proc_entry("net/ip6_flowlabel", 0);
+	proc_net_remove("ip6_flowlabel");
 #endif
 }

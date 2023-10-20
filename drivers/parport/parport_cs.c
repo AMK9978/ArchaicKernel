@@ -5,7 +5,7 @@
     (specifically, for the Quatech SPP-100 EPP card: other cards will
     probably require driver tweaks)
     
-    parport_cs.c 1.20 2000/11/02 23:15:05
+    parport_cs.c 1.29 2002/10/11 06:57:41
 
     The contents of this file are subject to the Mozilla Public
     License Version 1.1 (the "License"); you may not use this file
@@ -34,9 +34,7 @@
     
 ======================================================================*/
 
-
 #include <linux/kernel.h>
-#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/sched.h>
@@ -45,6 +43,7 @@
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/ioport.h>
+#include <linux/major.h>
 
 #include <linux/parport.h>
 #include <linux/parport_pc.h>
@@ -57,32 +56,31 @@
 #include <pcmcia/cisreg.h>
 #include <pcmcia/ciscode.h>
 
+/*====================================================================*/
+
+/* Module parameters */
+
+MODULE_AUTHOR("David Hinds <dahinds@users.sourceforge.net>");
+MODULE_DESCRIPTION("PCMCIA parallel port card driver");
+MODULE_LICENSE("Dual MPL/GPL");
+
+#define INT_MODULE_PARM(n, v) static int n = v; MODULE_PARM(n, "i")
+
+/* Bit map of interrupts to choose from */
+INT_MODULE_PARM(irq_mask, 0xdeb8);
+static int irq_list[4] = { -1 };
+MODULE_PARM(irq_list, "1-4i");
+
+INT_MODULE_PARM(epp_mode, 1);
+
 #ifdef PCMCIA_DEBUG
-static int pc_debug = PCMCIA_DEBUG;
-MODULE_PARM(pc_debug, "i");
+INT_MODULE_PARM(pc_debug, PCMCIA_DEBUG);
 #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
 static char *version =
-"parport_cs.c 1.20 2000/11/02 23:15:05 (David Hinds)";
+"parport_cs.c 1.29 2002/10/11 06:57:41 (David Hinds)";
 #else
 #define DEBUG(n, args...)
 #endif
-
-#ifndef VERSION
-#define VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))
-#endif
-
-/*====================================================================*/
-
-/* Parameters that can be set with 'insmod' */
-
-/* Bit map of interrupts to choose from */
-static u_int irq_mask = 0xdeb8;
-static int irq_list[4] = { -1 };
-static int epp_mode = 1;
-
-MODULE_PARM(irq_mask, "i");
-MODULE_PARM(irq_list, "1-4i");
-MODULE_PARM(epp_mode, "i");
 
 /*====================================================================*/
 
@@ -98,23 +96,12 @@ typedef struct parport_info_t {
 static dev_link_t *parport_attach(void);
 static void parport_detach(dev_link_t *);
 static void parport_config(dev_link_t *link);
-static void parport_cs_release(u_long arg);
+static void parport_cs_release(dev_link_t *);
 static int parport_event(event_t event, int priority,
 			 event_callback_args_t *args);
 
 static dev_info_t dev_info = "parport_cs";
 static dev_link_t *dev_list = NULL;
-
-extern struct parport_operations parport_pc_ops;
-static struct parport_operations parport_cs_ops;
-
-/*====================================================================*/
-
-static void cs_error(client_handle_t handle, int func, int ret)
-{
-    error_info_t err = { func, ret };
-    CardServices(ReportError, handle, &err);
-}
 
 /*======================================================================
 
@@ -139,8 +126,6 @@ static dev_link_t *parport_attach(void)
     memset(info, 0, sizeof(*info));
     link = &info->link; link->priv = info;
 
-    link->release.function = &parport_cs_release;
-    link->release.data = (u_long)link;
     link->io.Attributes1 = IO_DATA_PATH_WIDTH_8;
     link->io.Attributes2 = IO_DATA_PATH_WIDTH_8;
     link->irq.Attributes = IRQ_TYPE_EXCLUSIVE;
@@ -198,9 +183,8 @@ static void parport_detach(dev_link_t *link)
     if (*linkp == NULL)
 	return;
 
-    del_timer(&link->release);
     if (link->state & DEV_CONFIG)
-	parport_cs_release((u_long)link);
+	parport_cs_release(link);
     
     if (link->handle) {
 	ret = CardServices(DeregisterClient, link->handle);
@@ -228,12 +212,6 @@ while ((last_ret=CardServices(last_fn=(fn), args))!=0) goto cs_failed
 #define CFG_CHECK(fn, args...) \
 if (CardServices(fn, args) != 0) goto next_entry
 
-static struct { u_int flag; char *name; } mode[] = {
-    { PARPORT_MODE_TRISTATE, "PS2" },
-    { PARPORT_MODE_EPP, "EPP" },
-    { PARPORT_MODE_ECP, "ECP" },
-};
-
 void parport_config(dev_link_t *link)
 {
     client_handle_t handle = link->handle;
@@ -245,7 +223,7 @@ void parport_config(dev_link_t *link)
     cistpl_cftable_entry_t *cfg = &parse.cftable_entry;
     cistpl_cftable_entry_t dflt = { 0 };
     struct parport *p;
-    int i, last_ret, last_fn;
+    int last_ret, last_fn;
     
     DEBUG(0, "parport_config(0x%p)\n", link);
     
@@ -297,6 +275,9 @@ void parport_config(dev_link_t *link)
     CS_CHECK(RequestIRQ, handle, &link->irq);
     CS_CHECK(RequestConfiguration, handle, &link->conf);
 
+    release_region(link->io.BasePort1, link->io.NumPorts1);
+    if (link->io.NumPorts2)
+	release_region(link->io.BasePort2, link->io.NumPorts2);
     p = parport_pc_probe_port(link->io.BasePort1, link->io.BasePort2,
 			      link->irq.AssignedIRQ, PARPORT_DMA_NONE,
 			      NULL);
@@ -307,19 +288,6 @@ void parport_config(dev_link_t *link)
 	goto failed;
     }
 
-#if (LINUX_VERSION_CODE < VERSION(2,3,6))
-#if (LINUX_VERSION_CODE >= VERSION(2,2,8))
-    p->private_data = kmalloc(sizeof(struct parport_pc_private),
-			      GFP_KERNEL);
-    ((struct parport_pc_private *)(p->private_data))->ctr = 0x0c;
-#endif
-    parport_proc_register(p);
-    p->flags |= PARPORT_FLAG_COMA;
-    parport_pc_write_econtrol(p, 0x00);
-    parport_pc_write_control(p, 0x0c);
-    parport_pc_write_data(p, 0x00);
-#endif
-
     p->modes |= PARPORT_MODE_PCSPP;
     if (epp_mode)
 	p->modes |= PARPORT_MODE_TRISTATE | PARPORT_MODE_EPP;
@@ -329,22 +297,15 @@ void parport_config(dev_link_t *link)
     info->port = p;
     strcpy(info->node.dev_name, p->name);
     link->dev = &info->node;
-    printk(KERN_INFO "%s: PC-style PCMCIA at %#x", p->name,
-	   link->io.BasePort1);
-    if (link->io.NumPorts2)
-	printk(" & %#x", link->io.BasePort2);
-    printk(", irq %u [SPP", link->irq.AssignedIRQ);
-    for (i = 0; i < 5; i++)
-	if (p->modes & mode[i].flag) printk(",%s", mode[i].name);
-    printk("]\n");
-    
+
     link->state &= ~DEV_CONFIG_PENDING;
     return;
     
 cs_failed:
     cs_error(link->handle, last_fn, last_ret);
 failed:
-    parport_cs_release((u_long)link);
+    parport_cs_release(link);
+    link->state &= ~DEV_CONFIG_PENDING;
 
 } /* parport_config */
 
@@ -356,24 +317,20 @@ failed:
     
 ======================================================================*/
 
-void parport_cs_release(u_long arg)
+void parport_cs_release(dev_link_t *link)
 {
-    dev_link_t *link = (dev_link_t *)arg;
     parport_info_t *info = link->priv;
     
     DEBUG(0, "parport_release(0x%p)\n", link);
 
     if (info->ndev) {
 	struct parport *p = info->port;
-#if (LINUX_VERSION_CODE < VERSION(2,3,6))
-	if (!(p->flags & PARPORT_FLAG_COMA))
-	    parport_quiesce(p);
-#endif
-	parport_proc_unregister(p);
-#if (LINUX_VERSION_CODE >= VERSION(2,2,8))
-	kfree(p->private_data);
-#endif
-	parport_unregister_port(p);
+	parport_pc_unregister_port(p);
+	request_region(link->io.BasePort1, link->io.NumPorts1,
+		       info->node.dev_name);
+	if (link->io.NumPorts2)
+	    request_region(link->io.BasePort2, link->io.NumPorts2,
+			   info->node.dev_name);
     }
     info->ndev = 0;
     link->dev = NULL;
@@ -404,7 +361,7 @@ int parport_event(event_t event, int priority,
     case CS_EVENT_CARD_REMOVAL:
 	link->state &= ~DEV_PRESENT;
 	if (link->state & DEV_CONFIG)
-	    mod_timer(&link->release, jiffies + HZ/20);
+		parport_cs_release(link);
 	break;
     case CS_EVENT_CARD_INSERTION:
 	link->state |= DEV_PRESENT | DEV_CONFIG_PENDING;
@@ -428,56 +385,28 @@ int parport_event(event_t event, int priority,
     return 0;
 } /* parport_event */
 
-/*====================================================================*/
-
-#if (LINUX_VERSION_CODE < VERSION(2,3,6))
-
-static void inc_use_count(void)
-{
-    MOD_INC_USE_COUNT;
-    parport_pc_ops.inc_use_count();
-}
-
-static void dec_use_count(void)
-{
-    MOD_DEC_USE_COUNT;
-    parport_pc_ops.dec_use_count();
-}
-
-#endif
-
-/*====================================================================*/
+static struct pcmcia_driver parport_cs_driver = {
+	.owner		= THIS_MODULE,
+	.drv		= {
+		.name	= "parport_cs",
+	},
+	.attach		= parport_attach,
+	.detach		= parport_detach,
+};
 
 static int __init init_parport_cs(void)
 {
-    servinfo_t serv;
-    DEBUG(0, "%s\n", version);
-    CardServices(GetCardServicesInfo, &serv);
-    if (serv.Revision != CS_RELEASE_CODE) {
-	printk(KERN_NOTICE "parport_cs: Card Services release "
-	       "does not match!\n");
-	return -1;
-    }
-
-#if (LINUX_VERSION_CODE < VERSION(2,3,6))
-    /* This is to protect against unloading modules out of order */
-    parport_cs_ops = parport_pc_ops;
-    parport_cs_ops.inc_use_count = &inc_use_count;
-    parport_cs_ops.dec_use_count = &dec_use_count;
-#endif
-
-    register_pccard_driver(&dev_info, &parport_attach, &parport_detach);
-    return 0;
+	return pcmcia_register_driver(&parport_cs_driver);
 }
 
 static void __exit exit_parport_cs(void)
 {
-    DEBUG(0, "parport_cs: unloading\n");
-    unregister_pccard_driver(&dev_info);
-    while (dev_list != NULL)
-	parport_detach(dev_list);
+	pcmcia_unregister_driver(&parport_cs_driver);
+
+	/* XXX: this really needs to move into generic code.. */
+	while (dev_list != NULL)
+		parport_detach(dev_list);
 }
 
 module_init(init_parport_cs);
 module_exit(exit_parport_cs);
-MODULE_LICENSE("Dual MPL/GPL");

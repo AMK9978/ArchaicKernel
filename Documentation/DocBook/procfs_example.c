@@ -47,7 +47,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/proc_fs.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <asm/uaccess.h>
 
 
@@ -63,7 +63,7 @@ struct fb_data_t {
 
 
 static struct proc_dir_entry *example_dir, *foo_file,
-	*bar_file, *jiffies_file, *tty_device, *symlink;
+	*bar_file, *jiffies_file, *symlink;
 
 
 struct fb_data_t foo_data, bar_data;
@@ -75,12 +75,8 @@ static int proc_read_jiffies(char *page, char **start,
 {
 	int len;
 
-	MOD_INC_USE_COUNT;
-	
 	len = sprintf(page, "jiffies = %ld\n",
                       jiffies);
-
-	MOD_DEC_USE_COUNT;
 
 	return len;
 }
@@ -93,12 +89,9 @@ static int proc_read_foobar(char *page, char **start,
 	int len;
 	struct fb_data_t *fb_data = (struct fb_data_t *)data;
 
-	MOD_INC_USE_COUNT;
-	
+	/* DON'T DO THAT - buffer overruns are bad */
 	len = sprintf(page, "%s = '%s'\n", 
 		      fb_data->name, fb_data->value);
-
-	MOD_DEC_USE_COUNT;
 
 	return len;
 }
@@ -112,21 +105,15 @@ static int proc_write_foobar(struct file *file,
 	int len;
 	struct fb_data_t *fb_data = (struct fb_data_t *)data;
 
-	MOD_INC_USE_COUNT;
-
 	if(count > FOOBAR_LEN)
 		len = FOOBAR_LEN;
 	else
 		len = count;
 
-	if(copy_from_user(fb_data->value, buffer, len)) {
-		MOD_DEC_USE_COUNT;
+	if(copy_from_user(fb_data->value, buffer, len))
 		return -EFAULT;
-	}
 
 	fb_data->value[len] = '\0';
-
-	MOD_DEC_USE_COUNT;
 
 	return len;
 }
@@ -186,16 +173,6 @@ static int __init init_procfs_example(void)
 	bar_file->write_proc = proc_write_foobar;
 	bar_file->owner = THIS_MODULE;
 		
-	/* create tty device */
-	tty_device = proc_mknod("tty", S_IFCHR | 0666,
-				example_dir, MKDEV(5, 0));
-	if(tty_device == NULL) {
-		rv = -ENOMEM;
-		goto no_tty;
-	}
-	
-	tty_device->owner = THIS_MODULE;
-
 	/* create symlink */
 	symlink = proc_symlink("jiffies_too", example_dir, 
 			       "jiffies");
@@ -245,5 +222,3 @@ module_exit(cleanup_procfs_example);
 
 MODULE_AUTHOR("Erik Mouw");
 MODULE_DESCRIPTION("procfs examples");
-
-EXPORT_NO_SYMBOLS;

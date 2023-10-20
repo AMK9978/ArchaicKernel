@@ -51,7 +51,7 @@ struct busmouse_data {
 
 #define NR_MICE			15
 #define FIRST_MOUSE		0
-#define DEV_TO_MOUSE(dev)	MINOR_TO_MOUSE(MINOR(dev))
+#define DEV_TO_MOUSE(inode)	MINOR_TO_MOUSE(iminor(inode))
 #define MINOR_TO_MOUSE(minor)	((minor) - FIRST_MOUSE)
 
 /*
@@ -171,15 +171,16 @@ static int busmouse_release(struct inode *inode, struct file *file)
 	lock_kernel();
 	busmouse_fasync(-1, file, 0);
 
+	down(&mouse_sem); /* to protect mse->active */
 	if (--mse->active == 0) {
 		if (mse->ops->release)
 			ret = mse->ops->release(inode, file);
-	   	if (mse->ops->owner)
-			__MOD_DEC_USE_COUNT(mse->ops->owner);
+		module_put(mse->ops->owner);
 		mse->ready = 0;
 	}
 	unlock_kernel();
-
+	up( &mouse_sem);
+	
 	return ret;
 }
 
@@ -189,7 +190,7 @@ static int busmouse_open(struct inode *inode, struct file *file)
 	unsigned int mousedev;
 	int ret;
 
-	mousedev = DEV_TO_MOUSE(inode->i_rdev);
+	mousedev = DEV_TO_MOUSE(inode);
 	if (mousedev >= NR_MICE)
 		return -EINVAL;
 
@@ -199,14 +200,14 @@ static int busmouse_open(struct inode *inode, struct file *file)
 	if (!mse || !mse->ops)	/* shouldn't happen, but... */
 		goto end;
 
-	if (mse->ops->owner && !try_inc_mod_count(mse->ops->owner))
+	if (!try_module_get(mse->ops->owner))
 		goto end;
 
 	ret = 0;
 	if (mse->ops->open) {
 		ret = mse->ops->open(inode, file);
-		if (ret && mse->ops->owner)
-			__MOD_DEC_USE_COUNT(mse->ops->owner);
+		if (ret)
+			module_put(mse->ops->owner);
 	}
 
 	if (ret)
@@ -334,13 +335,13 @@ static unsigned int busmouse_poll(struct file *file, poll_table *wait)
 
 struct file_operations busmouse_fops=
 {
-	owner:		THIS_MODULE,
-	read:		busmouse_read,
-	write:		busmouse_write,
-	poll:		busmouse_poll,
-	open:		busmouse_open,
-	release:	busmouse_release,
-	fasync:		busmouse_fasync,
+	.owner		= THIS_MODULE,
+	.read		= busmouse_read,
+	.write		= busmouse_write,
+	.poll		= busmouse_poll,
+	.open		= busmouse_open,
+	.release	= busmouse_release,
+	.fasync		= busmouse_fasync,
 };
 
 /**
@@ -356,25 +357,23 @@ int register_busmouse(struct busmouse *ops)
 {
 	unsigned int msedev = MINOR_TO_MOUSE(ops->minor);
 	struct busmouse_data *mse;
-	int ret;
+	int ret = -EINVAL;
 
 	if (msedev >= NR_MICE) {
 		printk(KERN_ERR "busmouse: trying to allocate mouse on minor %d\n",
 		       ops->minor);
-		return -EINVAL;
+		goto out;
 	}
 
+	ret = -ENOMEM;
 	mse = kmalloc(sizeof(*mse), GFP_KERNEL);
 	if (!mse)
-		return -ENOMEM;
+		goto out;
 
 	down(&mouse_sem);
+	ret = -EBUSY;
 	if (busmouse_data[msedev])
-	{
-		up(&mouse_sem);
-		kfree(mse);
-		return -EBUSY;
-	}
+		goto freemem;
 
 	memset(mse, 0, sizeof(*mse));
 
@@ -385,14 +384,22 @@ int register_busmouse(struct busmouse *ops)
 	mse->lock = (spinlock_t)SPIN_LOCK_UNLOCKED;
 	init_waitqueue_head(&mse->wait);
 
-	busmouse_data[msedev] = mse;
 
 	ret = misc_register(&mse->miscdev);
-	if (!ret)
-		ret = msedev;
+
+	if (ret < 0) 
+		goto freemem;
+
+	busmouse_data[msedev] = mse;
+	ret = msedev;
+out:
 	up(&mouse_sem);
-	
 	return ret;
+
+
+freemem:
+	kfree(mse);
+	goto out;
 }
 
 /**
@@ -445,4 +452,5 @@ EXPORT_SYMBOL(busmouse_add_buttons);
 EXPORT_SYMBOL(register_busmouse);
 EXPORT_SYMBOL(unregister_busmouse);
 
+MODULE_ALIAS_MISCDEV(BUSMOUSE_MINOR);
 MODULE_LICENSE("GPL");

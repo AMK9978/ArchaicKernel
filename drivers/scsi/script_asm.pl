@@ -53,7 +53,8 @@ $debug = 0;		# Print general debugging messages
 $debug_external = 0;	# Print external/forward reference messages
 $list_in_array = 1;	# Emit original SCRIPTS assembler in comments in
 			# script.h
-$prefix = '';		# define all arrays having this prefix so we 
+#$prefix;		# (set by perl -s)
+                        # define all arrays having this prefix so we 
 			# don't have name space collisions after 
 			# assembling this file in different ways for
 			# different host adapters
@@ -382,12 +383,10 @@ print STDERR "looking for data in $conditional\n" if ($debug);
     }
 }
 
-# Parse command line 
-foreach $arg (@argv) {
-    if ($arg =~ /^-prefix\s*=\s*([_a-zA-Z][_a-zA-Z0-9]*)$/i) {
-	$prefix = $1
-    }
-}
+# Parse command line
+$output = shift;
+$outputu = shift;
+
     
 # Main loop
 while (<STDIN>) {
@@ -814,7 +813,7 @@ foreach $i (@absolute) {
 	$address = $2;
 	$length = $3;
 	die 
-"$0 : $symbol $i has illegal relative reference at address $address,
+"$0 : $symbol $i has invalid relative reference at address $address,
     size $length\n"
 	if ($type eq 'REL');
 	    
@@ -832,12 +831,12 @@ print STDERR "checking external $external \n" if ($debug_external);
 	    $length = $3;
 	    
 	    die 
-"$0 : symbol $label is external, has illegal relative reference at $address, 
+"$0 : symbol $label is external, has invalid relative reference at $address,
     size $length\n"
 		if ($type eq 'REL');
 
 	    die 
-"$0 : symbol $label has illegal reference at $address, size $length\n"
+"$0 : symbol $label has invalid reference at $address, size $length\n"
 		if ((($address % 4) !=0) || ($length != 4));
 
 	    $symbol = $symbol_values{$external};
@@ -863,7 +862,7 @@ foreach $label (@label) {
 	    $length = $3;
 
 	    if ((($address % 4) !=0) || ($length != 4)) {
-		die "$0 : symbol $label has illegal reference at $1, size $2\n";
+		die "$0 : symbol $label has invalid reference at $1, size $2\n";
 	    }
 
 	    if ($type eq 'ABS') {
@@ -896,7 +895,8 @@ foreach $label (@label) {
 open (OUTPUT, ">$output") || die "$0 : can't open $output for writing\n";
 open (OUTPUTU, ">$outputu") || die "$0 : can't open $outputu for writing\n";
 
-print OUTPUT "/* DO NOT EDIT - Generated automatically by ".$0." */\n";
+($_ = $0) =~ s:.*/::;
+print OUTPUT "/* DO NOT EDIT - Generated automatically by ".$_." */\n";
 print OUTPUT "static u32 ".$prefix."SCRIPT[] = {\n";
 $instructions = 0;
 for ($i = 0; $i < $#code; ) {

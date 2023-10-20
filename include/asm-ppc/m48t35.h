@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.m48t35.h 1.8 10/16/01 15:58:42 trini
- */
-/*
  *  Registers for the SGS-Thomson M48T35 Timekeeper RAM chip
  *  and
  *  Registers for the SGS-Thomson M48T37 Timekeeper RAM chip
@@ -13,15 +10,15 @@
 #define __PPC_M48T35_H
 
 /* RTC offsets */
-#define M48T35_RTC_FLAGS	(-8)	/* the negative regs are really T37 only */ 
+#define M48T35_RTC_FLAGS	(-8)	/* the negative regs are really T37 only */
 #define M48T35_RTC_CENTURY	(-7)
-#define M48T35_RTC_AL_SEC	(-6)    
-#define M48T35_RTC_AL_MIN	(-5)    
-#define M48T35_RTC_AL_HRS	(-4)    
-#define M48T35_RTC_AL_DOM	(-3)    
+#define M48T35_RTC_AL_SEC	(-6)
+#define M48T35_RTC_AL_MIN	(-5)
+#define M48T35_RTC_AL_HRS	(-4)
+#define M48T35_RTC_AL_DOM	(-3)
 #define M48T35_RTC_INTERRUPT	(-2)
 #define M48T35_RTC_WATCHDOG	(-1)
-#define M48T35_RTC_CONTROL	0	/* T35 starts here */ 
+#define M48T35_RTC_CONTROL	0	/* T35 starts here */
 #define M48T35_RTC_SECONDS	1
 #define M48T35_RTC_MINUTES	2
 #define M48T35_RTC_HOURS	3
@@ -30,7 +27,7 @@
 #define M48T35_RTC_MONTH	6
 #define M48T35_RTC_YEAR		7
 
-/* this way help us know which bits go with which regs */ 
+/* this way help us know which bits go with which regs */
 #define M48T35_RTC_FLAGS_BL           0x10
 #define M48T35_RTC_FLAGS_AF           0x40
 #define M48T35_RTC_FLAGS_WDF          0x80
@@ -46,18 +43,18 @@
 
 #define M48T35_RTC_CONTROL_WRITE       0x80
 #define M48T35_RTC_CONTROL_READ        0x40
-#define M48T35_RTC_CONTROL_CAL_SIGN    0x20    
+#define M48T35_RTC_CONTROL_CAL_SIGN    0x20
 #define M48T35_RTC_CONTROL_CAL_VALUE   0x1f
 #define M48T35_RTC_CONTROL_LOCKED      (M48T35_RTC_WRITE|M48T35_RTC_READ)
 #define M48T35_RTC_CONTROL_CALIBRATION (M48T35_RTC_CONTROL_CAL_SIGN|M48T35_RTC_CONTROL_CAL_VALUE)
 
 #define M48T35_RTC_SECONDS_SEC_1       0x0f
-#define M48T35_RTC_SECONDS_SEC_10      0x70    
+#define M48T35_RTC_SECONDS_SEC_10      0x70
 #define M48T35_RTC_SECONDS_ST          0x80
 #define M48T35_RTC_SECONDS_SEC_ALL     (M48T35_RTC_SECONDS_SEC_1|M48T35_RTC_SECONDS_SEC_10)
 
 #define M48T35_RTC_MINUTES_MIN_1       0x0f
-#define M48T35_RTC_MINUTES_MIN_10      0x70    
+#define M48T35_RTC_MINUTES_MIN_10      0x70
 #define M48T35_RTC_MINUTES_MIN_ALL     (M48T35_RTC_MINUTES_MIN_1|M48T35_RTC_MINUTES_MIN_10)
 
 #define M48T35_RTC_HOURS_HRS_1         0x0f
@@ -76,14 +73,5 @@
 #define M48T35_RTC_STOPPED  0x80
 #define M48T35_RTC_READ     0x40
 
-
-/* read/write conversions */
-#ifndef BCD_TO_BIN
-#define BCD_TO_BIN(x)   ((x)=((x)&15) + ((x)>>4)*10)
-#endif
-
-#ifndef BIN_TO_BCD
-#define BIN_TO_BCD(x)   ((x)=(((x)/10)<<4) + (x)%10)
-#endif
 
 #endif

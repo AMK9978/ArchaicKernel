@@ -2,7 +2,7 @@
  * include/asm-m68k/serial.h
  *
  * currently this seems useful only for a Q40,
- * its an almost exact copy of ../asm-alpha/serial.h 
+ * it's an almost exact copy of ../asm-alpha/serial.h 
  *
  */
 
@@ -30,9 +30,6 @@
 #define FOURPORT_FLAGS ASYNC_FOURPORT
 #define ACCENT_FLAGS 0
 #define BOCA_FLAGS 0
-#define RS_TABLE_SIZE  64
-#else
-#define RS_TABLE_SIZE  4
 #endif
 	
 #define STD_SERIAL_PORT_DEFNS			\

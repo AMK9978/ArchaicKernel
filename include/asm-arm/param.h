@@ -11,14 +11,20 @@
 #define __ASM_PARAM_H
 
 #include <asm/arch/param.h>	/* for HZ */
-#include <asm/proc/page.h>	/* for EXEC_PAGE_SIZE */
 
-#ifndef HZ
-#define HZ 100
+#ifndef __KERNEL_HZ
+#define __KERNEL_HZ	100
 #endif
-#if defined(__KERNEL__) && (HZ == 100)
-#define hz_to_std(a) (a)
+
+#ifdef __KERNEL__
+# define HZ		__KERNEL_HZ	/* Internal kernel timer frequency */
+# define USER_HZ	100		/* User interfaces are in "ticks" */
+# define CLOCKS_PER_SEC	(USER_HZ)	/* like times() */
+#else
+# define HZ		100
 #endif
+
+#define EXEC_PAGESIZE	4096
 
 #ifndef NGROUPS
 #define NGROUPS         32
@@ -30,10 +36,6 @@
 
 /* max length of hostname */
 #define MAXHOSTNAMELEN  64
-
-#ifdef __KERNEL__
-# define CLOCKS_PER_SEC	HZ
-#endif
 
 #endif
 

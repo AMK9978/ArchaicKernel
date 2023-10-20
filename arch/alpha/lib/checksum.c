@@ -9,6 +9,7 @@
  *	Rick Gorton	<rick.gorton@alpha-processor.com>
  */
  
+#include <linux/module.h>
 #include <linux/string.h>
 
 #include <asm/byteorder.h>
@@ -63,7 +64,7 @@ unsigned int csum_tcpudp_nofold(unsigned long saddr,
 		  ((unsigned long) ntohs(len) << 16) +
 		  ((unsigned long) proto << 8));
 
-	/* Fold down to 32-bits so we don't loose in the typedef-less 
+	/* Fold down to 32-bits so we don't lose in the typedef-less 
 	   network stack.  */
 	/* 64 to 33 */
 	result = (result & 0xffffffff) + (result >> 32);
@@ -172,6 +173,8 @@ unsigned int csum_partial(const unsigned char * buff, int len, unsigned int sum)
 	result = (result & 0xffffffff) + (result >> 32);
 	return result;
 }
+
+EXPORT_SYMBOL(csum_partial);
 
 /*
  * this routine is used for miscellaneous IP-like checksums, mainly

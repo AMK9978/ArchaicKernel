@@ -24,13 +24,14 @@
 #include <linux/hfs_fs_sb.h>
 #include <linux/hfs_fs_i.h>
 #include <linux/hfs_fs.h>
+#include <linux/smp_lock.h>
 
 /*================ Forward declarations ================*/
 static loff_t      cap_info_llseek(struct file *, loff_t,
                                    int);
-static hfs_rwret_t cap_info_read(struct file *, char *,
+static hfs_rwret_t cap_info_read(struct file *, char __user *,
 				 hfs_rwarg_t, loff_t *);
-static hfs_rwret_t cap_info_write(struct file *, const char *,
+static hfs_rwret_t cap_info_write(struct file *, const char __user *,
 				  hfs_rwarg_t, loff_t *);
 /*================ Function-like macros ================*/
 
@@ -46,14 +47,14 @@ static hfs_rwret_t cap_info_write(struct file *, const char *,
 /*================ Global variables ================*/
 
 struct file_operations hfs_cap_info_operations = {
-	llseek:		cap_info_llseek,
-	read:		cap_info_read,
-	write:		cap_info_write,
-	fsync:		file_fsync,
+	.llseek		= cap_info_llseek,
+	.read		= cap_info_read,
+	.write		= cap_info_write,
+	.fsync		= file_fsync,
 };
 
 struct inode_operations hfs_cap_info_inode_operations = {
-	setattr:	hfs_notify_change_cap,
+	.setattr	= hfs_notify_change_cap,
 };
 
 /*================ File-local functions ================*/
@@ -84,12 +85,14 @@ static void cap_build_meta(struct hfs_cap_info *meta,
 	meta->fi_datevalid = HFS_CAP_MDATE | HFS_CAP_CDATE;
 	hfs_put_nl(hfs_m_to_htime(entry->create_date), meta->fi_ctime);
 	hfs_put_nl(hfs_m_to_htime(entry->modify_date), meta->fi_mtime);
-	hfs_put_nl(CURRENT_TIME,                       meta->fi_utime);
+	hfs_put_nl(get_seconds(),                       meta->fi_utime);
 }
 
 static loff_t cap_info_llseek(struct file *file, loff_t offset, int origin)
 {
 	long long retval;
+
+	lock_kernel();
 
 	switch (origin) {
 		case 2:
@@ -102,11 +105,10 @@ static loff_t cap_info_llseek(struct file *file, loff_t offset, int origin)
 	if (offset>=0 && offset<=HFS_FORK_MAX) {
 		if (offset != file->f_pos) {
 			file->f_pos = offset;
-			file->f_reada = 0;
-			file->f_version = ++event;
 		}
 		retval = offset;
 	}
+	unlock_kernel();
 	return retval;
 }
 
@@ -119,7 +121,7 @@ static loff_t cap_info_llseek(struct file *file, loff_t offset, int origin)
  * 'file->f_pos' to user-space at the address 'buf'.  The return value
  * is the number of bytes actually transferred.
  */
-static hfs_rwret_t cap_info_read(struct file *filp, char *buf,
+static hfs_rwret_t cap_info_read(struct file *filp, char __user *buf,
 				 hfs_rwarg_t count, loff_t *ppos)
 {
 	struct inode *inode = filp->f_dentry->d_inode;
@@ -187,7 +189,7 @@ static hfs_rwret_t cap_info_read(struct file *filp, char *buf,
  * '*ppos' from user-space at the address 'buf'.
  * The return value is the number of bytes actually transferred.
  */
-static hfs_rwret_t cap_info_write(struct file *filp, const char *buf, 
+static hfs_rwret_t cap_info_write(struct file *filp, const char __user *buf, 
 				  hfs_rwarg_t count, loff_t *ppos)
 {
         struct inode *inode = filp->f_dentry->d_inode;

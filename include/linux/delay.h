@@ -27,11 +27,15 @@ extern unsigned long loops_per_jiffy;
 
 #ifdef notdef
 #define mdelay(n) (\
-	{unsigned long msec=(n); while (msec--) udelay(1000);})
+	{unsigned long __ms=(n); while (__ms--) udelay(1000);})
 #else
 #define mdelay(n) (\
 	(__builtin_constant_p(n) && (n)<=MAX_UDELAY_MS) ? udelay((n)*1000) : \
-	({unsigned long msec=(n); while (msec--) udelay(1000);}))
+	({unsigned long __ms=(n); while (__ms--) udelay(1000);}))
+#endif
+
+#ifndef ndelay
+#define ndelay(x)	udelay(((x)+999)/1000)
 #endif
 
 #endif /* defined(_LINUX_DELAY_H) */

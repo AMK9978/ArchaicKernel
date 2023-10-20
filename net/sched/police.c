@@ -13,6 +13,7 @@
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -27,7 +28,6 @@
 #include <linux/skbuff.h>
 #include <linux/rtnetlink.h>
 #include <linux/init.h>
-#include <linux/proc_fs.h>
 #include <net/sock.h>
 #include <net/pkt_sched.h>
 
@@ -219,7 +219,6 @@ int tcf_police(struct sk_buff *skb, struct tcf_police *p)
 	return p->action;
 }
 
-#ifdef CONFIG_RTNETLINK
 int tcf_police_dump(struct sk_buff *skb, struct tcf_police *p)
 {
 	unsigned char	 *b = skb->tail;
@@ -250,5 +249,12 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
-#endif
 
+EXPORT_SYMBOL(tcf_police);
+EXPORT_SYMBOL(tcf_police_destroy);
+EXPORT_SYMBOL(tcf_police_dump);
+EXPORT_SYMBOL(tcf_police_hash);
+EXPORT_SYMBOL(tcf_police_ht);
+EXPORT_SYMBOL(tcf_police_locate);
+EXPORT_SYMBOL(tcf_police_lookup);
+EXPORT_SYMBOL(tcf_police_new_index);

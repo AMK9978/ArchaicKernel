@@ -10,6 +10,9 @@
 #define __ASM_SMP_H
 
 #include <linux/config.h>
+#include <linux/threads.h>
+#include <linux/cpumask.h>
+#include <linux/bitops.h>
 
 #if defined(__KERNEL__) && defined(CONFIG_SMP) && !defined(__ASSEMBLY__)
 
@@ -26,7 +29,8 @@ typedef struct
 	__u16      cpu;
 } sigp_info;
 
-extern unsigned long cpu_online_map;
+extern cpumask_t cpu_online_map;
+extern cpumask_t cpu_possible_map;
 
 #define NO_PROC_ID		0xFF		/* No processor magic marker */
 
@@ -42,17 +46,10 @@ extern unsigned long cpu_online_map;
  
 #define PROC_CHANGE_PENALTY	20		/* Schedule penalty */
 
-#define smp_processor_id() (current->processor)
+#define smp_processor_id() (S390_lowcore.cpu_data.cpu_nr)
 
-extern __inline__ int cpu_logical_map(int cpu)
-{
-        return cpu;
-}
-
-extern __inline__ int cpu_number_map(int cpu)
-{
-        return cpu;
-}
+#define cpu_online(cpu) cpu_isset(cpu, cpu_online_map)
+#define cpu_possible(cpu) cpu_isset(cpu, cpu_possible_map)
 
 extern __inline__ __u16 hard_smp_processor_id(void)
 {
@@ -63,8 +60,6 @@ extern __inline__ __u16 hard_smp_processor_id(void)
 }
 
 #define cpu_logical_map(cpu) (cpu)
-
-void smp_local_timer_interrupt(struct pt_regs * regs);
 
 #endif
 #endif

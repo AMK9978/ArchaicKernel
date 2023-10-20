@@ -21,7 +21,6 @@
 #define solaris_semsys		solaris_unimplemented
 
         .data
-        .align  1024
 	.globl		solaris_sys_table
 solaris_sys_table:
 	.word solaris_unimplemented	/* nosys		0	*/
@@ -250,8 +249,8 @@ solaris_sys_table:
 	.word solaris_fstatvfs64	/* fstatvfs64	dP	219	*/
 	.word solaris_setrlimit64	/* setrlimit64	dP	220	*/
 	.word solaris_getrlimit64	/* getrlimit64	dP	221	*/
-	.word CHAIN(pread)		/* pread64	dpdD	222	*/
-	.word CHAIN(pwrite)		/* pwrite64	dpdD	223	*/
+	.word CHAIN(pread64)		/* pread64	dpdD	222	*/
+	.word CHAIN(pwrite64)		/* pwrite64	dpdD	223	*/
 	.word CHAIN(creat)		/* creat64	so	224	*/
 	.word solaris_open		/* open64	soo	225	*/
 	.word solaris_unimplemented	/* 			226	*/
@@ -284,4 +283,16 @@ solaris_sys_table:
 	.word solaris_unimplemented	/* 			253	*/
 	.word solaris_unimplemented	/* 			254	*/
 	.word solaris_unimplemented	/* 			255	*/
+	.word solaris_unimplemented	/* 			256	*/
+	.word solaris_unimplemented	/* 			257	*/
+	.word solaris_unimplemented	/* 			258	*/
+	.word solaris_unimplemented	/* 			259	*/
+	.word solaris_unimplemented	/* 			260	*/
+	.word solaris_unimplemented	/* 			261	*/
+	.word solaris_unimplemented	/* 			262	*/
+	.word solaris_unimplemented	/* 			263	*/
+	.word solaris_unimplemented	/* 			264	*/
+	.word solaris_unimplemented	/* 			265	*/
+	.word solaris_unimplemented	/* 			266	*/
+	.word solaris_unimplemented	/* 			267	*/
 

@@ -48,6 +48,7 @@ struct sppp
 	struct timer_list	pp_timer;
 	struct net_device	*pp_if;
 	char		pp_link_state;	/* Link status */
+	spinlock_t      lock;
 };
 
 struct ppp_device
@@ -56,8 +57,12 @@ struct ppp_device
 	struct sppp sppp;	/* Synchronous PPP */
 };
 
-#define sppp_of(dev)	\
-	    (&((struct ppp_device *)(*(unsigned long *)((dev)->priv)))->sppp)
+static inline struct sppp *sppp_of(struct net_device *dev) 
+{
+	struct ppp_device **ppp = dev->priv;
+	BUG_ON((*ppp)->dev != dev);
+	return &(*ppp)->sppp;
+}
 
 #define PP_KEEPALIVE    0x01    /* use keepalive protocol */
 #define PP_CISCO        0x02    /* use Cisco protocol instead of PPP */

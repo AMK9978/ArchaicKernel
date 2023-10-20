@@ -1,18 +1,22 @@
-#ifndef _LINUX_SCSI_H
-#define _LINUX_SCSI_H
-
 /*
  * This header file contains public constants and structures used by
  * the scsi code for linux.
+ *
+ * For documentation on the OPCODES, MESSAGES, and SENSE values,
+ * please consult the SCSI standard.
  */
+#ifndef _SCSI_SCSI_H
+#define _SCSI_SCSI_H
+
+#include <linux/types.h>
+
 
 /*
-    $Header: /usr/src/linux/include/linux/RCS/scsi.h,v 1.3 1993/09/24 12:20:33 drew Exp $
+ * SCSI command lengths
+ */
 
-    For documentation on the OPCODES, MESSAGES, and SENSE values,
-    please consult the SCSI standard.
-
-*/
+extern const unsigned char scsi_command_size[8];
+#define COMMAND_SIZE(opcode) scsi_command_size[((opcode) >> 5) & 7]
 
 /*
  *      SCSI opcodes
@@ -78,6 +82,7 @@
 #define MODE_SENSE_10         0x5a
 #define PERSISTENT_RESERVE_IN 0x5e
 #define PERSISTENT_RESERVE_OUT 0x5f
+#define REPORT_LUNS           0xa0
 #define MOVE_MEDIUM           0xa5
 #define READ_12               0xa8
 #define WRITE_12              0xaa
@@ -88,9 +93,57 @@
 #define READ_ELEMENT_STATUS   0xb8
 #define SEND_VOLUME_TAG       0xb6
 #define WRITE_LONG_2          0xea
+#define READ_16               0x88
+#define WRITE_16              0x8a
+#define SERVICE_ACTION_IN     0x9e
+/* values for service action in */
+#define	SAI_READ_CAPACITY_16  0x10
+
 
 /*
- *  Status codes
+ *  SCSI Architecture Model (SAM) Status codes. Taken from SAM-3 draft
+ *  T10/1561-D Revision 4 Draft dated 7th November 2002.
+ */
+#define SAM_STAT_GOOD            0x00
+#define SAM_STAT_CHECK_CONDITION 0x02
+#define SAM_STAT_CONDITION_MET   0x04
+#define SAM_STAT_BUSY            0x08
+#define SAM_STAT_INTERMEDIATE    0x10
+#define SAM_STAT_INTERMEDIATE_CONDITION_MET 0x14
+#define SAM_STAT_RESERVATION_CONFLICT 0x18
+#define SAM_STAT_COMMAND_TERMINATED 0x22	/* obsolete in SAM-3 */
+#define SAM_STAT_TASK_SET_FULL   0x28
+#define SAM_STAT_ACA_ACTIVE      0x30
+#define SAM_STAT_TASK_ABORTED    0x40
+
+/** scsi_status_is_good - check the status return.
+ *
+ * @status: the status passed up from the driver (including host and
+ *          driver components)
+ *
+ * This returns true for known good conditions that may be treated as
+ * command completed normally
+ */
+static inline int scsi_status_is_good(int status)
+{
+	/*
+	 * FIXME: bit0 is listed as reserved in SCSI-2, but is
+	 * significant in SCSI-3.  For now, we follow the SCSI-2
+	 * behaviour and ignore reserved bits.
+	 */
+	status &= 0xfe;
+	return ((status == SAM_STAT_GOOD) ||
+		(status == SAM_STAT_INTERMEDIATE) ||
+		(status == SAM_STAT_INTERMEDIATE_CONDITION_MET) ||
+		/* FIXME: this is obsolete in SAM-3 */
+		(status == SAM_STAT_COMMAND_TERMINATED));
+}
+
+/*
+ *  Status codes. These are deprecated as they are shifted 1 bit right
+ *  from those found in the SCSI standards. This causes confusion for
+ *  applications that are ported to several OSes. Prefer SAM Status codes
+ *  above.
  */
 
 #define GOOD                 0x00
@@ -130,6 +183,7 @@
 
 #define TYPE_DISK           0x00
 #define TYPE_TAPE           0x01
+#define TYPE_PRINTER        0x02
 #define TYPE_PROCESSOR      0x03    /* HP scanners use this */
 #define TYPE_WORM           0x04    /* Treated as ROM by our system */
 #define TYPE_ROM            0x05
@@ -143,24 +197,28 @@
 
 /*
  * standard mode-select header prepended to all mode-select commands
- *
- * moved here from cdrom.h -- kraxel
  */
 
-struct ccs_modesel_head
-{
-    u_char  _r1;    /* reserved */
-    u_char  medium; /* device-specific medium type */
-    u_char  _r2;    /* reserved */
-    u_char  block_desc_length; /* block descriptor length */
-    u_char  density; /* device-specific density code */
-    u_char  number_blocks_hi; /* number of blocks in this block desc */
-    u_char  number_blocks_med;
-    u_char  number_blocks_lo;
-    u_char  _r3;
-    u_char  block_length_hi; /* block length for blocks in this desc */
-    u_char  block_length_med;
-    u_char  block_length_lo;
+struct ccs_modesel_head {
+	u8 _r1;			/* reserved */
+	u8 medium;		/* device-specific medium type */
+	u8 _r2;			/* reserved */
+	u8 block_desc_length;	/* block descriptor length */
+	u8 density;		/* device-specific density code */
+	u8 number_blocks_hi;	/* number of blocks in this block desc */
+	u8 number_blocks_med;
+	u8 number_blocks_lo;
+	u8 _r3;
+	u8 block_length_hi;	/* block length for blocks in this desc */
+	u8 block_length_med;
+	u8 block_length_lo;
+};
+
+/*
+ * ScsiLun: 8 byte LUN.
+ */
+struct scsi_lun {
+	u8 scsi_lun[8];
 };
 
 /*
@@ -193,44 +251,84 @@ struct ccs_modesel_head
 #define ORDERED_QUEUE_TAG   0x22
 
 /*
- * Here are some scsi specific ioctl commands which are sometimes useful.
+ * Host byte codes
  */
-/* These are a few other constants  only used by scsi  devices */
-/* Note that include/linux/cdrom.h also defines IOCTL 0x5300 - 0x5395 */
 
-#define SCSI_IOCTL_GET_IDLUN 0x5382	/* conflicts with CDROMAUDIOBUFSIZ */
-
-/* Used to turn on and off tagged queuing for scsi devices */
-
-#define SCSI_IOCTL_TAGGED_ENABLE 0x5383
-#define SCSI_IOCTL_TAGGED_DISABLE 0x5384
-
-/* Used to obtain the host number of a device. */
-#define SCSI_IOCTL_PROBE_HOST 0x5385
-
-/* Used to get the bus number for a device */
-#define SCSI_IOCTL_GET_BUS_NUMBER 0x5386
-
-/* Used to get the PCI location of a device */
-#define SCSI_IOCTL_GET_PCI 0x5387
+#define DID_OK          0x00	/* NO error                                */
+#define DID_NO_CONNECT  0x01	/* Couldn't connect before timeout period  */
+#define DID_BUS_BUSY    0x02	/* BUS stayed busy through time out period */
+#define DID_TIME_OUT    0x03	/* TIMED OUT for other reason              */
+#define DID_BAD_TARGET  0x04	/* BAD target.                             */
+#define DID_ABORT       0x05	/* Told to abort for some other reason     */
+#define DID_PARITY      0x06	/* Parity error                            */
+#define DID_ERROR       0x07	/* Internal error                          */
+#define DID_RESET       0x08	/* Reset by somebody.                      */
+#define DID_BAD_INTR    0x09	/* Got an interrupt we weren't expecting.  */
+#define DID_PASSTHROUGH 0x0a	/* Force command past mid-layer            */
+#define DID_SOFT_ERROR  0x0b	/* The low level driver just wish a retry  */
+#define DRIVER_OK       0x00	/* Driver status                           */
 
 /*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-indent-level: 4 
- * c-brace-imaginary-offset: 0
- * c-brace-offset: -4
- * c-argdecl-indent: 4
- * c-label-offset: -4
- * c-continued-statement-offset: 4
- * c-continued-brace-offset: 0
- * indent-tabs-mode: nil
- * tab-width: 8
- * End:
+ *  These indicate the error that occurred, and what is available.
  */
 
-#endif
+#define DRIVER_BUSY         0x01
+#define DRIVER_SOFT         0x02
+#define DRIVER_MEDIA        0x03
+#define DRIVER_ERROR        0x04
+
+#define DRIVER_INVALID      0x05
+#define DRIVER_TIMEOUT      0x06
+#define DRIVER_HARD         0x07
+#define DRIVER_SENSE	    0x08
+
+#define SUGGEST_RETRY       0x10
+#define SUGGEST_ABORT       0x20
+#define SUGGEST_REMAP       0x30
+#define SUGGEST_DIE         0x40
+#define SUGGEST_SENSE       0x80
+#define SUGGEST_IS_OK       0xff
+
+#define DRIVER_MASK         0x0f
+#define SUGGEST_MASK        0xf0
+
+/*
+ * Internal return values.
+ */
+
+#define NEEDS_RETRY     0x2001
+#define SUCCESS         0x2002
+#define FAILED          0x2003
+#define QUEUED          0x2004
+#define SOFT_ERROR      0x2005
+#define ADD_TO_MLQUEUE  0x2006
+
+/*
+ * Midlevel queue return values.
+ */
+#define SCSI_MLQUEUE_HOST_BUSY   0x1055
+#define SCSI_MLQUEUE_DEVICE_BUSY 0x1056
+#define SCSI_MLQUEUE_EH_RETRY    0x1057
+
+
+/*
+ * Here are some scsi specific ioctl commands which are sometimes useful.
+ *
+ * Note that include/linux/cdrom.h also defines IOCTL 0x5300 - 0x5395
+ */
+
+/* Used to obtain PUN and LUN info.  Conflicts with CDROMAUDIOBUFSIZ */
+#define SCSI_IOCTL_GET_IDLUN		0x5382
+
+/* 0x5383 and 0x5384 were used for SCSI_IOCTL_TAGGED_{ENABLE,DISABLE} */
+
+/* Used to obtain the host number of a device. */
+#define SCSI_IOCTL_PROBE_HOST		0x5385
+
+/* Used to obtain the bus number for a device */
+#define SCSI_IOCTL_GET_BUS_NUMBER	0x5386
+
+/* Used to obtain the PCI location of a device */
+#define SCSI_IOCTL_GET_PCI		0x5387
+
+#endif /* _SCSI_SCSI_H */

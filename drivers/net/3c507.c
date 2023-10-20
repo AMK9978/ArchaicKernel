@@ -25,11 +25,12 @@
 	The statistics need to be updated correctly.
 */
 
+#define DRV_NAME		"3c507"
+#define DRV_VERSION		"1.10a"
+#define DRV_RELDATE		"11/17/2001"
+
 static const char version[] =
-	"3c507.c:v1.10 9/23/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
-
-
-#include <linux/module.h>
+	DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE " Donald Becker (becker@scyld.com)\n";
 
 /*
   Sources:
@@ -42,34 +43,36 @@ static const char version[] =
 	info that the casual reader might think that it documents the i82586 :-<.
 */
 
+#include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
 #include <linux/string.h>
 #include <linux/spinlock.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
+#include <linux/ethtool.h>
 #include <linux/errno.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/slab.h>
 #include <linux/init.h>
 
+#include <asm/bitops.h>
+#include <asm/dma.h>
+#include <asm/io.h>
+#include <asm/system.h>
+#include <asm/uaccess.h>
 
 /* use 0 for production, 1 for verification, 2..7 for debug */
 #ifndef NET_DEBUG
 #define NET_DEBUG 1
 #endif
 static unsigned int net_debug = NET_DEBUG;
+#define debug net_debug
+
 
 /* A zero-terminated list of common I/O addresses to be probed. */
 static unsigned int netcard_portlist[] __initdata =
@@ -288,14 +291,15 @@ extern int el16_probe(struct net_device *dev);	/* Called from Space.c */
 static int	el16_probe1(struct net_device *dev, int ioaddr);
 static int	el16_open(struct net_device *dev);
 static int	el16_send_packet(struct sk_buff *skb, struct net_device *dev);
-static void	el16_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t el16_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void el16_rx(struct net_device *dev);
 static int	el16_close(struct net_device *dev);
 static struct net_device_stats *el16_get_stats(struct net_device *dev);
 static void el16_tx_timeout (struct net_device *dev);
 
-static void hardware_send_packet(struct net_device *dev, void *buf, short length);
+static void hardware_send_packet(struct net_device *dev, void *buf, short length, short pad);
 static void init_82586_mem(struct net_device *dev);
+static struct ethtool_ops netdev_ethtool_ops;
 
 
 /* Check for a network adaptor of this type, and return '0' iff one exists.
@@ -427,6 +431,7 @@ static int __init el16_probe1(struct net_device *dev, int ioaddr)
 	dev->get_stats	= el16_get_stats;
 	dev->tx_timeout = el16_tx_timeout;
 	dev->watchdog_timeo = TX_TIMEOUT;
+	dev->ethtool_ops = &netdev_ethtool_ops;
 
 	ether_setup(dev);	/* Generic ethernet behaviour */
 
@@ -494,7 +499,7 @@ static int el16_send_packet (struct sk_buff *skb, struct net_device *dev)
 	/* Disable the 82586's input to the interrupt line. */
 	outb (0x80, ioaddr + MISC_CTRL);
 
-	hardware_send_packet (dev, buf, length);
+	hardware_send_packet (dev, buf, skb->len, length - skb->len);
 
 	dev->trans_start = jiffies;
 	/* Enable the 82586 interrupt input. */
@@ -511,7 +516,7 @@ static int el16_send_packet (struct sk_buff *skb, struct net_device *dev)
 
 /*	The typical workload of the driver:
 	Handle the network interface interrupts. */
-static void el16_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t el16_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = dev_id;
 	struct net_local *lp;
@@ -521,7 +526,7 @@ static void el16_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (dev == NULL) {
 		printk ("net_interrupt(): irq %d for unknown device.\n", irq);
-		return;
+		return IRQ_NONE;
 	}
 
 	ioaddr = dev->base_addr;
@@ -611,6 +616,7 @@ static void el16_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	/* Enable the 82586's interrupt input. */
 	outb(0x84, ioaddr + MISC_CTRL);
 	spin_unlock(&lp->lock);
+	return IRQ_HANDLED;
 }
 
 static int el16_close(struct net_device *dev)
@@ -747,12 +753,13 @@ static void init_82586_mem(struct net_device *dev)
 	return;
 }
 
-static void hardware_send_packet(struct net_device *dev, void *buf, short length)
+static void hardware_send_packet(struct net_device *dev, void *buf, short length, short pad)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	short ioaddr = dev->base_addr;
 	ushort tx_block = lp->tx_head;
 	unsigned long write_ptr = dev->mem_start + tx_block;
+	static char padding[ETH_ZLEN];
 
 	/* Set the write pointer to the Tx block, and put out the header. */
 	isa_writew(0x0000,write_ptr);			/* Tx status */
@@ -761,7 +768,7 @@ static void hardware_send_packet(struct net_device *dev, void *buf, short length
 	isa_writew(tx_block+8,write_ptr+=2);			/* Data Buffer offset. */
 
 	/* Output the data buffer descriptor. */
-	isa_writew(length | 0x8000,write_ptr+=2);		/* Byte count parameter. */
+	isa_writew((pad + length) | 0x8000,write_ptr+=2);		/* Byte count parameter. */
 	isa_writew(-1,write_ptr+=2);			/* No next data buffer. */
 	isa_writew(tx_block+22+SCB_BASE,write_ptr+=2);	/* Buffer follows the NoOp command. */
 	isa_writew(0x0000,write_ptr+=2);			/* Buffer address high bits (always zero). */
@@ -773,6 +780,8 @@ static void hardware_send_packet(struct net_device *dev, void *buf, short length
 
 	/* Output the packet at the write pointer. */
 	isa_memcpy_toio(write_ptr+2, buf, length);
+	if (pad)
+		isa_memcpy_toio(write_ptr+length+2, padding, pad);
 
 	/* Set the old command link pointing to this send packet. */
 	isa_writew(tx_block,dev->mem_start + lp->tx_cmd_link);
@@ -864,6 +873,31 @@ static void el16_rx(struct net_device *dev)
 	lp->rx_head = rx_head;
 	lp->rx_tail = rx_tail;
 }
+
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+	sprintf(info->bus_info, "ISA 0x%lx", dev->base_addr);
+}
+
+static u32 netdev_get_msglevel(struct net_device *dev)
+{
+	return debug;
+}
+
+static void netdev_set_msglevel(struct net_device *dev, u32 level)
+{
+	debug = level;
+}
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+	.get_msglevel		= netdev_get_msglevel,
+	.set_msglevel		= netdev_set_msglevel,
+};
+
 #ifdef MODULE
 static struct net_device dev_3c507;
 static int io = 0x300;

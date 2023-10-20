@@ -1,7 +1,7 @@
-#ifndef __ASM_MIPS_IPC_H
-#define __ASM_MIPS_IPC_H
+#ifndef _ASM_IPC_H
+#define _ASM_IPC_H
 
-/* 
+/*
  * These are used to wrap system calls on MIPS.
  *
  * See arch/mips/kernel/sysmips.c for ugly details..
@@ -15,6 +15,7 @@ struct ipc_kludge {
 #define SEMOP		 1
 #define SEMGET		 2
 #define SEMCTL		 3
+#define SEMTIMEDOP	 4
 #define MSGSND		11
 #define MSGRCV		12
 #define MSGGET		13
@@ -29,4 +30,4 @@ struct ipc_kludge {
 
 #define IPCCALL(version,op)	((version)<<16 | (op))
 
-#endif /* __ASM_MIPS_IPC_H */
+#endif /* _ASM_IPC_H */

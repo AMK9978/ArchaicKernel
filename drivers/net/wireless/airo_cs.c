@@ -15,7 +15,7 @@
 
     In addition this module was derived from dummy_cs.
     The initial developer of dummy_cs is David A. Hinds
-    <dhinds@hyper.stanford.edu>.  Portions created by David A. Hinds
+    <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
     are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.    
     
 ======================================================================*/
@@ -24,19 +24,14 @@
 #ifdef __IN_PCMCIA_PACKAGE__
 #include <pcmcia/k_compat.h>
 #endif
-
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-
-#include <linux/sched.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/netdevice.h>
-#include <asm/io.h>
-#include <asm/system.h>
 
 #include <pcmcia/version.h>
 #include <pcmcia/cs_types.h>
@@ -44,6 +39,9 @@
 #include <pcmcia/cistpl.h>
 #include <pcmcia/cisreg.h>
 #include <pcmcia/ds.h>
+
+#include <asm/io.h>
+#include <asm/system.h>
 
 /*
    All the PCMCIA modules use PCMCIA_DEBUG to control debugging.  If
@@ -96,7 +94,7 @@ void stop_airo_card( struct net_device *, int );
 int reset_airo_card( struct net_device * );
 
 static void airo_config(dev_link_t *link);
-static void airo_release(u_long arg);
+static void airo_release(dev_link_t *link);
 static int airo_event(event_t event, int priority,
 		       event_callback_args_t *args);
 
@@ -163,32 +161,6 @@ typedef struct local_info_t {
 	struct net_device *eth_dev;
 } local_info_t;
 
-/*====================================================================*/
-
-static void cs_error(client_handle_t handle, int func, int ret)
-{
-	error_info_t err = { func, ret };
-	CardServices(ReportError, handle, &err);
-}
-
-/*======================================================================
-  
-  This bit of code is used to avoid unregistering network devices
-  at inappropriate times.  2.2 and later kernels are fairly picky
-  about when this can happen.
-  
-  ======================================================================*/
-
-static void flush_stale_links(void)
-{
-	dev_link_t *link, *next;
-	for (link = dev_list; link; link = next) {
-		next = link->next;
-		if (link->state & DEV_STALE_LINK)
-			airo_detach(link);
-	}
-}
- 
 /*======================================================================
   
   airo_attach() creates an "instance" of the driver, allocating
@@ -209,8 +181,7 @@ static dev_link_t *airo_attach(void)
 	int ret, i;
 	
 	DEBUG(0, "airo_attach()\n");
-	flush_stale_links();
-	
+
 	/* Initialize the dev_link_t structure */
 	link = kmalloc(sizeof(struct dev_link_t), GFP_KERNEL);
 	if (!link) {
@@ -218,8 +189,6 @@ static dev_link_t *airo_attach(void)
 		return NULL;
 	}
 	memset(link, 0, sizeof(struct dev_link_t));
-	link->release.function = &airo_release;
-	link->release.data = (u_long)link;
 	
 	/* Interrupt setup */
 	link->irq.Attributes = IRQ_TYPE_EXCLUSIVE;
@@ -244,6 +213,11 @@ static dev_link_t *airo_attach(void)
 	
 	/* Allocate space for private device-specific data */
 	local = kmalloc(sizeof(local_info_t), GFP_KERNEL);
+	if (!local) {
+		printk(KERN_ERR "airo_cs: no memory for new device\n");
+		kfree (link);
+		return NULL;
+	}
 	memset(local, 0, sizeof(local_info_t));
 	link->priv = local;
 	
@@ -290,13 +264,10 @@ static void airo_detach(dev_link_t *link)
 	if (*linkp == NULL)
 		return;
 	
-	del_timer(&link->release);
-	if ( link->state & DEV_CONFIG ) {
-		airo_release( (int)link );
-		if ( link->state & DEV_STALE_CONFIG ) {
-			link->state |= DEV_STALE_LINK;
+	if (link->state & DEV_CONFIG) {
+		airo_release(link);
+		if (link->state & DEV_STALE_CONFIG)
 			return;
-		}
 	}
 	
 	if ( ((local_info_t*)link->priv)->eth_dev ) {
@@ -517,7 +488,7 @@ static void airo_config(dev_link_t *link)
 	
  cs_failed:
 	cs_error(link->handle, last_fn, last_ret);
-	airo_release((u_long)link);
+	airo_release(link);
 	
 } /* airo_config */
 
@@ -529,10 +500,8 @@ static void airo_config(dev_link_t *link)
   
   ======================================================================*/
 
-static void airo_release(u_long arg)
+static void airo_release(dev_link_t *link)
 {
-	dev_link_t *link = (dev_link_t *)arg;
-	
 	DEBUG(0, "airo_release(0x%p)\n", link);
 	
 	/*
@@ -564,8 +533,10 @@ static void airo_release(u_long arg)
 	if (link->irq.AssignedIRQ)
 		CardServices(ReleaseIRQ, link->handle, &link->irq);
 	link->state &= ~DEV_CONFIG;
-	
-} /* airo_release */
+
+	if (link->state & DEV_STALE_CONFIG)
+		airo_detach(link);
+}
 
 /*======================================================================
   
@@ -592,7 +563,7 @@ static int airo_event(event_t event, int priority,
 		link->state &= ~DEV_PRESENT;
 		if (link->state & DEV_CONFIG) {
 			netif_device_detach(local->eth_dev);
-			mod_timer(&link->release, jiffies + HZ/20);
+			airo_release(link);
 		}
 		break;
 	case CS_EVENT_CARD_INSERTION:
@@ -622,29 +593,28 @@ static int airo_event(event_t event, int priority,
 	return 0;
 } /* airo_event */
 
-/*====================================================================*/
+static struct pcmcia_driver airo_driver = {
+	.owner		= THIS_MODULE,
+	.drv		= {
+		.name	= "airo_cs",
+	},
+	.attach		= airo_attach,
+	.detach		= airo_detach,
+};
 
 static int airo_cs_init(void)
 {
-	servinfo_t serv;
-	DEBUG(0, "%s\n", version);
-	CardServices(GetCardServicesInfo, &serv);
-	if (serv.Revision != CS_RELEASE_CODE) {
-		printk(KERN_NOTICE "airo_cs: Card Services release "
-		       "does not match!\n");
-		return -1;
-	}
-	register_pcmcia_driver(&dev_info, &airo_attach, &airo_detach);
-	return 0;
+	return pcmcia_register_driver(&airo_driver);
 }
 
 static void airo_cs_cleanup(void)
 {
-	DEBUG(0, "airo_cs: unloading\n");
-	unregister_pcmcia_driver(&dev_info);
+	pcmcia_unregister_driver(&airo_driver);
+
+	/* XXX: this really needs to move into generic code.. */
 	while (dev_list != NULL) {
 		if (dev_list->state & DEV_CONFIG)
-			airo_release((u_long)dev_list);
+			airo_release(dev_list);
 		airo_detach(dev_list);
 	}
 }

@@ -10,8 +10,6 @@
 #include <asm/pstate.h>
 #include <asm/ptrace.h>
 
-#define AOFF_task_fpregs	(((ASIZ_task) + (64 - 1)) & ~(64 - 1))
- 
 /* Clobbers %o5, %g1, %g2, %g3, %g7, %icc, %xcc */
 
 #define VISEntry					\
@@ -19,7 +17,8 @@
 	andcc		%o5, (FPRS_FEF|FPRS_DU), %g0;	\
 	be,pt		%icc, 297f;			\
 	 sethi		%hi(297f), %g7;			\
-	ba,pt		%xcc, VISenter;			\
+	sethi		%hi(VISenter), %g1;		\
+	jmpl		%g1 + %lo(VISenter), %g0;	\
 	 or		%g7, %lo(297f), %g7;		\
 297:	wr		%g0, FPRS_FEF, %fprs;		\
 
@@ -34,7 +33,8 @@
 	andcc		%o5, FPRS_FEF, %g0;		\
 	be,pt		%icc, 297f;			\
 	 sethi		%hi(298f), %g7;			\
-	ba,pt		%xcc, VISenterhalf;		\
+	sethi		%hi(VISenterhalf), %g1;		\
+	jmpl		%g1 + %lo(VISenterhalf), %g0;	\
 	 or		%g7, %lo(298f), %g7;		\
 	clr		%o5;				\
 297:	wr		%o5, FPRS_FEF, %fprs;		\
@@ -44,13 +44,14 @@
 	wr		%o5, 0, %fprs;
 
 #ifndef __ASSEMBLY__	
-extern __inline__ void save_and_clear_fpu(void) {
+static __inline__ void save_and_clear_fpu(void) {
 	__asm__ __volatile__ (
 "		rd %%fprs, %%o5\n"
 "		andcc %%o5, %0, %%g0\n"
 "		be,pt %%icc, 299f\n"
 "		 sethi %%hi(298f), %%g7\n"
-"		ba VISenter	! Note. This cannot be bp, as it may be too far from VISenter.\n"
+"		sethi %%hi(VISenter), %%g1\n"
+"		jmpl %%g1 + %%lo(VISenter), %%g0\n"
 "		 or %%g7, %%lo(298f), %%g7\n"
 "	298:	wr %%g0, 0, %%fprs\n"
 "	299:\n"

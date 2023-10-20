@@ -8,7 +8,7 @@
  * addresses.  Thus, we need to be careful not to let the user to
  * trick us into accessing kernel memory that would normally be
  * inaccessible.  This code is also fairly performance sensitive,
- * so we want to spend as little time doing saftey checks as
+ * so we want to spend as little time doing safety checks as
  * possible.
  *
  * To make matters a bit more interesting, these macros sometimes also
@@ -26,13 +26,15 @@
  * associated and, if so, sets r8 to -EFAULT and clears r9 to 0 and
  * then resumes execution at the continuation point.
  *
- * Copyright (C) 1998, 1999, 2001 Hewlett-Packard Co
- * Copyright (C) 1998, 1999, 2001 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998, 1999, 2001-2003 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
+#include <linux/compiler.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 
+#include <asm/intrinsics.h>
 #include <asm/pgtable.h>
 
 /*
@@ -45,8 +47,8 @@
 #define VERIFY_WRITE	1
 
 #define get_ds()  (KERNEL_DS)
-#define get_fs()  (current->addr_limit)
-#define set_fs(x) (current->addr_limit = (x))
+#define get_fs()  (current_thread_info()->addr_limit)
+#define set_fs(x) (current_thread_info()->addr_limit = (x))
 
 #define segment_eq(a,b)	((a).seg == (b).seg)
 
@@ -56,8 +58,10 @@
  * address TASK_SIZE is never valid.  We also need to make sure that the address doesn't
  * point inside the virtually mapped linear page table.
  */
-#define __access_ok(addr,size,segment)	(((unsigned long) (addr)) <= (segment).seg		\
-	 && ((segment).seg == KERNEL_DS.seg || rgn_offset((unsigned long) (addr)) < RGN_MAP_LIMIT))
+#define __access_ok(addr,size,segment)						\
+	likely(((unsigned long) (addr)) <= (segment).seg			\
+	       && ((segment).seg == KERNEL_DS.seg				\
+		   || REGION_OFFSET((unsigned long) (addr)) < RGN_MAP_LIMIT))
 #define access_ok(type,addr,size)	__access_ok((addr),(size),get_fs())
 
 static inline int
@@ -84,6 +88,8 @@ verify_area (int type, const void *addr, unsigned long size)
  */
 #define __put_user(x,ptr)	__put_user_nocheck((__typeof__(*(ptr)))(x),(ptr),sizeof(*(ptr)))
 #define __get_user(x,ptr)	__get_user_nocheck((x),(ptr),sizeof(*(ptr)))
+
+#ifdef ASM_SUPPORTED
 
 extern void __get_user_unknown (void);
 
@@ -127,38 +133,28 @@ struct __large_struct { unsigned long buf[100]; };
 /* We need to declare the __ex_table section before we can use it in .xdata.  */
 asm (".section \"__ex_table\", \"a\"\n\t.previous");
 
-#if __GNUC__ >= 3
-#  define GAS_HAS_LOCAL_TAGS	/* define if gas supports local tags a la [1:] */
-#endif
-
-#ifdef GAS_HAS_LOCAL_TAGS
-# define _LL	"[1:]"
-#else
-# define _LL	"1:"
-#endif
-
 #define __get_user_64(addr)									\
-	asm ("\n"_LL"\tld8 %0=%2%P2\t// %0 and %1 get overwritten by exception handler\n"	\
-	     "\t.xdata4 \"__ex_table\", @gprel(1b), @gprel(1f)+4\n"				\
-	     _LL										\
+	asm ("\n[1:]\tld8 %0=%2%P2\t// %0 and %1 get overwritten by exception handler\n"	\
+	     "\t.xdata4 \"__ex_table\", 1b-., 1f-.+4\n"						\
+	     "[1:]"										\
 	     : "=r"(__gu_val), "=r"(__gu_err) : "m"(__m(addr)), "1"(__gu_err));
 
 #define __get_user_32(addr)									\
-	asm ("\n"_LL"\tld4 %0=%2%P2\t// %0 and %1 get overwritten by exception handler\n"	\
-	     "\t.xdata4 \"__ex_table\", @gprel(1b), @gprel(1f)+4\n"				\
-	     _LL										\
+	asm ("\n[1:]\tld4 %0=%2%P2\t// %0 and %1 get overwritten by exception handler\n"	\
+	     "\t.xdata4 \"__ex_table\", 1b-., 1f-.+4\n"						\
+	     "[1:]"										\
 	     : "=r"(__gu_val), "=r"(__gu_err) : "m"(__m(addr)), "1"(__gu_err));
 
 #define __get_user_16(addr)									\
-	asm ("\n"_LL"\tld2 %0=%2%P2\t// %0 and %1 get overwritten by exception handler\n"	\
-	     "\t.xdata4 \"__ex_table\", @gprel(1b), @gprel(1f)+4\n"				\
-	     _LL										\
+	asm ("\n[1:]\tld2 %0=%2%P2\t// %0 and %1 get overwritten by exception handler\n"	\
+	     "\t.xdata4 \"__ex_table\", 1b-., 1f-.+4\n"						\
+	     "[1:]"										\
 	     : "=r"(__gu_val), "=r"(__gu_err) : "m"(__m(addr)), "1"(__gu_err));
 
 #define __get_user_8(addr)									\
-	asm ("\n"_LL"\tld1 %0=%2%P2\t// %0 and %1 get overwritten by exception handler\n"	\
-	     "\t.xdata4 \"__ex_table\", @gprel(1b), @gprel(1f)+4\n"				\
-	     _LL										\
+	asm ("\n[1:]\tld1 %0=%2%P2\t// %0 and %1 get overwritten by exception handler\n"	\
+	     "\t.xdata4 \"__ex_table\", 1b-., 1f-.+4\n"						\
+	     "[1:]"										\
 	     : "=r"(__gu_val), "=r"(__gu_err) : "m"(__m(addr)), "1"(__gu_err));
 
 extern void __put_user_unknown (void);
@@ -200,31 +196,115 @@ extern void __put_user_unknown (void);
  */
 #define __put_user_64(x,addr)								\
 	asm volatile (									\
-		"\n"_LL"\tst8 %1=%r2%P1\t// %0 gets overwritten by exception handler\n"	\
-		"\t.xdata4 \"__ex_table\", @gprel(1b), @gprel(1f)\n"			\
-		_LL									\
+		"\n[1:]\tst8 %1=%r2%P1\t// %0 gets overwritten by exception handler\n"	\
+		"\t.xdata4 \"__ex_table\", 1b-., 1f-.\n"				\
+		"[1:]"									\
 		: "=r"(__pu_err) : "m"(__m(addr)), "rO"(x), "0"(__pu_err))
 
 #define __put_user_32(x,addr)								\
 	asm volatile (									\
-		"\n"_LL"\tst4 %1=%r2%P1\t// %0 gets overwritten by exception handler\n"	\
-		"\t.xdata4 \"__ex_table\", @gprel(1b), @gprel(1f)\n"			\
-		_LL									\
+		"\n[1:]\tst4 %1=%r2%P1\t// %0 gets overwritten by exception handler\n"	\
+		"\t.xdata4 \"__ex_table\", 1b-., 1f-.\n"				\
+		"[1:]"									\
 		: "=r"(__pu_err) : "m"(__m(addr)), "rO"(x), "0"(__pu_err))
 
 #define __put_user_16(x,addr)								\
 	asm volatile (									\
-		"\n"_LL"\tst2 %1=%r2%P1\t// %0 gets overwritten by exception handler\n"	\
-		"\t.xdata4 \"__ex_table\", @gprel(1b), @gprel(1f)\n"			\
-		_LL									\
+		"\n[1:]\tst2 %1=%r2%P1\t// %0 gets overwritten by exception handler\n"	\
+		"\t.xdata4 \"__ex_table\", 1b-., 1f-.\n"				\
+		"[1:]"									\
 		: "=r"(__pu_err) : "m"(__m(addr)), "rO"(x), "0"(__pu_err))
 
 #define __put_user_8(x,addr)								\
 	asm volatile (									\
-		"\n"_LL"\tst1 %1=%r2%P1\t// %0 gets overwritten by exception handler\n"	\
-		"\t.xdata4 \"__ex_table\", @gprel(1b), @gprel(1f)\n"			\
-		_LL									\
+		"\n[1:]\tst1 %1=%r2%P1\t// %0 gets overwritten by exception handler\n"	\
+		"\t.xdata4 \"__ex_table\", 1b-., 1f-.\n"				\
+		"[1:]"									\
 		: "=r"(__pu_err) : "m"(__m(addr)), "rO"(x), "0"(__pu_err))
+
+#else /* !ASM_SUPPORTED */
+
+#define RELOC_TYPE	2	/* ip-rel */
+
+#define __put_user_xx(val, addr, size, err)							\
+	__st_user("__ex_table", (unsigned long) addr, size, RELOC_TYPE, (unsigned long) (val));	\
+	(err) = ia64_getreg(_IA64_REG_R8);
+
+#define __get_user_xx(val, addr, size, err)					\
+	__ld_user("__ex_table", (unsigned long) addr, size, RELOC_TYPE);	\
+	(err) = ia64_getreg(_IA64_REG_R8);					\
+	(val) = ia64_getreg(_IA64_REG_R9);
+
+extern void __get_user_unknown (void);
+
+#define __get_user_nocheck(x, ptr, size)				\
+({									\
+	register long __gu_err = 0;					\
+	register long __gu_val = 0;					\
+	const __typeof__(*(ptr)) *__gu_addr = (ptr);			\
+	switch (size) {							\
+	      case 1: case 2: case 4: case 8:				\
+		__get_user_xx(__gu_val, __gu_addr, size, __gu_err);	\
+		break;							\
+	      default:							\
+		__get_user_unknown();					\
+		break;							\
+        }								\
+        (x) = (__typeof__(*(ptr))) __gu_val;				\
+        __gu_err;							\
+})
+
+#define __get_user_check(x,ptr,size,segment)					\
+({										\
+	register long __gu_err = -EFAULT;					\
+	register long __gu_val  = 0;						\
+	const __typeof__(*(ptr)) *__gu_addr = (ptr);				\
+	if (__access_ok((long) __gu_addr, size, segment)) {			\
+		switch (size) {							\
+		      case 1: case 2: case 4: case 8:				\
+			__get_user_xx(__gu_val, __gu_addr, size, __gu_err);	\
+			break;							\
+		      default:							\
+			__get_user_unknown(); break;				\
+		}								\
+	}									\
+	(x) = (__typeof__(*(ptr))) __gu_val;					\
+	__gu_err;								\
+})
+
+extern void __put_user_unknown (void);
+
+#define __put_user_nocheck(x, ptr, size)			\
+({								\
+	int __pu_err = 0;					\
+	__typeof__(*(ptr)) *__pu_addr = (ptr);			\
+	switch (size) {						\
+	      case 1: case 2: case 4: case 8:			\
+	  	__put_user_xx(x, __pu_addr, size, __pu_err);	\
+		break;						\
+	      default:						\
+	  	__put_user_unknown(); break;			\
+	}							\
+	__pu_err;						\
+})
+
+#define __put_user_check(x,ptr,size,segment)				\
+({									\
+	register long __pu_err = -EFAULT;				\
+	__typeof__(*(ptr)) *__pu_addr = (ptr);				\
+	if (__access_ok((long)__pu_addr,size,segment)) {		\
+		switch (size) {						\
+		      case 1: case 2: case 4: case 8:			\
+			__put_user_xx(x,__pu_addr, size, __pu_err);	\
+			break;						\
+		      default:						\
+			__put_user_unknown(); break;			\
+		}							\
+	}								\
+	__pu_err;							\
+})
+
+#endif /* !ASM_SUPPORTED */
 
 /*
  * Complex access routines
@@ -248,6 +328,18 @@ extern unsigned long __copy_user (void *to, const void *from, unsigned long coun
 	}											\
 	__cu_len;										\
 })
+
+#define __copy_in_user(to, from, size)          \
+        __copy_user((to), (from), (size))
+
+static inline unsigned long
+copy_in_user (void *to, const void *from, unsigned long n)
+{
+	if (likely(access_ok(VERIFY_READ, from, n) &&
+	    access_ok(VERIFY_WRITE, to, n)))
+		n = __copy_user(to, from, n);
+	return n;
+}
 
 extern unsigned long __do_clear_user (void *, unsigned long);
 
@@ -313,11 +405,21 @@ struct exception_table_entry {
 	int cont;	/* gp-relative continuation address; if bit 2 is set, r9 is set to 0 */
 };
 
-struct exception_fixup {
-	unsigned long cont;	/* continuation point (bit 2: clear r9 if set) */
-};
+extern void handle_exception (struct pt_regs *regs, const struct exception_table_entry *e);
+extern const struct exception_table_entry *search_exception_tables (unsigned long addr);
 
-extern struct exception_fixup search_exception_table (unsigned long addr);
-extern void handle_exception (struct pt_regs *regs, struct exception_fixup fixup);
+# define SEARCH_EXCEPTION_TABLE(regs) search_exception_tables(regs->cr_iip + ia64_psr(regs)->ri)
+
+static inline int
+done_with_exception (struct pt_regs *regs)
+{
+	const struct exception_table_entry *e;
+	e = SEARCH_EXCEPTION_TABLE(regs);
+	if (e) {
+		handle_exception(regs, e);
+		return 1;
+	}
+	return 0;
+}
 
 #endif /* _ASM_IA64_UACCESS_H */

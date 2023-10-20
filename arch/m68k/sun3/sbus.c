@@ -10,15 +10,12 @@
  */
 
 #include <linux/types.h>
+#include <linux/compiler.h>
 #include <linux/init.h>
 
-extern void rs_init(void);
-
-void __init sbus_init(void)
+int __init sbus_init(void)
 {
-
-	rs_init();
-
+	return 0;
 }
 
 void *sparc_alloc_io (u32 address, void *virtual, int len, char *name,
@@ -27,3 +24,4 @@ void *sparc_alloc_io (u32 address, void *virtual, int len, char *name,
 	return (void *)address;
 }
 
+subsys_initcall(sbus_init);

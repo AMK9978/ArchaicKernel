@@ -11,6 +11,7 @@
  *		
  */
 
+#include <linux/module.h>
 #include <linux/types.h>
 #include <asm/uaccess.h>
 #include <linux/skbuff.h>
@@ -266,7 +267,7 @@ int ip_options_compile(struct ip_options * opt, struct sk_buff * skb)
 	for (l = opt->optlen; l > 0; ) {
 		switch (*optptr) {
 		      case IPOPT_END:
-			for (optptr++, l--; l>0; l--) {
+			for (optptr++, l--; l>0; optptr++, l--) {
 				if (*optptr != IPOPT_END) {
 					*optptr = IPOPT_END;
 					opt->is_changed = 1;
@@ -617,3 +618,6 @@ int ip_options_rcv_srr(struct sk_buff *skb)
 	}
 	return 0;
 }
+
+EXPORT_SYMBOL(ip_options_compile);
+EXPORT_SYMBOL(ip_options_undo);

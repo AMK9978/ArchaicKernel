@@ -152,7 +152,7 @@ typedef struct {
 	u32 bp;			/* Buffer Pointer (24 bits) */
 	u16 len;		/* Data Length */
 	u8 stat;		/* Status */
-	u8 unused2;
+	u8 unused;		/* pads to 2-byte boundary */
 }__attribute__ ((packed)) pkt_desc;
 
 
@@ -202,7 +202,11 @@ typedef struct {
 #define MD0_CRC_ITU_0 0x06
 #define MD0_CRC_ITU   0x07
 
-#define MD2_NRZI      0x20	/* NRZI mode */
+#define MD2_NRZ	      0x00
+#define MD2_NRZI      0x20
+#define MD2_MANCHESTER 0x80
+#define MD2_FM_MARK   0xA0
+#define MD2_FM_SPACE  0xC0
 #define MD2_LOOPBACK  0x03      /* Local data Loopback */
 
 #define CTL_NORTS     0x01
@@ -213,12 +217,15 @@ typedef struct {
 #define ST0_RXRDY     0x01	/* RX ready */
 
 #define ST1_UDRN      0x80	/* MSCI TX underrun */
+#define ST1_CDCD      0x04	/* DCD level changed */
 
 #define ST3_CTS       0x08	/* modem input - /CTS */
 #define ST3_DCD       0x04	/* modem input - /DCD */
 
 #define IE0_TXINT     0x80	/* TX INT MSCI interrupt enable */
+#define IE0_RXINTA    0x40	/* RX INT A MSCI interrupt enable */
 #define IE1_UDRN      0x80	/* TX underrun MSCI interrupt enable */
+#define IE1_CDCD      0x04	/* DCD level changed */
 
 #define DCR_ABORT     0x01	/* Software abort command */
 #define DCR_CLEAR_EOF 0x02	/* Clear EOF interrupt */

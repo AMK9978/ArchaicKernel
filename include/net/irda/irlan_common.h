@@ -33,7 +33,6 @@
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
 
-#include <net/irda/irqueue.h>
 #include <net/irda/irttp.h>
 
 #define IRLAN_MTU        1518
@@ -161,10 +160,9 @@ struct irlan_provider_cb {
  *  IrLAN control block
  */
 struct irlan_cb {
-	irda_queue_t q; /* Must be first */
-
 	int    magic;
-	struct net_device dev;        /* Ethernet device structure*/
+	struct list_head  dev_list;
+	struct net_device *dev;        /* Ethernet device structure*/
 	struct net_device_stats stats;
 
 	__u32 saddr;               /* Source device address */
@@ -195,8 +193,6 @@ struct irlan_cb {
 struct irlan_cb *irlan_open(__u32 saddr, __u32 daddr);
 void irlan_close(struct irlan_cb *self);
 void irlan_close_tsaps(struct irlan_cb *self);
-void irlan_mod_inc_use_count(void);
-void irlan_mod_dec_use_count(void);
 
 int  irlan_register_netdev(struct irlan_cb *self);
 void irlan_ias_register(struct irlan_cb *self, __u8 tsap_sel);
@@ -206,6 +202,7 @@ void irlan_open_data_tsap(struct irlan_cb *self);
 
 int irlan_run_ctrl_tx_queue(struct irlan_cb *self);
 
+struct irlan_cb *irlan_get_any(void);
 void irlan_get_provider_info(struct irlan_cb *self);
 void irlan_get_unicast_addr(struct irlan_cb *self);
 void irlan_get_media_char(struct irlan_cb *self);
@@ -223,8 +220,6 @@ int irlan_insert_array_param(struct sk_buff *skb, char *name, __u8 *value,
 
 int irlan_extract_param(__u8 *buf, char *name, char *value, __u16 *len);
 void print_ret_code(__u8 code);
-
-extern hashbin_t *irlan;
 
 #endif
 

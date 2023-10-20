@@ -27,7 +27,6 @@
 
 /* $Id: planb.c,v 1.18 1999/05/02 17:36:34 mlan Exp $ */
 
-#include <linux/version.h>
 #include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -40,8 +39,6 @@
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
-#include <linux/wrapper.h>
-#include <linux/tqueue.h>
 #include <linux/videodev.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -147,12 +144,12 @@ static int grabbuf_alloc(struct planb *pb)
 								|GFP_DMA, 0);
 		if (!pb->rawbuf[i])
 			break;
-		mem_map_reserve(virt_to_page(pb->rawbuf[i]));
+		SetPageReserved(virt_to_page(pb->rawbuf[i]));
 	}
 	if (i-- < npage) {
 		printk(KERN_DEBUG "PlanB: init_grab: grab buffer not allocated\n");
 		for (; i > 0; i--) {
-			mem_map_unreserve(virt_to_page(pb->rawbuf[i]));
+			ClearPageReserved(virt_to_page(pb->rawbuf[i]));
 			free_pages((unsigned long)pb->rawbuf[i], 0);
 		}
 		kfree(pb->rawbuf);
@@ -182,12 +179,7 @@ static unsigned char saa_status(int byte, struct planb *pb)
 
 	/* Let's wait 30msec for this one */
 	current->state = TASK_INTERRUPTIBLE;
-#if LINUX_VERSION_CODE >= 0x02017F
 	schedule_timeout(30 * HZ / 1000);
-#else
-	current->timeout = jiffies + 30 * HZ / 1000;	/* 30 ms */;
-	schedule();
-#endif
 
 	return (unsigned char)in_8 (&planb_regs->saa_status);
 }
@@ -418,7 +410,7 @@ static void planb_prepare_close(struct planb *pb)
 	}
 	if(pb->rawbuf) {
 		for (i = 0; i < pb->rawbuf_size; i++) {
-			mem_map_unreserve(virt_to_page(pb->rawbuf[i]));
+			ClearPageReserved(virt_to_page(pb->rawbuf[i]));
 			free_pages((unsigned long)pb->rawbuf[i], 0);
 		}
 		kfree(pb->rawbuf);
@@ -1994,7 +1986,7 @@ unimplemented:
 	return 0;
 }
 
-static int planb_mmap(struct video_device *dev, const char *adr, unsigned long size)
+static int planb_mmap(struct vm_area_struct *vma, struct video_device *dev, const char *adr, unsigned long size)
 {
 	int i;
 	struct planb *pb = (struct planb *)dev;
@@ -2008,7 +2000,7 @@ static int planb_mmap(struct video_device *dev, const char *adr, unsigned long s
 			return err;
 	}
 	for (i = 0; i < pb->rawbuf_size; i++) {
-		if (remap_page_range(start, virt_to_phys((void *)pb->rawbuf[i]),
+		if (remap_page_range(vma, start, virt_to_phys((void *)pb->rawbuf[i]),
 						PAGE_SIZE, PAGE_SHARED))
 			return -EAGAIN;
 		start += PAGE_SIZE;
@@ -2021,23 +2013,22 @@ static int planb_mmap(struct video_device *dev, const char *adr, unsigned long s
 
 static struct video_device planb_template=
 {
-	owner:		THIS_MODULE,
-	name:		PLANB_DEVICE_NAME,
-	type:		VID_TYPE_OVERLAY,
-	hardware:	VID_HARDWARE_PLANB,
-	open:		planb_open,
-	close:		planb_close,
-	read:		planb_read,
-	write:		planb_write,
-	ioctl:		planb_ioctl,
-	mmap:		planb_mmap,	/* mmap? */
+	.owner		= THIS_MODULE,
+	.name		= PLANB_DEVICE_NAME,
+	.type		= VID_TYPE_OVERLAY,
+	.hardware	= VID_HARDWARE_PLANB,
+	.open		= planb_open,
+	.close		= planb_close,
+	.read		= planb_read,
+	.write		= planb_write,
+	.ioctl		= planb_ioctl,
+	.mmap		= planb_mmap,	/* mmap? */
 };
 
 static int init_planb(struct planb *pb)
 {
 	unsigned char saa_rev;
 	int i, result;
-	unsigned long flags;
 
 	memset ((void *) &pb->win, 0, sizeof (struct planb_window));
 	/* Simple sanity check */
@@ -2079,7 +2070,6 @@ static int init_planb(struct planb *pb)
 #endif
 	pb->tab_size = PLANB_MAXLINES + 40;
 	pb->suspend = 0;
-	pb->lock = 0;
 	init_MUTEX(&pb->lock);
 	pb->ch1_cmd = 0;
 	pb->ch2_cmd = 0;
@@ -2104,7 +2094,6 @@ static int init_planb(struct planb *pb)
 	/* clear interrupt mask */
 	pb->intr_mask = PLANB_CLR_IRQ;
 
-	save_flags(flags); cli();
         result = request_irq(pb->irq, planb_irq, 0, "PlanB", (void *)pb);
         if (result < 0) {
 	        if (result==-EINVAL)
@@ -2113,11 +2102,9 @@ static int init_planb(struct planb *pb)
 		else if (result==-EBUSY)
 			printk(KERN_ERR "PlanB: I don't know why, "
 					"but IRQ %d is busy\n", (int)pb->irq);
-		restore_flags(flags);
 		return result;
 	}
 	disable_irq(pb->irq);
-	restore_flags(flags);
         
 	/* Now add the template and register the device unit. */
 	memcpy(&pb->video_dev,&planb_template,sizeof(planb_template));
@@ -2170,6 +2157,7 @@ static int find_planb(void)
 	unsigned int		old_base, new_base;
 	unsigned int		irq;
 	struct pci_dev 		*pdev;
+	int rc;
 
 	if (_machine != _MACH_Pmac)
 		return 0;
@@ -2223,18 +2211,25 @@ static int find_planb(void)
 
 	pdev = pci_find_slot (bus, dev_fn);
 	if (!pdev) {
-		printk(KERN_ERR "cannot find slot\n");
-		/* XXX handle error */
+		printk(KERN_ERR "planb: cannot find slot\n");
+		goto err_out;
 	}
 
 	/* Enable response in memory space, bus mastering,
 	   use memory write and invalidate */
-	pci_write_config_word (pdev, PCI_COMMAND,
-		PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER |
-		PCI_COMMAND_INVALIDATE);
-	/* Set PCI Cache line size & latency timer */
-	pci_write_config_byte (pdev, PCI_CACHE_LINE_SIZE, 0x8);
-	pci_write_config_byte (pdev, PCI_LATENCY_TIMER, 0x40);
+	rc = pci_enable_device(pdev);
+	if (rc) {
+		printk(KERN_ERR "planb: cannot enable PCI device %s\n",
+		       pci_name(pdev));
+		goto err_out;
+	}
+	rc = pci_set_mwi(pdev);
+	if (rc) {
+		printk(KERN_ERR "planb: cannot enable MWI on PCI device %s\n",
+		       pci_name(pdev));
+		goto err_out_disable;
+	}
+	pci_set_master(pdev);
 
 	/* Set the new base address */
 	pci_write_config_dword (pdev, confreg, new_base);
@@ -2246,6 +2241,12 @@ static int find_planb(void)
 	pb->irq	= irq;
 	
 	return planb_num;
+
+err_out_disable:
+	pci_disable_device(pdev);
+err_out:
+	/* FIXME handle error */   /* comment moved from pci_find_slot, above */
+	return 0;
 }
 
 static void release_planb(void)

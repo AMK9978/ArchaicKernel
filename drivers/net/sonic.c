@@ -113,15 +113,6 @@ static int sonic_send_packet(struct sk_buff *skb, struct net_device *dev)
 	if (sonic_debug > 2)
 		printk("sonic_send_packet: skb=%p, dev=%p\n", skb, dev);
 
-	/* 
-	 * Block a timer-based transmit from overlapping.  This could better be
-	 * done with atomic_swap(1, dev->tbusy), but set_bit() works as well.
-	 */
-	if (test_and_set_bit(0, (void *) &dev->tbusy) != 0) {
-		printk("%s: Transmitter access conflict.\n", dev->name);
-		return 1;
-	}
-
 	/*
 	 * Map the packet data into the logical DMA address space
 	 */
@@ -170,7 +161,7 @@ static int sonic_send_packet(struct sk_buff *skb, struct net_device *dev)
  * The typical workload of the driver:
  * Handle the network interface interrupts.
  */
-static void sonic_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t sonic_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = (struct net_device *) dev_id;
 	unsigned int base_addr = dev->base_addr;
@@ -179,7 +170,7 @@ static void sonic_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (dev == NULL) {
 		printk("sonic_interrupt: irq %d for unknown device.\n", irq);
-		return;
+		return IRQ_NONE;
 	}
 
 	lp = (struct sonic_local *) dev->priv;
@@ -286,6 +277,7 @@ static void sonic_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	 * clear interrupt bits and return
 	 */
 	SONIC_WRITE(SONIC_ISR, status);
+	return IRQ_HANDLED;
 }
 
 /*
@@ -620,3 +612,5 @@ static int sonic_init(struct net_device *dev)
 
 	return 0;
 }
+
+MODULE_LICENSE("GPL");

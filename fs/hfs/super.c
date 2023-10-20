@@ -31,27 +31,88 @@
 #include <linux/blkdev.h>
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/parser.h>
+#include <linux/smp_lock.h>
+#include <linux/vfs.h>
+
+MODULE_LICENSE("GPL");
 
 /*================ Forward declarations ================*/
 
 static void hfs_read_inode(struct inode *);
 static void hfs_put_super(struct super_block *);
-static int hfs_statfs(struct super_block *, struct statfs *);
+static int hfs_statfs(struct super_block *, struct kstatfs *);
 static void hfs_write_super(struct super_block *);
+
+static kmem_cache_t * hfs_inode_cachep;
+
+static struct inode *hfs_alloc_inode(struct super_block *sb)
+{
+	struct hfs_inode_info *ei;
+	ei = (struct hfs_inode_info *)kmem_cache_alloc(hfs_inode_cachep, SLAB_KERNEL);
+	if (!ei)
+		return NULL;
+	return &ei->vfs_inode;
+}
+
+static void hfs_destroy_inode(struct inode *inode)
+{
+	kmem_cache_free(hfs_inode_cachep, HFS_I(inode));
+}
+
+static void init_once(void * foo, kmem_cache_t * cachep, unsigned long flags)
+{
+	struct hfs_inode_info *ei = (struct hfs_inode_info *) foo;
+
+	if ((flags & (SLAB_CTOR_VERIFY|SLAB_CTOR_CONSTRUCTOR)) ==
+	    SLAB_CTOR_CONSTRUCTOR)
+		inode_init_once(&ei->vfs_inode);
+}
+ 
+static int init_inodecache(void)
+{
+	hfs_inode_cachep = kmem_cache_create("hfs_inode_cache",
+					     sizeof(struct hfs_inode_info),
+					     0, SLAB_HWCACHE_ALIGN|SLAB_RECLAIM_ACCOUNT,
+					     init_once, NULL);
+	if (hfs_inode_cachep == NULL)
+		return -ENOMEM;
+	return 0;
+}
+
+static void destroy_inodecache(void)
+{
+	if (kmem_cache_destroy(hfs_inode_cachep))
+		printk(KERN_INFO "hfs_inode_cache: not all structures were freed\n");
+}
 
 /*================ Global variables ================*/
 
 static struct super_operations hfs_super_operations = { 
-	read_inode:	hfs_read_inode,
-	put_inode:	hfs_put_inode,
-	put_super:	hfs_put_super,
-	write_super:	hfs_write_super,
-	statfs:		hfs_statfs,
+	.alloc_inode	= hfs_alloc_inode,
+	.destroy_inode	= hfs_destroy_inode,
+	.read_inode	= hfs_read_inode,
+	.put_inode	= hfs_put_inode,
+	.put_super	= hfs_put_super,
+	.write_super	= hfs_write_super,
+	.statfs		= hfs_statfs,
 };
 
 /*================ File-local variables ================*/
 
-static DECLARE_FSTYPE_DEV(hfs_fs, "hfs", hfs_read_super);
+static struct super_block *hfs_get_sb(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
+{
+	return get_sb_bdev(fs_type, flags, dev_name, data, hfs_fill_super);
+}
+
+static struct file_system_type hfs_fs = {
+	.owner		= THIS_MODULE,
+	.name		= "hfs",
+	.get_sb		= hfs_get_sb,
+	.kill_sb	= kill_block_super,
+	.fs_flags	= FS_REQUIRES_DEV,
+};
 
 /*================ File-local functions ================*/
 
@@ -88,9 +149,10 @@ static void hfs_read_inode(struct inode *inode)
 static void hfs_write_super(struct super_block *sb)
 {
 	struct hfs_mdb *mdb = HFS_SB(sb)->s_mdb;
-
+	lock_kernel();
 	/* is this a valid hfs superblock? */
 	if (!sb || sb->s_magic != HFS_SUPER_MAGIC) {
+		unlock_kernel();
 		return;
 	}
 
@@ -99,6 +161,7 @@ static void hfs_write_super(struct super_block *sb)
 		hfs_mdb_commit(mdb, 0);
 	}
 	sb->s_dirt = 0;
+	unlock_kernel();
 }
 
 /*
@@ -120,8 +183,8 @@ static void hfs_put_super(struct super_block *sb)
 	/* release the MDB's resources */
 	hfs_mdb_put(mdb, sb->s_flags & MS_RDONLY);
 
-	/* restore default blocksize for the device */
-	set_blocksize(sb->s_dev, BLOCK_SIZE);
+	kfree(sb->s_fs_info);
+	sb->s_fs_info = NULL;
 }
 
 /*
@@ -133,7 +196,7 @@ static void hfs_put_super(struct super_block *sb)
  *
  * changed f_files/f_ffree to reflect the fs_ablock/free_ablocks.
  */
-static int hfs_statfs(struct super_block *sb, struct statfs *buf)
+static int hfs_statfs(struct super_block *sb, struct kstatfs *buf)
 {
 	struct hfs_mdb *mdb = HFS_SB(sb)->s_mdb;
 
@@ -149,6 +212,60 @@ static int hfs_statfs(struct super_block *sb, struct statfs *buf)
 	return 0;
 }
 
+enum {
+	Opt_version, Opt_uid, Opt_gid, Opt_umask, Opt_part,
+	Opt_type, Opt_creator, Opt_quiet, Opt_afpd,
+	Opt_names_netatalk, Opt_names_trivial, Opt_names_alpha, Opt_names_latin,
+	Opt_names_7bit, Opt_names_8bit, Opt_names_cap,
+	Opt_fork_netatalk, Opt_fork_single, Opt_fork_double, Opt_fork_cap,
+	Opt_case_lower, Opt_case_asis,
+	Opt_conv_binary, Opt_conv_text, Opt_conv_auto,
+};
+
+static match_table_t tokens = {
+	{Opt_version, "version=%u"},
+	{Opt_uid, "uid=%u"},
+	{Opt_gid, "gid=%u"},
+	{Opt_umask, "umask=%o"},
+	{Opt_part, "part=%u"},
+	{Opt_type, "type=%s"},
+	{Opt_creator, "creator=%s"},
+	{Opt_quiet, "quiet"},
+	{Opt_afpd, "afpd"},
+	{Opt_names_netatalk, "names=netatalk"},
+	{Opt_names_trivial, "names=trivial"},
+	{Opt_names_alpha, "names=alpha"},
+	{Opt_names_latin, "names=latin"},
+	{Opt_names_7bit, "names=7bit"},
+	{Opt_names_8bit, "names=8bit"},
+	{Opt_names_cap, "names=cap"},
+	{Opt_names_netatalk, "names=n"},
+	{Opt_names_trivial, "names=t"},
+	{Opt_names_alpha, "names=a"},
+	{Opt_names_latin, "names=l"},
+	{Opt_names_7bit, "names=7"},
+	{Opt_names_8bit, "names=8"},
+	{Opt_names_cap, "names=c"},
+	{Opt_fork_netatalk, "fork=netatalk"},
+	{Opt_fork_single, "fork=single"},
+	{Opt_fork_double, "fork=double"},
+	{Opt_fork_cap, "fork=cap"},
+	{Opt_fork_netatalk, "fork=n"},
+	{Opt_fork_single, "fork=s"},
+	{Opt_fork_double, "fork=d"},
+	{Opt_fork_cap, "fork=c"},
+	{Opt_case_lower, "case=lower"},
+	{Opt_case_asis, "case=asis"},
+	{Opt_case_lower, "case=l"},
+	{Opt_case_asis, "case=a"},
+	{Opt_conv_binary, "conv=binary"},
+	{Opt_conv_text, "conv=text"},
+	{Opt_conv_auto, "conv=auto"},
+	{Opt_conv_binary, "conv=b"},
+	{Opt_conv_text, "conv=t"},
+	{Opt_conv_auto, "conv=a"},
+};
+
 /*
  * parse_options()
  * 
@@ -157,8 +274,10 @@ static int hfs_statfs(struct super_block *sb, struct statfs *buf)
  */
 static int parse_options(char *options, struct hfs_sb_info *hsb, int *part)
 {
-	char *this_char, *value;
+	char *p;
 	char names, fork;
+	substring_t args[MAX_OPT_ARGS];
+	int option;
 
 	/* initialize the sb with defaults */
 	memset(hsb, 0, sizeof(*hsb));
@@ -181,116 +300,109 @@ static int parse_options(char *options, struct hfs_sb_info *hsb, int *part)
 	if (!options) {
 		goto done;
 	}
-	for (this_char = strtok(options,","); this_char;
-	     this_char = strtok(NULL,",")) {
-		if ((value = strchr(this_char,'=')) != NULL) {
-			*value++ = 0;
-		}
-	/* Numeric-valued options */
-		if (!strcmp(this_char, "version")) {
-			if (!value || !*value) {
+	while ((p = strsep(&options,",")) != NULL) {
+		int token;
+		if (!*p)
+			continue;
+
+		token = match_token(p, tokens, args);
+		switch (token) {
+		/* Numeric-valued options */
+		case Opt_version:
+			if (match_int(&args[0], &option))
+				return 0;
+			hsb->s_version = option;
+			break;
+		case Opt_uid:
+			if (match_int(&args[0], &option))
+				return 0;
+			hsb->s_uid = option;
+			break;
+		case Opt_gid:
+			if (match_int(&args[0], &option))
+				return 0;
+			hsb->s_gid = option;
+			break;
+		case Opt_umask:
+			if (match_octal(&args[0], &option))
+				return 0;
+			hsb->s_umask = option;
+			break;
+		case Opt_part:
+			if (match_int(&args[0], &option))
+				return 0;
+			*part = option;
+			break;
+		/* String-valued options */
+		case Opt_type:
+			if (strlen(args[0].from) != 4) {
 				return 0;
 			}
-			hsb->s_version = simple_strtoul(value,&value,0);
-			if (*value) {
+			hsb->s_type = hfs_get_nl(args[0].from);
+			break;
+		case Opt_creator:
+			if (strlen(args[0].from) != 4) {
 				return 0;
 			}
-		} else if (!strcmp(this_char,"uid")) {
-			if (!value || !*value) {
-				return 0;
-			}
-			hsb->s_uid = simple_strtoul(value,&value,0);
-			if (*value) {
-				return 0;
-			}
-		} else if (!strcmp(this_char,"gid")) {
-			if (!value || !*value) {
-				return 0;
-			}
-			hsb->s_gid = simple_strtoul(value,&value,0);
-			if (*value) {
-				return 0;
-			}
-		} else if (!strcmp(this_char,"umask")) {
-			if (!value || !*value) {
-				return 0;
-			}
-			hsb->s_umask = simple_strtoul(value,&value,8);
-			if (*value) {
-				return 0;
-			}
-		} else if (!strcmp(this_char,"part")) {
-			if (!value || !*value) {
-				return 0;
-			}
-			*part = simple_strtoul(value,&value,0);
-			if (*value) {
-				return 0;
-			}
-	/* String-valued options */
-		} else if (!strcmp(this_char,"type") && value) {
-			if (strlen(value) != 4) {
-				return 0;
-			}
-			hsb->s_type = hfs_get_nl(value);
-		} else if (!strcmp(this_char,"creator") && value) {
-			if (strlen(value) != 4) {
-				return 0;
-			}
-			hsb->s_creator = hfs_get_nl(value);
-	/* Boolean-valued options */
-		} else if (!strcmp(this_char,"quiet")) {
-			if (value) {
-				return 0;
-			}
+			hsb->s_creator = hfs_get_nl(args[0].from);
+			break;
+		/* Boolean-valued options */
+		case Opt_quiet:
 			hsb->s_quiet = 1;
-		} else if (!strcmp(this_char,"afpd")) {
-			if (value) {
-				return 0;
-			}
+			break;
+		case Opt_afpd:
 			hsb->s_afpd = 1;
-	/* Multiple choice options */
-		} else if (!strcmp(this_char,"names") && value) {
-			if ((*value && !value[1] && strchr("ntal78c",*value)) ||
-			    !strcmp(value,"netatalk") ||
-			    !strcmp(value,"trivial") ||
-			    !strcmp(value,"alpha") ||
-			    !strcmp(value,"latin") ||
-			    !strcmp(value,"7bit") ||
-			    !strcmp(value,"8bit") ||
-			    !strcmp(value,"cap")) {
-				names = *value;
-			} else {
-				return 0;
-			}
-		} else if (!strcmp(this_char,"fork") && value) {
-			if ((*value && !value[1] && strchr("nsdc",*value)) ||
-			    !strcmp(value,"netatalk") ||
-			    !strcmp(value,"single") ||
-			    !strcmp(value,"double") ||
-			    !strcmp(value,"cap")) {
-				fork = *value;
-			} else {
-				return 0;
-			}
-		} else if (!strcmp(this_char,"case") && value) {
-			if ((*value && !value[1] && strchr("la",*value)) ||
-			    !strcmp(value,"lower") ||
-			    !strcmp(value,"asis")) {
-				hsb->s_lowercase = (*value == 'l');
-			} else {
-				return 0;
-			}
-		} else if (!strcmp(this_char,"conv") && value) {
-			if ((*value && !value[1] && strchr("bta",*value)) ||
-			    !strcmp(value,"binary") ||
-			    !strcmp(value,"text") ||
-			    !strcmp(value,"auto")) {
-				hsb->s_conv = *value;
-			} else {
-				return 0;
-			}
-		} else {
+			break;
+		/* Multiple choice options */
+		case Opt_names_netatalk:
+			names = 'n';
+			break;
+		case Opt_names_trivial:
+			names = 't';
+			break;
+		case Opt_names_alpha:
+			names = 'a';
+			break;
+		case Opt_names_latin:
+			names = 'l';
+			break;
+		case Opt_names_7bit:
+			names = '7';
+			break;
+		case Opt_names_8bit:
+			names = '8';
+			break;
+		case Opt_names_cap:
+			names = 'c';
+			break;
+		case Opt_fork_netatalk:
+			fork = 'n';
+			break;
+		case Opt_fork_single:
+			fork = 's';
+			break;
+		case Opt_fork_double:
+			fork = 'd';
+			break;
+		case Opt_fork_cap:
+			fork = 'c';
+			break;
+		case Opt_case_lower:
+			hsb->s_lowercase = 1;
+			break;
+		case Opt_case_asis:
+			hsb->s_lowercase = 0;
+			break;
+		case Opt_conv_binary:
+			hsb->s_conv = 'b';
+			break;
+		case Opt_conv_text:
+			hsb->s_conv = 't';
+			break;
+		case Opt_conv_auto:
+			hsb->s_conv = 'a';
+			break;
+		default:
 			return 0;
 		}
 	}
@@ -385,23 +497,28 @@ done:
  * hfs_btree_init() to get the necessary data about the extents and
  * catalog B-trees and, finally, reading the root inode into memory.
  */
-struct super_block *hfs_read_super(struct super_block *s, void *data,
-				   int silent)
+int hfs_fill_super(struct super_block *s, void *data, int silent)
 {
+	struct hfs_sb_info *sbi;
 	struct hfs_mdb *mdb;
 	struct hfs_cat_key key;
-	kdev_t dev = s->s_dev;
 	hfs_s32 part_size, part_start;
 	struct inode *root_inode;
 	int part;
 
-	if (!parse_options((char *)data, HFS_SB(s), &part)) {
+	sbi = kmalloc(sizeof(struct hfs_sb_info), GFP_KERNEL);
+	if (!sbi)
+		return -ENOMEM;
+	s->s_fs_info = sbi;
+	memset(sbi, 0, sizeof(struct hfs_sb_info));
+
+	if (!parse_options((char *)data, sbi, &part)) {
 		hfs_warn("hfs_fs: unable to parse mount options.\n");
-		goto bail3;
+		goto bail2;
 	}
 
 	/* set the device driver to 512-byte blocks */
-	set_blocksize(dev, HFS_SECTOR_SIZE);
+	sb_set_blocksize(s, HFS_SECTOR_SIZE);
 
 #ifdef CONFIG_MAC_PARTITION
 	/* check to see if we're in a partition */
@@ -425,20 +542,18 @@ struct super_block *hfs_read_super(struct super_block *s, void *data,
 	if (!mdb) {
 		if (!silent) {
 			hfs_warn("VFS: Can't find a HFS filesystem on dev %s.\n",
-			       kdevname(dev));
+			       s->s_id);
 		}
 		goto bail2;
 	}
 
-	HFS_SB(s)->s_mdb = mdb;
+	sbi->s_mdb = mdb;
 	if (HFS_ITYPE(mdb->next_id) != 0) {
 		hfs_warn("hfs_fs: too many files.\n");
 		goto bail1;
 	}
 
 	s->s_magic = HFS_SUPER_MAGIC;
-	s->s_blocksize_bits = HFS_SECTOR_SIZE_BITS;
-	s->s_blocksize = HFS_SECTOR_SIZE;
 	s->s_op = &hfs_super_operations;
 
 	/* try to get the root inode */
@@ -459,7 +574,7 @@ struct super_block *hfs_read_super(struct super_block *s, void *data,
 	s->s_root->d_op = &hfs_dentry_operations;
 
 	/* everything's okay */
-	return s;
+	return 0;
 
 bail_no_root: 
 	hfs_warn("hfs_fs: get root inode failed.\n");
@@ -467,20 +582,32 @@ bail_no_root:
 bail1:
 	hfs_mdb_put(mdb, s->s_flags & MS_RDONLY);
 bail2:
-	set_blocksize(dev, BLOCK_SIZE);
-bail3:
-	return NULL;	
+	kfree(sbi);
+	s->s_fs_info = NULL;
+	return -EINVAL;	
 }
 
 static int __init init_hfs_fs(void)
 {
+	int err = init_inodecache();
+	if (err)
+		goto out1;
         hfs_cat_init();
-	return register_filesystem(&hfs_fs);
+	err = register_filesystem(&hfs_fs);
+	if (err)
+		goto out;
+	return 0;
+out:
+	hfs_cat_free();
+	destroy_inodecache();
+out1:
+	return err;
 }
 
 static void __exit exit_hfs_fs(void) {
 	hfs_cat_free();
 	unregister_filesystem(&hfs_fs);
+	destroy_inodecache();
 }
 
 module_init(init_hfs_fs)

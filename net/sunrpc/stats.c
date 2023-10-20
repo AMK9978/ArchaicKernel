@@ -12,9 +12,9 @@
  * Copyright (C) 1995, 1996, 1997 Olaf Kirch <okir@monad.swb.de>
  */
 
-#define __NO_VERSION__
 #include <linux/module.h>
 
+#include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
@@ -23,7 +23,7 @@
 
 #define RPCDBG_FACILITY	RPCDBG_MISC
 
-static struct proc_dir_entry	*proc_net_rpc = NULL;
+struct proc_dir_entry	*proc_net_rpc = NULL;
 
 /*
  * Get RPC client stats
@@ -181,25 +181,3 @@ rpc_proc_exit(void)
 	}
 }
 
-#ifdef MODULE
-
-int
-init_module(void)
-{
-#ifdef RPC_DEBUG
-	rpc_register_sysctl();
-#endif
-	rpc_proc_init();
-	return 0;
-}
-
-void
-cleanup_module(void)
-{
-#ifdef RPC_DEBUG
-	rpc_unregister_sysctl();
-#endif
-	rpc_proc_exit();
-}
-#endif
-MODULE_LICENSE("GPL");

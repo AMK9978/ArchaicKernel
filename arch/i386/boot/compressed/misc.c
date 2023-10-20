@@ -12,6 +12,7 @@
 #include <linux/linkage.h>
 #include <linux/vmalloc.h>
 #include <linux/tty.h>
+#include <video/edid.h>
 #include <asm/io.h>
 
 /*
@@ -91,6 +92,7 @@ static unsigned char *real_mode; /* Pointer to real-mode data */
 #define ALT_MEM_K   (*(unsigned long *)(real_mode + 0x1e0))
 #endif
 #define SCREEN_INFO (*(struct screen_info *)(real_mode+0))
+#define EDID_INFO   (*(struct edid_info *)(real_mode+0x440))
 
 extern char input_data[];
 extern int input_len;
@@ -99,15 +101,11 @@ static long bytes_out = 0;
 static uch *output_data;
 static unsigned long output_ptr = 0;
 
- 
 static void *malloc(int size);
 static void free(void *where);
-static void error(char *m);
-static void gzip_mark(void **);
-static void gzip_release(void **);
- 
+
 static void puts(const char *);
-  
+
 extern int end;
 static long free_mem_ptr = (long)&end;
 static long free_mem_end_ptr;
@@ -124,8 +122,8 @@ static char *vidmem = (char *)0xb8000;
 static int vidport;
 static int lines, cols;
 
-#ifdef CONFIG_MULTIQUAD
-static void *xquad_portio = NULL;
+#ifdef CONFIG_X86_NUMAQ
+static void * xquad_portio = NULL;
 #endif
 
 #include "../../../../lib/inflate.c"
@@ -134,8 +132,8 @@ static void *malloc(int size)
 {
 	void *p;
 
-	if (size <0) error("Malloc error\n");
-	if (free_mem_ptr <= 0) error("Memory error\n");
+	if (size <0) error("Malloc error");
+	if (free_mem_ptr <= 0) error("Memory error");
 
 	free_mem_ptr = (free_mem_ptr + 3) & ~3;	/* Align */
 
@@ -143,7 +141,7 @@ static void *malloc(int size)
 	free_mem_ptr += size;
 
 	if (free_mem_ptr >= free_mem_end_ptr)
-		error("\nOut of memory\n");
+		error("Out of memory");
 
 	return p;
 }
@@ -234,7 +232,7 @@ static void* memcpy(void* __dest, __const void* __src,
 static int fill_inbuf(void)
 {
 	if (insize != 0) {
-		error("ran out of input data\n");
+		error("ran out of input data");
 	}
 
 	inbuf = input_data;
@@ -303,14 +301,14 @@ long user_stack [STACK_SIZE];
 struct {
 	long * a;
 	short b;
-	} stack_start = { & user_stack [STACK_SIZE] , __KERNEL_DS };
+	} stack_start = { & user_stack [STACK_SIZE] , __BOOT_DS };
 
 static void setup_normal_output_buffer(void)
 {
 #ifdef STANDARD_MEMORY_BIOS_CALL
-	if (EXT_MEM_K < 1024) error("Less than 2MB of memory.\n");
+	if (EXT_MEM_K < 1024) error("Less than 2MB of memory");
 #else
-	if ((ALT_MEM_K > EXT_MEM_K ? ALT_MEM_K : EXT_MEM_K) < 1024) error("Less than 2MB of memory.\n");
+	if ((ALT_MEM_K > EXT_MEM_K ? ALT_MEM_K : EXT_MEM_K) < 1024) error("Less than 2MB of memory");
 #endif
 	output_data = (char *)0x100000; /* Points to 1M */
 	free_mem_end_ptr = (long)real_mode;
@@ -325,9 +323,9 @@ static void setup_output_buffer_if_we_run_high(struct moveparams *mv)
 {
 	high_buffer_start = (uch *)(((ulg)&end) + HEAP_SIZE);
 #ifdef STANDARD_MEMORY_BIOS_CALL
-	if (EXT_MEM_K < (3*1024)) error("Less than 4MB of memory.\n");
+	if (EXT_MEM_K < (3*1024)) error("Less than 4MB of memory");
 #else
-	if ((ALT_MEM_K > EXT_MEM_K ? ALT_MEM_K : EXT_MEM_K) < (3*1024)) error("Less than 4MB of memory.\n");
+	if ((ALT_MEM_K > EXT_MEM_K ? ALT_MEM_K : EXT_MEM_K) < (3*1024)) error("Less than 4MB of memory");
 #endif	
 	mv->low_buffer_start = output_data = (char *)LOW_BUFFER_START;
 	low_buffer_end = ((unsigned int)real_mode > LOW_BUFFER_MAX

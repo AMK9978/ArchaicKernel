@@ -21,6 +21,8 @@
  *	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+#include <linux/version.h>
+
 /*****************************************************************************/
 #ifndef	_ISTALLION_H
 #define	_ISTALLION_H
@@ -66,8 +68,6 @@ typedef struct {
 	int			rc;
 	int			argsize;
 	void			*argp;
-	long			session;
-	long			pgrp;
 	unsigned int		rxmarkmsk;
 	struct tty_struct	*tty;
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,3,0))
@@ -79,9 +79,7 @@ typedef struct {
 	wait_queue_head_t	close_wait;
 	wait_queue_head_t	raw_wait;
 #endif
-	struct tq_struct	tqhangup;
-	struct termios		normaltermios;
-	struct termios		callouttermios;
+	struct work_struct	tqhangup;
 	asysigs_t		asig;
 	unsigned long		addr;
 	unsigned long		rxoffset;

@@ -21,7 +21,8 @@ Command line parameters
   Default is on.
 
 
-* cio_ignore = <range of device numbers>, <range of device numbers>, ...
+* cio_ignore = <device number> | <range of device numbers>, 
+	       <device number> | <range of device numbers>, ...
 
   The given device numbers will be ignored by the common I/O-layer; no detection
   and device sensing will be done on any of those devices. The subchannel to 
@@ -41,45 +42,8 @@ Command line parameters
   By default, no devices are ignored.
 
 
-* cio_proc_devinfo = yes | no
-
-  Determines whether the entries under /proc/deviceinfo/ (see below) should be
-  created. Since there are problems with systems with many devices attached, I
-  made it configurable.
-
-  Until the problems are dealt with, default is off.
-
-
 /proc entries
 -------------
-
-* /proc/subchannels
-
-  Shows for each subchannel
-  - device number
-  - device type/model and if applicable control unit type/model
-  - whether the device is in use
-  - path installed mask, path available mask, path operational mask and last 
-    path used mask
-  - the channel path IDs (chpids)
-
-
-* /proc/deviceinfo/
-
-  Shows in subdirectories for each device some characteristics:
-  - /proc/deviceinfo/<devno>/chpids: 
-	the channel path IDs
-  - /proc/deviceinfo/<devno>/in_use: 
-	whether the device is in use
-  - /proc/deviceinfo/<devno>/sensedata:
-    	the device type/model and if applicable control unit type/model of the
-	device
-
-  NOTE: Since the number of inodes which can be dynamically allocated by procfs
-        is limited, device entries will only be created up to a magic number of
-        devices. The kernel will utter a warning that not all entries can be
-        created. In this case, you shouldn't use "cio_proc_devinfo=yes" (see
-        above).
 
 * /proc/cio_ignore
 
@@ -133,7 +97,6 @@ Command line parameters
   /proc/s390dbf/cio_*/level a number between 0 and 6; see the documentation on
   the S/390 debug feature (Documentation/s390/s390dbf.txt) for details.
 
-* /proc/irq_count
-
-  This entry counts how many times s390_process_IRQ has been called for each 
-  CPU. This info is in /proc/interrupts on other architectures.
+* For some of the information present in the /proc filesystem in 2.4 (namely,
+  /proc/subchannels and /proc/chpids), see driver-model.txt.
+  Information formerly in /proc/irq_count is now in /proc/interrupts.

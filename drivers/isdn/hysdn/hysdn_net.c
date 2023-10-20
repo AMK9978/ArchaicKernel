@@ -13,7 +13,6 @@
  *
  */
 
-#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/signal.h>
@@ -170,8 +169,7 @@ net_send_packet(struct sk_buff *skb, struct net_device *dev)
 	spin_unlock_irq(&lp->lock);
 
 	if (lp->sk_count <= 3) {
-		queue_task(&((hysdn_card *) dev->priv)->irq_queue, &tq_immediate);
-		mark_bh(IMMEDIATE_BH);
+		schedule_work(&((hysdn_card *) dev->priv)->irq_queue);
 	}
 	return (0);		/* success */
 }				/* net_send_packet */
@@ -336,7 +334,7 @@ hysdn_net_release(hysdn_card * card)
 	flush_tx_buffers((struct net_local *) dev);	/* empty buffers */
 
 	unregister_netdev(dev);	/* release the device */
-	kfree(dev);		/* release the memory allocated */
+	free_netdev(dev);	/* release the memory allocated */
 	if (card->debug_flags & LOG_NET_INIT)
 		hysdn_addlog(card, "network device deleted");
 

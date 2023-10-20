@@ -7,11 +7,15 @@
 #include <linux/netfilter_ipv4/ip_tables.h>
 #include <linux/netfilter_ipv4/ipt_MARK.h>
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Marc Boucher <marc@mbsi.ca>");
+MODULE_DESCRIPTION("iptables MARK modification module");
+
 static unsigned int
 target(struct sk_buff **pskb,
-       unsigned int hooknum,
        const struct net_device *in,
        const struct net_device *out,
+       unsigned int hooknum,
        const void *targinfo,
        void *userinfo)
 {
@@ -46,8 +50,12 @@ checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ipt_target ipt_mark_reg
-= { { NULL, NULL }, "MARK", target, checkentry, NULL, THIS_MODULE };
+static struct ipt_target ipt_mark_reg = {
+	.name		= "MARK",
+	.target		= target,
+	.checkentry	= checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {
@@ -64,4 +72,3 @@ static void __exit fini(void)
 
 module_init(init);
 module_exit(fini);
-MODULE_LICENSE("GPL");

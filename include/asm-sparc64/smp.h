@@ -13,17 +13,9 @@
 #include <asm/spitfire.h>
 
 #ifndef __ASSEMBLY__
-/* PROM provided per-processor information we need
- * to start them all up.
- */
 
-struct prom_cpuinfo {
-	int prom_node;
-	int mid;
-};
-
-extern int linux_num_cpus;	/* number of CPUs probed  */
-extern struct prom_cpuinfo linux_cpus[64];
+#include <linux/cpumask.h>
+#include <linux/cache.h>
 
 #endif /* !(__ASSEMBLY__) */
 
@@ -31,66 +23,43 @@ extern struct prom_cpuinfo linux_cpus[64];
 
 #ifndef __ASSEMBLY__
 
-/* Per processor Sparc parameters we need. */
-
-/* Keep this a multiple of 64-bytes for cache reasons. */
-struct cpuinfo_sparc {
-	/* Dcache line 1 */
-	unsigned int	__pad0;		/* bh_count moved to irq_stat for consistency. KAO */
-	unsigned int	multiplier;
-	unsigned int	counter;
-	unsigned int	idle_volume;
-	unsigned long	clock_tick;	/* %tick's per second */
-	unsigned long	udelay_val;
-
-	/* Dcache line 2 */
-	unsigned int	pgcache_size;
-	unsigned int	pgdcache_size;
-	unsigned long	*pte_cache[2];
-	unsigned long	*pgd_cache;
-
-	/* Dcache lines 3 and 4 */
-	unsigned int	irq_worklists[16];
-};
-
-extern struct cpuinfo_sparc cpu_data[NR_CPUS];
-
 /*
  *	Private routines/data
  */
  
+#include <asm/bitops.h>
+#include <asm/atomic.h>
+
 extern unsigned char boot_cpu_id;
-extern unsigned long cpu_present_map;
-#define cpu_online_map cpu_present_map
+
+extern cpumask_t phys_cpu_present_map;
+#define cpu_possible(cpu)	cpu_isset(cpu, phys_cpu_present_map)
+
+#define cpu_online(cpu)		cpu_isset(cpu, cpu_online_map)
+
+extern atomic_t sparc64_num_cpus_possible;
+#define num_possible_cpus()	(atomic_read(&sparc64_num_cpus_possible))
 
 /*
  *	General functions that each host system must provide.
  */
 
-extern void smp_callin(void);
-extern void smp_boot_cpus(void);
-extern void smp_store_cpu_info(int id);
-
-extern __volatile__ int __cpu_number_map[NR_CPUS];
-extern __volatile__ int __cpu_logical_map[NR_CPUS];
-
-extern __inline__ int cpu_logical_map(int cpu)
+static __inline__ int hard_smp_processor_id(void)
 {
-	return __cpu_logical_map[cpu];
-}
-extern __inline__ int cpu_number_map(int cpu)
-{
-	return __cpu_number_map[cpu];
-}
-
-extern __inline__ int hard_smp_processor_id(void)
-{
-	if (tlb_type == cheetah) {
-		unsigned long safari_config;
-		__asm__ __volatile__("ldxa [%%g0] %1, %0"
-				     : "=r" (safari_config)
-				     : "i" (ASI_SAFARI_CONFIG));
-		return ((safari_config >> 17) & 0x3ff);
+	if (tlb_type == cheetah || tlb_type == cheetah_plus) {
+		unsigned long cfg, ver;
+		__asm__ __volatile__("rdpr %%ver, %0" : "=r" (ver));
+		if ((ver >> 32) == 0x003e0016) {
+			__asm__ __volatile__("ldxa [%%g0] %1, %0"
+					     : "=r" (cfg)
+					     : "i" (ASI_JBUS_CONFIG));
+			return ((cfg >> 17) & 0x1f);
+		} else {
+			__asm__ __volatile__("ldxa [%%g0] %1, %0"
+					     : "=r" (cfg)
+					     : "i" (ASI_SAFARI_CONFIG));
+			return ((cfg >> 17) & 0x3ff);
+		}
 	} else if (this_is_starfire != 0) {
 		return starfire_hard_smp_processor_id();
 	} else {
@@ -102,31 +71,13 @@ extern __inline__ int hard_smp_processor_id(void)
 	}
 }
 
-#define smp_processor_id() (current->processor)
-
-/* This needn't do anything as we do not sleep the cpu
- * inside of the idler task, so an interrupt is not needed
- * to get a clean fast response.
- *
- * Addendum: We do want it to do something for the signal
- *           delivery case, we detect that by just seeing
- *           if we are trying to send this to an idler or not.
- */
-extern __inline__ void smp_send_reschedule(int cpu)
-{
-	extern void smp_receive_signal(int);
-	if(cpu_data[cpu].idle_volume == 0)
-		smp_receive_signal(cpu);
-}
-
-/* This is a nop as well because we capture all other cpus
- * anyways when making the PROM active.
- */
-extern __inline__ void smp_send_stop(void) { }
+#define smp_processor_id() (current_thread_info()->cpu)
 
 #endif /* !(__ASSEMBLY__) */
 
-#define PROC_CHANGE_PENALTY	20
+#else
+
+#define num_possible_cpus()	(1)
 
 #endif /* !(CONFIG_SMP) */
 

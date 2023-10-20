@@ -23,6 +23,7 @@
  * Fixes:           David Huggins-Daines, <dhd@cepstral.com>
  *                  Fabio Ferrari, <fabio.ferrari@digitro.com.br>
  *                  Artis Kugevics, <artis@mt.lv>
+ *                  Daniele Bellucci, <bellucda@tiscali.it>
  *
  * More information about the hardware related to this driver can be found  
  * at our website:    http://www.quicknet.net
@@ -45,6 +46,10 @@ static char ixj_c_revision[] = "$Revision: 4.7 $";
 
 /*
  * $Log: ixj.c,v $
+ *
+ * Revision 4.8  2003/07/09 19:39:00  Daniele Bellucci
+ * Audit some copy_*_user and minor cleanup.
+ *
  * Revision 4.7  2001/08/13 06:19:33  craigs
  * Added additional changes from Alan Cox and John Anderson for
  * 2.2 to 2.4 cleanup and bounds checking
@@ -260,7 +265,6 @@ static char ixj_c_revision[] = "$Revision: 4.7 $";
 #include <linux/mm.h>
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
-#include <linux/tqueue.h>
 #include <linux/proc_fs.h>
 #include <linux/poll.h>
 #include <linux/timer.h>
@@ -268,15 +272,14 @@ static char ixj_c_revision[] = "$Revision: 4.7 $";
 #include <linux/pci.h>
 
 #include <asm/io.h>
-#include <asm/segment.h>
 #include <asm/uaccess.h>
 
 #include <linux/isapnp.h>
 
 #include "ixj.h"
 
-#define TYPE(dev) (MINOR(dev) >> 4)
-#define NUM(dev) (MINOR(dev) & 0xf)
+#define TYPE(inode) (iminor(inode) >> 4)
+#define NUM(inode) (iminor(inode) & 0xf)
 
 static int ixjdebug;
 static int hertz = HZ;
@@ -365,12 +368,9 @@ static IXJ ixj[IXJMAX];
 static IXJ *ixj_alloc(void)
 {
 	int cnt;
-	for(cnt=0; cnt<IXJMAX; cnt++)
-	{
+	for(cnt=0; cnt<IXJMAX; cnt++) {
 		if(!ixj[cnt].DSPbase)
-		{
 			return &ixj[cnt];
-		}
 	}
 	return NULL;
 }
@@ -387,7 +387,7 @@ static inline void ixj_fsk_alloc(IXJ *j)
 #ifdef PERFMON_STATS
 #define ixj_perfmon(x)	((x)++)
 #else
-#define ixj_perfmon(x)	do {} while(0);
+#define ixj_perfmon(x)	do { } while(0)
 #endif
 
 static int ixj_convert_loaded;
@@ -2250,8 +2250,6 @@ static int ixj_open(struct phone_device *p, struct file *file_p)
 	j->flags.cidplay = 0;
 	j->flags.cidcw_ack = 0;
 
-	MOD_INC_USE_COUNT;
-
 	if (ixjdebug & 0x0002)
 		printk(KERN_INFO "Opening board %d\n", p->board);
 
@@ -2275,7 +2273,7 @@ int ixj_release(struct inode *inode, struct file *file_p)
 		schedule_timeout(1);
 	}
 	if (ixjdebug & 0x0002)
-		printk(KERN_INFO "Closing board %d\n", NUM(inode->i_rdev));
+		printk(KERN_INFO "Closing board %d\n", NUM(inode));
 
 	if (j->cardtype == QTI_PHONECARD)
 		ixj_set_port(j, PORT_SPEAKER);
@@ -2463,7 +2461,6 @@ int ixj_release(struct inode *inode, struct file *file_p)
 
 	file_p->private_data = NULL;
 	clear_bit(board, &j->busyflags);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -2807,7 +2804,10 @@ static void ulaw2alaw(unsigned char *buff, unsigned long len)
 	};
 
 	while (len--)
-		*buff++ = table_ulaw2alaw[*(unsigned char *)buff];
+	{
+		*buff = table_ulaw2alaw[*(unsigned char *)buff];
+		buff++;
+	}
 }
 
 static void alaw2ulaw(unsigned char *buff, unsigned long len)
@@ -2849,13 +2849,16 @@ static void alaw2ulaw(unsigned char *buff, unsigned long len)
 	};
 
         while (len--)
-                *buff++ = table_alaw2ulaw[*(unsigned char *)buff];
+        {
+                *buff = table_alaw2ulaw[*(unsigned char *)buff];
+                buff++;
+	}
 }
 
 static ssize_t ixj_read(struct file * file_p, char *buf, size_t length, loff_t * ppos)
 {
 	unsigned long i = *ppos;
-	IXJ * j = get_ixj(NUM(file_p->f_dentry->d_inode->i_rdev));
+	IXJ * j = get_ixj(NUM(file_p->f_dentry->d_inode));
 
 	DECLARE_WAITQUEUE(wait, current);
 
@@ -2912,7 +2915,7 @@ static ssize_t ixj_enhanced_read(struct file * file_p, char *buf, size_t length,
 {
 	int pre_retval;
 	ssize_t read_retval = 0;
-	IXJ *j = get_ixj(NUM(file_p->f_dentry->d_inode->i_rdev));
+	IXJ *j = get_ixj(NUM(file_p->f_dentry->d_inode));
 
 	pre_retval = ixj_PreRead(j, 0L);
 	switch (pre_retval) {
@@ -2991,7 +2994,7 @@ static ssize_t ixj_enhanced_write(struct file * file_p, const char *buf, size_t 
 	int pre_retval;
 	ssize_t write_retval = 0;
 
-	IXJ *j = get_ixj(NUM(file_p->f_dentry->d_inode->i_rdev));
+	IXJ *j = get_ixj(NUM(file_p->f_dentry->d_inode));
 
 	pre_retval = ixj_PreWrite(j, 0L);
 	switch (pre_retval) {
@@ -3451,7 +3454,7 @@ static void ixj_write_cidcw(IXJ *j)
 	j->cidcw_wait = 0;
 	if(!j->flags.cidcw_ack) {
 		if(ixjdebug & 0x0200) {
-			printk("IXJ cidcw phone%d did not recieve ACK from display %ld\n", j->board, jiffies);
+			printk("IXJ cidcw phone%d did not receive ACK from display %ld\n", j->board, jiffies);
 		}
 		ixj_post_cid(j);
 		if(j->cid_play_flag) {
@@ -4704,7 +4707,7 @@ static unsigned int ixj_poll(struct file *file_p, poll_table * wait)
 {
 	unsigned int mask = 0;
 
-	IXJ *j = get_ixj(NUM(file_p->f_dentry->d_inode->i_rdev));
+	IXJ *j = get_ixj(NUM(file_p->f_dentry->d_inode));
 
 	poll_wait(file_p, &(j->poll_q), wait);
 	if (j->read_buffer_ready > 0)
@@ -5944,7 +5947,7 @@ static int ixj_build_cadence(IXJ *j, IXJ_CADENCE * cp)
 	lcp = kmalloc(sizeof(IXJ_CADENCE), GFP_KERNEL);
 	if (lcp == NULL)
 		return -ENOMEM;
-	if (copy_from_user(lcp, (char *) cp, sizeof(IXJ_CADENCE)) || (unsigned)lcp->elements_used >= ~0U/sizeof(IXJ_CADENCE) )
+	if (copy_from_user(lcp, (char *) cp, sizeof(IXJ_CADENCE)) || (unsigned)lcp->elements_used >= ~0U/sizeof(IXJ_CADENCE_ELEMENT) )
         {
                 kfree(lcp);
                 return -EFAULT;
@@ -5995,12 +5998,14 @@ static int ixj_build_filter_cadence(IXJ *j, IXJ_FILTER_CADENCE * cp)
 		if(ixjdebug & 0x0001) {
 			printk(KERN_INFO "Could not copy cadence to kernel\n");
 		}
+		kfree(lcp);
 		return -EFAULT;
 	}
 	if (lcp->filter > 5) {
 		if(ixjdebug & 0x0001) {
 			printk(KERN_INFO "Cadence out of range\n");
 		}
+		kfree(lcp);
 		return -1;
 	}
 	j->cadence_f[lcp->filter].state = 0;
@@ -6203,10 +6208,10 @@ static int ixj_ioctl(struct inode *inode, struct file *file_p, unsigned int cmd,
 	IXJ_FILTER_RAW jfr;
 
 	unsigned int raise, mant;
-	unsigned int minor = MINOR(inode->i_rdev);
-	int board = NUM(inode->i_rdev);
+	unsigned int minor = iminor(inode);
+	int board = NUM(inode);
 
-	IXJ *j = get_ixj(NUM(inode->i_rdev));
+	IXJ *j = get_ixj(NUM(inode));
 
 	int retval = 0;
 
@@ -6254,9 +6259,11 @@ static int ixj_ioctl(struct inode *inode, struct file *file_p, unsigned int cmd,
 		break;
 	case IXJCTL_CIDCW:
 		if(arg) {
-			copy_from_user(&j->cid_send, (char *)arg, sizeof(PHONE_CID));
-		}
-		else {
+			if (copy_from_user(&j->cid_send, (char *)arg, sizeof(PHONE_CID))) {
+				retval = -EFAULT;
+				break;
+			}
+		} else {
 			memset(&j->cid_send, 0, sizeof(PHONE_CID));
 		}
 		ixj_write_cidcw(j);
@@ -6267,14 +6274,12 @@ static int ixj_ioctl(struct inode *inode, struct file *file_p, unsigned int cmd,
                 /* Fall through */
  	case PHONE_RING_START:
 		if(arg) {
-			if(copy_from_user(&j->cid_send, (char *)arg, sizeof(PHONE_CID)))
-			{
+			if (copy_from_user(&j->cid_send, (char *)arg, sizeof(PHONE_CID))) {
 				retval = -EFAULT;
 				break;
 			}
 			ixj_write_cid(j);
-		}
-		else {
+		} else {
 			memset(&j->cid_send, 0, sizeof(PHONE_CID));
 		}
 		ixj_ring_start(j);
@@ -6690,7 +6695,8 @@ static int ixj_ioctl(struct inode *inode, struct file *file_p, unsigned int cmd,
 	case IXJCTL_SET_FILTER_RAW:
 		if (copy_from_user(&jfr, (char *) arg, sizeof(jfr))) 
 			retval = -EFAULT;
-		retval = ixj_init_filter_raw(j, &jfr);
+		else
+			retval = ixj_init_filter_raw(j, &jfr);
 		break;
 	case IXJCTL_GET_FILTER_HIST:
 		if(arg<0||arg>3)
@@ -6699,8 +6705,10 @@ static int ixj_ioctl(struct inode *inode, struct file *file_p, unsigned int cmd,
 			retval = j->filter_hist[arg];
 		break;
 	case IXJCTL_INIT_TONE:
-		copy_from_user(&ti, (char *) arg, sizeof(ti));
-		retval = ixj_init_tone(j, &ti);
+		if (copy_from_user(&ti, (char *) arg, sizeof(ti)))
+			retval = -EFAULT;
+		else
+			retval = ixj_init_tone(j, &ti);
 		break;
 	case IXJCTL_TONE_CADENCE:
 		retval = ixj_build_cadence(j, (IXJ_CADENCE *) arg);
@@ -6709,8 +6717,10 @@ static int ixj_ioctl(struct inode *inode, struct file *file_p, unsigned int cmd,
 		retval = ixj_build_filter_cadence(j, (IXJ_FILTER_CADENCE *) arg);
 		break;
 	case IXJCTL_SIGCTL:
-		if (copy_from_user(&j->sigdef, (char *)arg, sizeof(IXJ_SIGDEF)))
+		if (copy_from_user(&j->sigdef, (char *)arg, sizeof(IXJ_SIGDEF))) {
 			retval = -EFAULT;
+			break;
+		}
 		j->ixj_signals[j->sigdef.event] = j->sigdef.signal;
 		if(j->sigdef.event < 33) {
 			raise = 1;
@@ -6754,20 +6764,20 @@ static int ixj_ioctl(struct inode *inode, struct file *file_p, unsigned int cmd,
 
 static int ixj_fasync(int fd, struct file *file_p, int mode)
 {
-	IXJ *j = get_ixj(NUM(file_p->f_dentry->d_inode->i_rdev));
+	IXJ *j = get_ixj(NUM(file_p->f_dentry->d_inode));
 
 	return fasync_helper(fd, file_p, mode, &j->async_queue);
 }
 
 struct file_operations ixj_fops =
 {
-        owner:          THIS_MODULE,
-        read:           ixj_enhanced_read,
-        write:          ixj_enhanced_write,
-        poll:           ixj_poll,
-        ioctl:          ixj_ioctl,
-        release:        ixj_release,
-        fasync:         ixj_fasync
+        .owner          = THIS_MODULE,
+        .read           = ixj_enhanced_read,
+        .write          = ixj_enhanced_write,
+        .poll           = ixj_poll,
+        .ioctl          = ixj_ioctl,
+        .release        = ixj_release,
+        .fasync         = ixj_fasync
 };
 
 static int ixj_linetest(IXJ *j)
@@ -6902,21 +6912,19 @@ static int ixj_selfprobe(IXJ *j)
 				/*  Internet PhoneJack Lite */
 			 {
 				j->cardtype = QTI_PHONEJACK_LITE;
-				if (check_region(j->XILINXbase, 4)) {
+				if (!request_region(j->XILINXbase, 4, "ixj control")) {
 					printk(KERN_INFO "ixj: can't get I/O address 0x%x\n", j->XILINXbase);
 					return -1;
 				}
-				request_region(j->XILINXbase, 4, "ixj control");
 				j->pld_slicw.pcib.e1 = 1;
 				outb_p(j->pld_slicw.byte, j->XILINXbase);
 			} else {
 				j->cardtype = QTI_LINEJACK;
 
-				if (check_region(j->XILINXbase, 8)) {
+				if (!request_region(j->XILINXbase, 8, "ixj control")) {
 					printk(KERN_INFO "ixj: can't get I/O address 0x%x\n", j->XILINXbase);
 					return -1;
 				}
-				request_region(j->XILINXbase, 8, "ixj control");
 			}
 		} else if (j->dsp.low == 0x22) {
 			j->cardtype = QTI_PHONEJACK_PCI;
@@ -6937,19 +6945,17 @@ static int ixj_selfprobe(IXJ *j)
 			}
 			break;
 		case QTI_LINEJACK:
-			if (check_region(j->XILINXbase, 8)) {
+			if (!request_region(j->XILINXbase, 8, "ixj control")) {
 				printk(KERN_INFO "ixj: can't get I/O address 0x%x\n", j->XILINXbase);
 				return -1;
 			}
-			request_region(j->XILINXbase, 8, "ixj control");
 			break;
 		case QTI_PHONEJACK_LITE:
 		case QTI_PHONEJACK_PCI:
-			if (check_region(j->XILINXbase, 4)) {
+			if (!request_region(j->XILINXbase, 4, "ixj control")) {
 				printk(KERN_INFO "ixj: can't get I/O address 0x%x\n", j->XILINXbase);
 				return -1;
 			}
-			request_region(j->XILINXbase, 4, "ixj control");
 			j->pld_slicw.pcib.e1 = 1;
 			outb_p(j->pld_slicw.byte, j->XILINXbase);
 			break;
@@ -7245,8 +7251,8 @@ static int ixj_get_status_proc(char *buf)
 	len += sprintf(buf + len, "\n%s", ixj_h_rcsid);
 	len += sprintf(buf + len, "\n%s", ixjuser_h_rcsid);
 	len += sprintf(buf + len, "\nDriver version %i.%i.%i", IXJ_VER_MAJOR, IXJ_VER_MINOR, IXJ_BLD_VER);
-	len += sprintf(buf + len, "\nsizeof IXJ struct %d bytes", sizeof(IXJ));
-	len += sprintf(buf + len, "\nsizeof DAA struct %d bytes", sizeof(DAA_REGS));
+	len += sprintf(buf + len, "\nsizeof IXJ struct %Zd bytes", sizeof(IXJ));
+	len += sprintf(buf + len, "\nsizeof DAA struct %Zd bytes", sizeof(DAA_REGS));
 	len += sprintf(buf + len, "\nUsing old telephony API");
 	len += sprintf(buf + len, "\nDebug Level %d\n", ixjdebug);
 
@@ -7574,8 +7580,8 @@ static void cleanup(void)
 				kfree(j->read_buffer);
 			if (j->write_buffer)
 				kfree(j->write_buffer);
-			if (j->dev && j->dev->deactivate)
-				j->dev->deactivate(j->dev);
+			if (j->dev)
+				pnp_device_detach(j->dev);
 			if (ixjdebug & 0x0002)
 				printk(KERN_INFO "IXJ: Unregistering /dev/phone%d from LTAPI\n", cnt);
 			phone_unregister_device(&j->p);
@@ -7691,7 +7697,7 @@ MODULE_DESCRIPTION("Quicknet VoIP Telephony card module - www.quicknet.net");
 MODULE_AUTHOR("Ed Okerson <eokerson@quicknet.net>");
 MODULE_LICENSE("GPL");
 
-void ixj_exit(void)
+static void __exit ixj_exit(void)
 {
         cleanup();
 }
@@ -7700,7 +7706,7 @@ int __init ixj_probe_isapnp(int *cnt)
 {               
 	int probe = 0;
 	int func = 0x110;
-        struct pci_dev *dev = NULL, *old_dev = NULL;
+        struct pnp_dev *dev = NULL, *old_dev = NULL;
 
 	while (1) {
 		do {
@@ -7708,30 +7714,29 @@ int __init ixj_probe_isapnp(int *cnt)
 			int result;
 
 			old_dev = dev;
-			dev = isapnp_find_dev(NULL, ISAPNP_VENDOR('Q', 'T', 'I'),
+			dev = pnp_find_dev(NULL, ISAPNP_VENDOR('Q', 'T', 'I'),
 					 ISAPNP_FUNCTION(func), old_dev);
-			if (!dev)
+			if (!dev || !dev->card)
 				break;
-			result = dev->prepare(dev);
+			result = pnp_device_attach(dev);
 			if (result < 0) {
-				printk("preparing failed %d \n", result);
+				printk("pnp attach failed %d \n", result);
 				break;
 			}
-
-			if (!(dev->resource[0].flags & IORESOURCE_IO))
-				return -ENODEV;
-
-			dev->resource[0].flags |= IORESOURCE_AUTO;
-			if (func != 0x110)
-				dev->resource[1].flags |= IORESOURCE_AUTO;
-			if (dev->activate(dev) < 0) {
-				printk("isapnp configure failed (out of resources?)\n");
+			if (pnp_activate_dev(dev) < 0) {
+				printk("pnp activate failed (out of resources?)\n");
+				pnp_device_detach(dev);
 				return -ENOMEM;
 			}
 
-			result = check_region(dev->resource[0].start, 16);
+			if (!pnp_port_valid(dev, 0)) {
+				pnp_device_detach(dev);
+				return -ENODEV;
+			}
+
+			result = check_region(pnp_port_start(dev, 0), 16);
 			if (result) {
-				printk(KERN_INFO "ixj: can't get I/O address 0x%lx\n", dev->resource[0].start);
+				printk(KERN_INFO "ixj: can't get I/O address 0x%lx\n", pnp_port_start(dev, 0));
 				break;
 			}
 
@@ -7739,7 +7744,7 @@ int __init ixj_probe_isapnp(int *cnt)
 			request_region(j->DSPbase, 16, "ixj DSP");
 
 			if (func != 0x110)
-				j->XILINXbase = dev->resource[1].start;	/* get real port */
+				j->XILINXbase = pnp_port_start(dev, 1);	/* get real port */
 
 			switch (func) {
 			case (0x110):
@@ -7755,7 +7760,7 @@ int __init ixj_probe_isapnp(int *cnt)
 			j->board = *cnt;
 			probe = ixj_selfprobe(j);
 			if(!probe) {
-				j->serial = dev->bus->serial;
+				j->serial = dev->card->serial;
 				j->dev = dev;
 				switch (func) {
 				case 0x110:
@@ -7820,9 +7825,6 @@ int __init ixj_probe_pci(int *cnt)
 	IXJ *j = NULL;
 	int result;
 
-	if(!pci_present())
-		return 0;
-
 	for (i = 0; i < IXJMAX - *cnt; i++) {
 		pci = pci_find_device(0x15E2, 0x0500, pci);
 		if (!pci)
@@ -7854,7 +7856,7 @@ int __init ixj_probe_pci(int *cnt)
 	return probe;
 }
 
-int __init ixj_init(void)
+static int __init ixj_init(void)
 {
 	int cnt = 0;
 	int probe = 0;   
@@ -7868,10 +7870,8 @@ int __init ixj_init(void)
 	if ((probe = ixj_probe_isa(&cnt)) < 0) {
 		return probe;
 	}
-	if (pci_present()) {
-		if ((probe = ixj_probe_pci(&cnt)) < 0) {
-			return probe;
-		}
+	if ((probe = ixj_probe_pci(&cnt)) < 0) {
+		return probe;
 	}
 	printk("%s\n", ixj_c_rcsid);
 	create_proc_read_entry ("ixj", 0, NULL, ixj_read_proc, NULL);

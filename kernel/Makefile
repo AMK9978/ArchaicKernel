@@ -1,24 +1,24 @@
 #
 # Makefile for the linux kernel.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definitions are now in the main makefile...
 
-O_TARGET := kernel.o
+obj-y     = sched.o fork.o exec_domain.o panic.o printk.o profile.o \
+	    exit.o itimer.o time.o softirq.o resource.o \
+	    sysctl.o capability.o ptrace.o timer.o user.o \
+	    signal.o sys.o kmod.o workqueue.o pid.o \
+	    rcupdate.o intermodule.o extable.o params.o posix-timers.o
 
-export-objs = signal.o sys.o kmod.o context.o ksyms.o pm.o exec_domain.o printk.o
-
-obj-y     = sched.o dma.o fork.o exec_domain.o panic.o printk.o \
-	    module.o exit.o itimer.o info.o time.o softirq.o resource.o \
-	    sysctl.o acct.o capability.o ptrace.o timer.o user.o \
-	    signal.o sys.o kmod.o context.o
-
+obj-$(CONFIG_FUTEX) += futex.o
+obj-$(CONFIG_GENERIC_ISA_DMA) += dma.o
+obj-$(CONFIG_SMP) += cpu.o
 obj-$(CONFIG_UID16) += uid16.o
-obj-$(CONFIG_MODULES) += ksyms.o
-obj-$(CONFIG_PM) += pm.o
+obj-$(CONFIG_MODULES) += module.o
+obj-$(CONFIG_KALLSYMS) += kallsyms.o
+obj-$(CONFIG_PM) += power/
+obj-$(CONFIG_BSD_PROCESS_ACCT) += acct.o
+obj-$(CONFIG_COMPAT) += compat.o
+obj-$(CONFIG_IKCONFIG) += configs.o
+obj-$(CONFIG_IKCONFIG_PROC) += configs.o
 
 ifneq ($(CONFIG_IA64),y)
 # According to Alan Modra <alan@linuxcare.com.au>, the -fno-omit-frame-pointer is
@@ -29,4 +29,32 @@ ifneq ($(CONFIG_IA64),y)
 CFLAGS_sched.o := $(PROFILING) -fno-omit-frame-pointer
 endif
 
-include $(TOPDIR)/Rules.make
+# configs.o uses generated files - dependecies must be listed explicitly
+$(obj)/configs.o: $(obj)/ikconfig.h
+
+ifdef CONFIG_IKCONFIG_PROC
+$(obj)/configs.o: $(obj)/config_data.h
+endif
+
+# ikconfig.h contains all the selected config entries - generated
+# from top-level Makefile and .config. Info from ikconfig.h can
+# be extracted from the kernel binary.
+
+quiet_cmd_ikconfig = IKCFG   $@
+      cmd_ikconfig = $(CONFIG_SHELL) $< .config $(srctree)/Makefile > $@
+
+targets += ikconfig.h
+$(obj)/ikconfig.h: scripts/mkconfigs .config Makefile FORCE
+	$(call if_changed,ikconfig)
+
+# config_data.h contains the same information as ikconfig.h but gzipped.
+# Info from config_data can be extracted from /proc/config*
+targets += config_data.gz
+$(obj)/config_data.gz: .config FORCE
+	$(call if_changed,gzip)
+
+quiet_cmd_ikconfiggz = IKCFG   $@
+      cmd_ikconfiggz = cat $< | scripts/bin2c kernel_config_data > $@
+targets += config_data.h
+$(obj)/config_data.h: $(obj)/config_data.gz FORCE
+	$(call if_changed,ikconfiggz)

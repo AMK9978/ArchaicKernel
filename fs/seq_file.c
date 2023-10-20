@@ -1,15 +1,17 @@
 /*
  * linux/fs/seq_file.c
  *
- * helper functions for making syntetic files from sequences of records.
+ * helper functions for making synthetic files from sequences of records.
  * initial implementation -- AV, Oct 2001.
  */
 
 #include <linux/fs.h>
+#include <linux/module.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 
 #include <asm/uaccess.h>
+#include <asm/page.h>
 
 /**
  *	seq_open -	initialize sequential file
@@ -36,13 +38,15 @@ int seq_open(struct file *file, struct seq_operations *op)
 	return 0;
 }
 
+EXPORT_SYMBOL(seq_open);
+
 /**
  *	seq_read -	->read() method for sequential files.
  *	@file, @buf, @size, @ppos: see file_operations method
  *
  *	Ready-made ->f_op->read()
  */
-ssize_t seq_read(struct file *file, char *buf, size_t size, loff_t *ppos)
+ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 {
 	struct seq_file *m = (struct seq_file *)file->private_data;
 	size_t copied = 0;
@@ -94,8 +98,10 @@ ssize_t seq_read(struct file *file, char *buf, size_t size, loff_t *ppos)
 		m->buf = kmalloc(m->size <<= 1, GFP_KERNEL);
 		if (!m->buf)
 			goto Enomem;
+		m->count = 0;
 	}
 	m->op->stop(m, p);
+	m->count = 0;
 	goto Done;
 Fill:
 	/* they want more? let's try to get some more */
@@ -140,6 +146,8 @@ Efault:
 	err = -EFAULT;
 	goto Done;
 }
+
+EXPORT_SYMBOL(seq_read);
 
 static int traverse(struct seq_file *m, loff_t offset)
 {
@@ -212,7 +220,7 @@ loff_t seq_lseek(struct file *file, loff_t offset, int origin)
 				while ((retval=traverse(m, offset)) == -EAGAIN)
 					;
 				if (retval) {
-					/* with extreme perjudice... */
+					/* with extreme prejudice... */
 					file->f_pos = 0;
 					m->index = 0;
 					m->count = 0;
@@ -224,6 +232,8 @@ loff_t seq_lseek(struct file *file, loff_t offset, int origin)
 	up(&m->sem);
 	return retval;
 }
+
+EXPORT_SYMBOL(seq_lseek);
 
 /**
  *	seq_release -	free the structures associated with sequential file.
@@ -241,13 +251,15 @@ int seq_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+EXPORT_SYMBOL(seq_release);
+
 /**
  *	seq_escape -	print string into buffer, escaping some characters
  *	@m:	target buffer
  *	@s:	string
  *	@esc:	set of characters that need escaping
  *
- *	Puts string into buffer, replacing each occurence of character from
+ *	Puts string into buffer, replacing each occurrence of character from
  *	@esc with usual octal escape.  Returns 0 in case of success, -1 - in
  *	case of overflow.
  */
@@ -276,6 +288,8 @@ int seq_escape(struct seq_file *m, const char *s, const char *esc)
         return 0;
 }
 
+EXPORT_SYMBOL(seq_escape);
+
 int seq_printf(struct seq_file *m, const char *f, ...)
 {
 	va_list args;
@@ -293,3 +307,96 @@ int seq_printf(struct seq_file *m, const char *f, ...)
 	m->count = m->size;
 	return -1;
 }
+
+EXPORT_SYMBOL(seq_printf);
+
+int seq_path(struct seq_file *m,
+	     struct vfsmount *mnt, struct dentry *dentry,
+	     char *esc)
+{
+	if (m->count < m->size) {
+		char *s = m->buf + m->count;
+		char *p = d_path(dentry, mnt, s, m->size - m->count);
+		if (!IS_ERR(p)) {
+			while (s <= p) {
+				char c = *p++;
+				if (!c) {
+					p = m->buf + m->count;
+					m->count = s - m->buf;
+					return s - p;
+				} else if (!strchr(esc, c)) {
+					*s++ = c;
+				} else if (s + 4 > p) {
+					break;
+				} else {
+					*s++ = '\\';
+					*s++ = '0' + ((c & 0300) >> 6);
+					*s++ = '0' + ((c & 070) >> 3);
+					*s++ = '0' + (c & 07);
+				}
+			}
+		}
+	}
+	m->count = m->size;
+	return -1;
+}
+
+EXPORT_SYMBOL(seq_path);
+
+static void *single_start(struct seq_file *p, loff_t *pos)
+{
+	return NULL + (*pos == 0);
+}
+
+static void *single_next(struct seq_file *p, void *v, loff_t *pos)
+{
+	++*pos;
+	return NULL;
+}
+
+static void single_stop(struct seq_file *p, void *v)
+{
+}
+
+int single_open(struct file *file, int (*show)(struct seq_file *, void *),
+		void *data)
+{
+	struct seq_operations *op = kmalloc(sizeof(*op), GFP_KERNEL);
+	int res = -ENOMEM;
+
+	if (op) {
+		op->start = single_start;
+		op->next = single_next;
+		op->stop = single_stop;
+		op->show = show;
+		res = seq_open(file, op);
+		if (!res)
+			((struct seq_file *)file->private_data)->private = data;
+		else
+			kfree(op);
+	}
+	return res;
+}
+
+EXPORT_SYMBOL(single_open);
+
+int single_release(struct inode *inode, struct file *file)
+{
+	struct seq_operations *op = ((struct seq_file *)file->private_data)->op;
+	int res = seq_release(inode, file);
+	kfree(op);
+	return res;
+}
+
+EXPORT_SYMBOL(single_release);
+
+int seq_release_private(struct inode *inode, struct file *file)
+{
+	struct seq_file *seq = file->private_data;
+
+	kfree(seq->private);
+	seq->private = NULL;
+	return seq_release(inode, file);
+}
+
+EXPORT_SYMBOL(seq_release_private);

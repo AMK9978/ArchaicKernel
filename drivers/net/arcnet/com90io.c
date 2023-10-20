@@ -47,7 +47,6 @@ static void com90io_command(struct net_device *dev, int command);
 static int com90io_status(struct net_device *dev);
 static void com90io_setmask(struct net_device *dev, int mask);
 static int com90io_reset(struct net_device *dev, int really_reset);
-static void com90io_openclose(struct net_device *dev, bool open);
 static void com90io_copy_to_card(struct net_device *dev, int bufnum, int offset,
 				 void *buf, int count);
 static void com90io_copy_from_card(struct net_device *dev, int bufnum, int offset,
@@ -151,10 +150,6 @@ static int __init com90io_probe(struct net_device *dev)
 	int ioaddr = dev->base_addr, status;
 	unsigned long airqmask;
 
-#ifndef MODULE
-	arcnet_init();
-#endif
-
 	BUGLVL(D_NORMAL) printk(VERSION);
 	BUGLVL(D_NORMAL) printk("E-mail me if you actually test this driver, please!\n");
 
@@ -163,14 +158,14 @@ static int __init com90io_probe(struct net_device *dev)
 		       "must specify the base address!\n");
 		return -ENODEV;
 	}
-	if (check_region(ioaddr, ARCNET_TOTAL_SIZE)) {
+	if (!request_region(ioaddr, ARCNET_TOTAL_SIZE, "com90io probe")) {
 		BUGMSG(D_INIT_REASONS, "IO check_region %x-%x failed.\n",
 		       ioaddr, ioaddr + ARCNET_TOTAL_SIZE - 1);
 		return -ENXIO;
 	}
 	if (ASTATUS() == 0xFF) {
 		BUGMSG(D_INIT_REASONS, "IO address %x empty\n", ioaddr);
-		return -ENODEV;
+		goto err_out;
 	}
 	inb(_RESET);
 	mdelay(RESETtime);
@@ -179,7 +174,7 @@ static int __init com90io_probe(struct net_device *dev)
 
 	if ((status & 0x9D) != (NORXflag | RECONflag | TXFREEflag | RESETflag)) {
 		BUGMSG(D_INIT_REASONS, "Status invalid (%Xh).\n", status);
-		return -ENODEV;
+		goto err_out;
 	}
 	BUGMSG(D_INIT_REASONS, "Status after reset: %X\n", status);
 
@@ -191,7 +186,7 @@ static int __init com90io_probe(struct net_device *dev)
 
 	if (status & RESETflag) {
 		BUGMSG(D_INIT_REASONS, "Eternal reset (status=%Xh)\n", status);
-		return -ENODEV;
+		goto err_out;
 	}
 	outb((0x16 | IOMAPflag) & ~ENABLE16flag, _CONFIG);
 
@@ -203,7 +198,7 @@ static int __init com90io_probe(struct net_device *dev)
 	if ((status = inb(_MEMDATA)) != 0xd1) {
 		BUGMSG(D_INIT_REASONS, "Signature byte not found"
 		       " (%Xh instead).\n", status);
-		return -ENODEV;
+		goto err_out;
 	}
 	if (!dev->irq) {
 		/*
@@ -220,10 +215,15 @@ static int __init com90io_probe(struct net_device *dev)
 
 		if (dev->irq <= 0) {
 			BUGMSG(D_INIT_REASONS, "Autoprobe IRQ failed\n");
-			return -ENODEV;
+			goto err_out;
 		}
 	}
+	release_region(ioaddr, ARCNET_TOTAL_SIZE); /* end of probing */
 	return com90io_found(dev);
+
+err_out:
+	release_region(ioaddr, ARCNET_TOTAL_SIZE);
+	return -ENODEV;
 }
 
 
@@ -241,7 +241,10 @@ static int __init com90io_found(struct net_device *dev)
 		return -ENODEV;
 	}
 	/* Reserve the I/O region - guaranteed to work by check_region */
-	request_region(dev->base_addr, ARCNET_TOTAL_SIZE, "arcnet (COM90xx-IO)");
+	if (!request_region(dev->base_addr, ARCNET_TOTAL_SIZE, "arcnet (COM90xx-IO)")) {
+		free_irq(dev->irq, dev);
+		return -EBUSY;
+	}
 
 	/* Initialize the rest of the device structure. */
 	dev->priv = kmalloc(sizeof(struct arcnet_local), GFP_KERNEL);
@@ -258,7 +261,7 @@ static int __init com90io_found(struct net_device *dev)
 	lp->hw.status = com90io_status;
 	lp->hw.intmask = com90io_setmask;
 	lp->hw.reset = com90io_reset;
-	lp->hw.open_close = com90io_openclose;
+	lp->hw.owner = THIS_MODULE;
 	lp->hw.copy_to_card = com90io_copy_to_card;
 	lp->hw.copy_from_card = com90io_copy_from_card;
 
@@ -345,14 +348,6 @@ static void com90io_setmask(struct net_device *dev, int mask)
 	AINTMASK(mask);
 }
 
-static void com90io_openclose(struct net_device *dev, int open)
-{
-	if (open)
-		MOD_INC_USE_COUNT;
-	else
-		MOD_DEC_USE_COUNT;
-}
-
 static void com90io_copy_to_card(struct net_device *dev, int bufnum, int offset,
 				 void *buf, int count)
 {
@@ -380,6 +375,7 @@ static char *device;		/* use eg. device=arc1 to change name */
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
 MODULE_PARM(device, "s");
+MODULE_LICENSE("GPL");
 
 int init_module(void)
 {
@@ -415,7 +411,7 @@ void cleanup_module(void)
 	free_irq(dev->irq, dev);
 	release_region(dev->base_addr, ARCNET_TOTAL_SIZE);
 	kfree(dev->priv);
-	kfree(dev);
+	free_netdev(dev);
 }
 
 #else

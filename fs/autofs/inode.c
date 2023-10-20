@@ -11,12 +11,12 @@
  * ------------------------------------------------------------------------- */
 
 #include <linux/kernel.h>
+#include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/file.h>
-#include <linux/locks.h>
+#include <linux/parser.h>
 #include <asm/bitops.h>
 #include "autofs_i.h"
-#define __NO_VERSION__
 #include <linux/module.h>
 
 static void autofs_put_super(struct super_block *sb)
@@ -33,85 +33,93 @@ static void autofs_put_super(struct super_block *sb)
 			kfree(sbi->symlink[n].data);
 	}
 
-	kfree(sb->u.generic_sbp);
+	kfree(sb->s_fs_info);
 
 	DPRINTK(("autofs: shutting down\n"));
 }
 
-static int autofs_statfs(struct super_block *sb, struct statfs *buf);
 static void autofs_read_inode(struct inode *inode);
 
 static struct super_operations autofs_sops = {
-	read_inode:	autofs_read_inode,
-	put_super:	autofs_put_super,
-	statfs:		autofs_statfs,
+	.read_inode	= autofs_read_inode,
+	.put_super	= autofs_put_super,
+	.statfs		= simple_statfs,
+};
+
+enum {Opt_err, Opt_fd, Opt_uid, Opt_gid, Opt_pgrp, Opt_minproto, Opt_maxproto};
+
+static match_table_t autofs_tokens = {
+	{Opt_fd, "fd=%u"},
+	{Opt_uid, "uid=%u"},
+	{Opt_gid, "gid=%u"},
+	{Opt_pgrp, "pgrp=%u"},
+	{Opt_minproto, "minproto=%u"},
+	{Opt_maxproto, "maxproto=%u"},
+	{Opt_err, NULL}
 };
 
 static int parse_options(char *options, int *pipefd, uid_t *uid, gid_t *gid, pid_t *pgrp, int *minproto, int *maxproto)
 {
-	char *this_char, *value;
-	
+	char *p;
+	substring_t args[MAX_OPT_ARGS];
+	int option;
+
 	*uid = current->uid;
 	*gid = current->gid;
-	*pgrp = current->pgrp;
+	*pgrp = process_group(current);
 
 	*minproto = *maxproto = AUTOFS_PROTO_VERSION;
 
 	*pipefd = -1;
 
-	if ( !options ) return 1;
-	for (this_char = strtok(options,","); this_char; this_char = strtok(NULL,",")) {
-		if ((value = strchr(this_char,'=')) != NULL)
-			*value++ = 0;
-		if (!strcmp(this_char,"fd")) {
-			if (!value || !*value)
+	if (!options)
+		return 1;
+
+	while ((p = strsep(&options, ",")) != NULL) {
+		int token;
+		if (!*p)
+			continue;
+
+		token = match_token(p, autofs_tokens, args);
+		switch (token) {
+		case Opt_fd:
+			if (match_int(&args[0], &option))
 				return 1;
-			*pipefd = simple_strtoul(value,&value,0);
-			if (*value)
+			*pipefd = option;
+			break;
+		case Opt_uid:
+			if (match_int(&args[0], &option))
 				return 1;
+			*uid = option;
+			break;
+		case Opt_gid:
+			if (match_int(&args[0], &option))
+				return 1;
+			*gid = option;
+			break;
+		case Opt_pgrp:
+			if (match_int(&args[0], &option))
+				return 1;
+			*pgrp = option;
+			break;
+		case Opt_minproto:
+			if (match_int(&args[0], &option))
+				return 1;
+			*minproto = option;
+			break;
+		case Opt_maxproto:
+			if (match_int(&args[0], &option))
+				return 1;
+			*maxproto = option;
+			break;
+		default:
+			return 1;
 		}
-		else if (!strcmp(this_char,"uid")) {
-			if (!value || !*value)
-				return 1;
-			*uid = simple_strtoul(value,&value,0);
-			if (*value)
-				return 1;
-		}
-		else if (!strcmp(this_char,"gid")) {
-			if (!value || !*value)
-				return 1;
-			*gid = simple_strtoul(value,&value,0);
-			if (*value)
-				return 1;
-		}
-		else if (!strcmp(this_char,"pgrp")) {
-			if (!value || !*value)
-				return 1;
-			*pgrp = simple_strtoul(value,&value,0);
-			if (*value)
-				return 1;
-		}
-		else if (!strcmp(this_char,"minproto")) {
-			if (!value || !*value)
-				return 1;
-			*minproto = simple_strtoul(value,&value,0);
-			if (*value)
-				return 1;
-		}
-		else if (!strcmp(this_char,"maxproto")) {
-			if (!value || !*value)
-				return 1;
-			*maxproto = simple_strtoul(value,&value,0);
-			if (*value)
-				return 1;
-		}
-		else break;
 	}
 	return (*pipefd < 0);
 }
 
-struct super_block *autofs_read_super(struct super_block *s, void *data,
-				      int silent)
+int autofs_fill_super(struct super_block *s, void *data, int silent)
 {
 	struct inode * root_inode;
 	struct dentry * root;
@@ -120,16 +128,17 @@ struct super_block *autofs_read_super(struct super_block *s, void *data,
 	struct autofs_sb_info *sbi;
 	int minproto, maxproto;
 
-	sbi = (struct autofs_sb_info *) kmalloc(sizeof(struct autofs_sb_info), GFP_KERNEL);
+	sbi = kmalloc(sizeof(*sbi), GFP_KERNEL);
 	if ( !sbi )
 		goto fail_unlock;
+	memset(sbi, 0, sizeof(*sbi));
 	DPRINTK(("autofs: starting up, sbi = %p\n",sbi));
 
-	s->u.generic_sbp = sbi;
+	s->s_fs_info = sbi;
 	sbi->magic = AUTOFS_SBI_MAGIC;
 	sbi->catatonic = 0;
 	sbi->exp_timeout = 0;
-	sbi->oz_pgrp = current->pgrp;
+	sbi->oz_pgrp = process_group(current);
 	autofs_initialize_hash(&sbi->dirhash);
 	sbi->queues = NULL;
 	memset(sbi->symlink_bitmap, 0, sizeof(long)*AUTOFS_SYMLINK_BITMAP_LEN);
@@ -174,7 +183,7 @@ struct super_block *autofs_read_super(struct super_block *s, void *data,
 	 * Success! Install the root dentry now to indicate completion.
 	 */
 	s->s_root = root;
-	return s;
+	return 0;
 
 fail_fput:
 	printk("autofs: pipe file descriptor does not contain proper ops\n");
@@ -188,15 +197,7 @@ fail_iput:
 fail_free:
 	kfree(sbi);
 fail_unlock:
-	return NULL;
-}
-
-static int autofs_statfs(struct super_block *sb, struct statfs *buf)
-{
-	buf->f_type = AUTOFS_SUPER_MAGIC;
-	buf->f_bsize = 1024;
-	buf->f_namelen = NAME_MAX;
-	return 0;
+	return -EINVAL;
 }
 
 static void autofs_read_inode(struct inode *inode)
@@ -207,8 +208,8 @@ static void autofs_read_inode(struct inode *inode)
 
 	/* Initialize to the default case (stub directory) */
 
-	inode->i_op = &autofs_dir_inode_operations;
-	inode->i_fop = &autofs_dir_operations;
+	inode->i_op = &simple_dir_inode_operations;
+	inode->i_fop = &simple_dir_operations;
 	inode->i_mode = S_IFDIR | S_IRUGO | S_IXUGO;
 	inode->i_nlink = 2;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
@@ -240,7 +241,8 @@ static void autofs_read_inode(struct inode *inode)
 		sl = &sbi->symlink[n];
 		inode->u.generic_ip = sl;
 		inode->i_mode = S_IFLNK | S_IRWXUGO;
-		inode->i_mtime = inode->i_ctime = sl->mtime;
+		inode->i_mtime.tv_sec = inode->i_ctime.tv_sec = sl->mtime;
+		inode->i_mtime.tv_nsec = inode->i_ctime.tv_nsec = 0;
 		inode->i_size = sl->len;
 		inode->i_nlink = 1;
 	}

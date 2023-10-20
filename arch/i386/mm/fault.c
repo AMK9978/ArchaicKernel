@@ -19,122 +19,185 @@
 #include <linux/init.h>
 #include <linux/tty.h>
 #include <linux/vt_kern.h>		/* For unblank_screen() */
+#include <linux/highmem.h>
+#include <linux/module.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/pgalloc.h>
 #include <asm/hardirq.h>
+#include <asm/desc.h>
 
 extern void die(const char *,struct pt_regs *,long);
 
-extern int console_loglevel;
-
-/*
- * Ugly, ugly, but the goto's result in better assembly..
- */
-int __verify_write(const void * addr, unsigned long size)
-{
-	struct vm_area_struct * vma;
-	unsigned long start = (unsigned long) addr;
-
-	if (!size)
-		return 1;
-
-	vma = find_vma(current->mm, start);
-	if (!vma)
-		goto bad_area;
-	if (vma->vm_start > start)
-		goto check_stack;
-
-good_area:
-	if (!(vma->vm_flags & VM_WRITE))
-		goto bad_area;
-	size--;
-	size += start & ~PAGE_MASK;
-	size >>= PAGE_SHIFT;
-	start &= PAGE_MASK;
-
-	for (;;) {
-	survive:
-		{
-			int fault = handle_mm_fault(current->mm, vma, start, 1);
-			if (!fault)
-				goto bad_area;
-			if (fault < 0)
-				goto out_of_memory;
-		}
-		if (!size)
-			break;
-		size--;
-		start += PAGE_SIZE;
-		if (start < vma->vm_end)
-			continue;
-		vma = vma->vm_next;
-		if (!vma || vma->vm_start != start)
-			goto bad_area;
-		if (!(vma->vm_flags & VM_WRITE))
-			goto bad_area;;
-	}
-	return 1;
-
-check_stack:
-	if (!(vma->vm_flags & VM_GROWSDOWN))
-		goto bad_area;
-	if (expand_stack(vma, start) == 0)
-		goto good_area;
-
-bad_area:
-	return 0;
-
-out_of_memory:
-	if (current->pid == 1) {
-		current->policy |= SCHED_YIELD;
-		schedule();
-		goto survive;
-	}
-	goto bad_area;
-}
-
-extern spinlock_t timerlist_lock;
-
 /*
  * Unlock any spinlocks which will prevent us from getting the
- * message out (timerlist_lock is acquired through the
- * console unblank code)
+ * message out 
  */
 void bust_spinlocks(int yes)
 {
-	spin_lock_init(&timerlist_lock);
+	int loglevel_save = console_loglevel;
+
 	if (yes) {
 		oops_in_progress = 1;
-#ifdef CONFIG_SMP
-		global_irq_lock = 0;	/* Many serial drivers do __global_cli() */
-#endif
-	} else {
-		int loglevel_save = console_loglevel;
-#ifdef CONFIG_VT
-		unblank_screen();
-#endif
-		oops_in_progress = 0;
-		/*
-		 * OK, the message is on the console.  Now we call printk()
-		 * without oops_in_progress set so that printk will give klogd
-		 * a poke.  Hold onto your hats...
-		 */
-		console_loglevel = 15;		/* NMI oopser may have shut the console up */
-		printk(" ");
-		console_loglevel = loglevel_save;
+		return;
 	}
+#ifdef CONFIG_VT
+	unblank_screen();
+#endif
+	oops_in_progress = 0;
+	/*
+	 * OK, the message is on the console.  Now we call printk()
+	 * without oops_in_progress set so that printk will give klogd
+	 * a poke.  Hold onto your hats...
+	 */
+	console_loglevel = 15;		/* NMI oopser may have shut the console up */
+	printk(" ");
+	console_loglevel = loglevel_save;
 }
 
-void do_BUG(const char *file, int line)
+/*
+ * Return EIP plus the CS segment base.  The segment limit is also
+ * adjusted, clamped to the kernel/user address space (whichever is
+ * appropriate), and returned in *eip_limit.
+ *
+ * The segment is checked, because it might have been changed by another
+ * task between the original faulting instruction and here.
+ *
+ * If CS is no longer a valid code segment, or if EIP is beyond the
+ * limit, or if it is a kernel address when CS is not a kernel segment,
+ * then the returned value will be greater than *eip_limit.
+ * 
+ * This is slow, but is very rarely executed.
+ */
+static inline unsigned long get_segment_eip(struct pt_regs *regs,
+					    unsigned long *eip_limit)
 {
-	bust_spinlocks(1);
-	printk("kernel BUG at %s:%d!\n", file, line);
+	unsigned long eip = regs->eip;
+	unsigned seg = regs->xcs & 0xffff;
+	u32 seg_ar, seg_limit, base, *desc;
+
+	/* The standard kernel/user address space limit. */
+	*eip_limit = (seg & 3) ? USER_DS.seg : KERNEL_DS.seg;
+
+	/* Unlikely, but must come before segment checks. */
+	if (unlikely((regs->eflags & VM_MASK) != 0))
+		return eip + (seg << 4);
+	
+	/* By far the most common cases. */
+	if (likely(seg == __USER_CS || seg == __KERNEL_CS))
+		return eip;
+
+	/* Check the segment exists, is within the current LDT/GDT size,
+	   that kernel/user (ring 0..3) has the appropriate privilege,
+	   that it's a code segment, and get the limit. */
+	__asm__ ("larl %3,%0; lsll %3,%1"
+		 : "=&r" (seg_ar), "=r" (seg_limit) : "0" (0), "rm" (seg));
+	if ((~seg_ar & 0x9800) || eip > seg_limit) {
+		*eip_limit = 0;
+		return 1;	 /* So that returned eip > *eip_limit. */
+	}
+
+	/* Get the GDT/LDT descriptor base. 
+	   When you look for races in this code remember that
+	   LDT and other horrors are only used in user space. */
+	if (seg & (1<<2)) {
+		/* Must lock the LDT while reading it. */
+		down(&current->mm->context.sem);
+		desc = current->mm->context.ldt;
+		desc = (void *)desc + (seg & ~7);
+	} else {
+		/* Must disable preemption while reading the GDT. */
+		desc = (u32 *)&cpu_gdt_table[get_cpu()];
+		desc = (void *)desc + (seg & ~7);
+	}
+
+	/* Decode the code segment base from the descriptor */
+	base =   (desc[0] >> 16) |
+		((desc[1] & 0xff) << 16) |
+		 (desc[1] & 0xff000000);
+
+	if (seg & (1<<2)) { 
+		up(&current->mm->context.sem);
+	} else
+		put_cpu();
+
+	/* Adjust EIP and segment limit, and clamp at the kernel limit.
+	   It's legitimate for segments to wrap at 0xffffffff. */
+	seg_limit += base;
+	if (seg_limit < *eip_limit && seg_limit >= base)
+		*eip_limit = seg_limit;
+	return eip + base;
 }
+
+/* 
+ * Sometimes AMD Athlon/Opteron CPUs report invalid exceptions on prefetch.
+ * Check that here and ignore it.
+ */
+static int __is_prefetch(struct pt_regs *regs, unsigned long addr)
+{ 
+	unsigned long limit;
+	unsigned long instr = get_segment_eip (regs, &limit);
+	int scan_more = 1;
+	int prefetch = 0; 
+	int i;
+
+	for (i = 0; scan_more && i < 15; i++) { 
+		unsigned char opcode;
+		unsigned char instr_hi;
+		unsigned char instr_lo;
+
+		if (instr > limit)
+			break;
+		if (__get_user(opcode, (unsigned char *) instr))
+			break; 
+
+		instr_hi = opcode & 0xf0; 
+		instr_lo = opcode & 0x0f; 
+		instr++;
+
+		switch (instr_hi) { 
+		case 0x20:
+		case 0x30:
+			/* Values 0x26,0x2E,0x36,0x3E are valid x86 prefixes. */
+			scan_more = ((instr_lo & 7) == 0x6);
+			break;
+			
+		case 0x60:
+			/* 0x64 thru 0x67 are valid prefixes in all modes. */
+			scan_more = (instr_lo & 0xC) == 0x4;
+			break;		
+		case 0xF0:
+			/* 0xF0, 0xF2, and 0xF3 are valid prefixes */
+			scan_more = !instr_lo || (instr_lo>>1) == 1;
+			break;			
+		case 0x00:
+			/* Prefetch instruction is 0x0F0D or 0x0F18 */
+			scan_more = 0;
+			if (instr > limit)
+				break;
+			if (__get_user(opcode, (unsigned char *) instr)) 
+				break;
+			prefetch = (instr_lo == 0xF) &&
+				(opcode == 0x0D || opcode == 0x18);
+			break;			
+		default:
+			scan_more = 0;
+			break;
+		} 
+	}
+	return prefetch;
+}
+
+static inline int is_prefetch(struct pt_regs *regs, unsigned long addr)
+{
+	if (unlikely(boot_cpu_data.x86_vendor == X86_VENDOR_AMD &&
+		     boot_cpu_data.x86 >= 6))
+		return __is_prefetch(regs, addr);
+	return 0;
+} 
 
 asmlinkage void do_invalid_op(struct pt_regs *, unsigned long);
-extern unsigned long idt;
 
 /*
  * This routine handles page faults.  It determines the address,
@@ -153,7 +216,6 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
 	struct vm_area_struct * vma;
 	unsigned long address;
 	unsigned long page;
-	unsigned long fixup;
 	int write;
 	siginfo_t info;
 
@@ -161,10 +223,12 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
 	__asm__("movl %%cr2,%0":"=r" (address));
 
 	/* It's safe to allow irq's after cr2 has been saved */
-	if (regs->eflags & X86_EFLAGS_IF)
+	if (regs->eflags & (X86_EFLAGS_IF|VM_MASK))
 		local_irq_enable();
 
 	tsk = current;
+
+	info.si_code = SEGV_MAPERR;
 
 	/*
 	 * We fault-in kernel-space virtual memory on-demand. The
@@ -179,18 +243,24 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
 	 * (error_code & 4) == 0, and that the fault was not a
 	 * protection error (error_code & 1) == 0.
 	 */
-	if (address >= TASK_SIZE && !(error_code & 5))
-		goto vmalloc_fault;
+	if (unlikely(address >= TASK_SIZE)) { 
+		if (!(error_code & 5))
+			goto vmalloc_fault;
+		/* 
+		 * Don't take the mm semaphore here. If we fixup a prefetch
+		 * fault we could otherwise deadlock.
+		 */
+		goto bad_area_nosemaphore;
+	} 
 
 	mm = tsk->mm;
-	info.si_code = SEGV_MAPERR;
 
 	/*
-	 * If we're in an interrupt or have no user
-	 * context, we must not take the fault..
+	 * If we're in an interrupt, have no user context or are running in an
+	 * atomic region then we must not take the fault..
 	 */
-	if (in_interrupt() || !mm)
-		goto no_context;
+	if (in_atomic() || !mm)
+		goto bad_area_nosemaphore;
 
 	down_read(&mm->mmap_sem);
 
@@ -246,16 +316,18 @@ good_area:
 	 * the fault.
 	 */
 	switch (handle_mm_fault(mm, vma, address, write)) {
-	case 1:
-		tsk->min_flt++;
-		break;
-	case 2:
-		tsk->maj_flt++;
-		break;
-	case 0:
-		goto do_sigbus;
-	default:
-		goto out_of_memory;
+		case VM_FAULT_MINOR:
+			tsk->min_flt++;
+			break;
+		case VM_FAULT_MAJOR:
+			tsk->maj_flt++;
+			break;
+		case VM_FAULT_SIGBUS:
+			goto do_sigbus;
+		case VM_FAULT_OOM:
+			goto out_of_memory;
+		default:
+			BUG();
 	}
 
 	/*
@@ -276,10 +348,19 @@ good_area:
 bad_area:
 	up_read(&mm->mmap_sem);
 
+bad_area_nosemaphore:
 	/* User mode accesses just cause a SIGSEGV */
 	if (error_code & 4) {
+		/* 
+		 * Valid to do another page fault here because this one came 
+		 * from user space.
+		 */
+		if (is_prefetch(regs, address))
+			return;
+
 		tsk->thread.cr2 = address;
-		tsk->thread.error_code = error_code;
+		/* Kernel addresses are always protection faults */
+		tsk->thread.error_code = error_code | (address >= TASK_SIZE);
 		tsk->thread.trap_no = 14;
 		info.si_signo = SIGSEGV;
 		info.si_errno = 0;
@@ -289,26 +370,34 @@ bad_area:
 		return;
 	}
 
+#ifdef CONFIG_X86_F00F_BUG
 	/*
 	 * Pentium F0 0F C7 C8 bug workaround.
 	 */
 	if (boot_cpu_data.f00f_bug) {
 		unsigned long nr;
 		
-		nr = (address - idt) >> 3;
+		nr = (address - idt_descr.address) >> 3;
 
 		if (nr == 6) {
 			do_invalid_op(regs, 0);
 			return;
 		}
 	}
+#endif
 
 no_context:
 	/* Are we prepared to handle this kernel fault?  */
-	if ((fixup = search_exception_table(regs->eip)) != 0) {
-		regs->eip = fixup;
+	if (fixup_exception(regs))
 		return;
-	}
+
+	/* 
+	 * Valid to do another page fault here, because if this fault
+	 * had been triggered by is_prefetch fixup_exception would have 
+	 * handled it.
+	 */
+ 	if (is_prefetch(regs, address))
+ 		return;
 
 /*
  * Oops. The kernel tried to access some bad page. We'll have to
@@ -327,12 +416,20 @@ no_context:
 	asm("movl %%cr3,%0":"=r" (page));
 	page = ((unsigned long *) __va(page))[address >> 22];
 	printk(KERN_ALERT "*pde = %08lx\n", page);
+	/*
+	 * We must not directly access the pte in the highpte
+	 * case, the page table might be allocated in highmem.
+	 * And lets rather not kmap-atomic the pte, just in case
+	 * it's allocated already.
+	 */
+#ifndef CONFIG_HIGHPTE
 	if (page & 1) {
 		page &= PAGE_MASK;
 		address &= 0x003ff000;
 		page = ((unsigned long *) __va(page))[address >> PAGE_SHIFT];
 		printk(KERN_ALERT "*pte = %08lx\n", page);
 	}
+#endif
 	die("Oops", regs, error_code);
 	bust_spinlocks(0);
 	do_exit(SIGKILL);
@@ -344,8 +441,7 @@ no_context:
 out_of_memory:
 	up_read(&mm->mmap_sem);
 	if (tsk->pid == 1) {
-		tsk->policy |= SCHED_YIELD;
-		schedule();
+		yield();
 		down_read(&mm->mmap_sem);
 		goto survive;
 	}
@@ -357,10 +453,14 @@ out_of_memory:
 do_sigbus:
 	up_read(&mm->mmap_sem);
 
-	/*
-	 * Send a sigbus, regardless of whether we were in kernel
-	 * or user mode.
-	 */
+	/* Kernel mode? Handle exceptions or die */
+	if (!(error_code & 4))
+		goto no_context;
+
+	/* User space => ok to do another page fault */
+	if (is_prefetch(regs, address))
+		return;
+
 	tsk->thread.cr2 = address;
 	tsk->thread.error_code = error_code;
 	tsk->thread.trap_no = 14;
@@ -369,10 +469,6 @@ do_sigbus:
 	info.si_code = BUS_ADRERR;
 	info.si_addr = (void *)address;
 	force_sig_info(SIGBUS, &info, tsk);
-
-	/* Kernel mode? Handle exceptions or die */
-	if (!(error_code & 4))
-		goto no_context;
 	return;
 
 vmalloc_fault:
@@ -384,26 +480,30 @@ vmalloc_fault:
 		 * Do _not_ use "tsk" here. We might be inside
 		 * an interrupt in the middle of a task switch..
 		 */
-		int offset = __pgd_offset(address);
+		int index = pgd_index(address);
 		pgd_t *pgd, *pgd_k;
 		pmd_t *pmd, *pmd_k;
 		pte_t *pte_k;
 
 		asm("movl %%cr3,%0":"=r" (pgd));
-		pgd = offset + (pgd_t *)__va(pgd);
-		pgd_k = init_mm.pgd + offset;
+		pgd = index + (pgd_t *)__va(pgd);
+		pgd_k = init_mm.pgd + index;
 
 		if (!pgd_present(*pgd_k))
 			goto no_context;
-		set_pgd(pgd, *pgd_k);
-		
+
+		/*
+		 * set_pgd(pgd, *pgd_k); here would be useless on PAE
+		 * and redundant with the set_pmd() on non-PAE.
+		 */
+
 		pmd = pmd_offset(pgd, address);
 		pmd_k = pmd_offset(pgd_k, address);
 		if (!pmd_present(*pmd_k))
 			goto no_context;
 		set_pmd(pmd, *pmd_k);
 
-		pte_k = pte_offset(pmd_k, address);
+		pte_k = pte_offset_kernel(pmd_k, address);
 		if (!pte_present(*pte_k))
 			goto no_context;
 		return;

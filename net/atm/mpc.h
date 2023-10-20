@@ -1,6 +1,7 @@
 #ifndef _MPC_H_
 #define _MPC_H_
 
+#include <linux/types.h>
 #include <linux/atm.h>
 #include <linux/atmmpc.h>
 #include <linux/skbuff.h>
@@ -44,22 +45,12 @@ struct atm_mpoa_qos {
 };
 
 
-/* Functions to call during ioctl(ATMMPC, ) */
-struct atm_mpoa_ops {
-        int (*mpoad_attach)(struct atm_vcc *vcc, int arg);  /* attach mpoa daemon  */
-        int (*vcc_attach)(struct atm_vcc *vcc, long arg);   /* attach shortcut vcc */
-};
-
-/* Boot/module initialization function */
-void atm_mpoa_init(void);
-void atm_mpoa_init_ops(struct atm_mpoa_ops *ops);
-
 /* MPOA QoS operations */
 struct atm_mpoa_qos *atm_mpoa_add_qos(uint32_t dst_ip, struct atm_qos *qos);
 struct atm_mpoa_qos *atm_mpoa_search_qos(uint32_t dst_ip);
 int atm_mpoa_delete_qos(struct atm_mpoa_qos *qos);
 
 /* Display QoS entries. This is for the procfs */
-void atm_mpoa_disp_qos(char *page, int *len);
+void atm_mpoa_disp_qos(char *page, ssize_t *len);
 
 #endif /* _MPC_H_ */

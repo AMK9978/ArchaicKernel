@@ -18,8 +18,9 @@
 // r5_hash
 //
 
+#include <linux/kernel.h>
 #include <asm/types.h>
-
+#include <asm/bug.h>
 
 
 #define DELTA 0x9E3779B9
@@ -57,7 +58,6 @@ u32 keyed_hash(const signed char *msg, int len)
 	u32 pad;
 	int i;
  
-
 	//	assert(len >= 0 && len < 256);
 
 	pad = (u32)len | ((u32)len << 8);
@@ -90,10 +90,6 @@ u32 keyed_hash(const signed char *msg, int len)
 
 	if (len >= 12)
 	{
-	    	//assert(len < 16);
-		if (len >= 16)
-		    *(int *)0 = 0;
-
 		a = (u32)msg[ 0]      |
 		    (u32)msg[ 1] << 8 |
 		    (u32)msg[ 2] << 16|
@@ -116,9 +112,6 @@ u32 keyed_hash(const signed char *msg, int len)
 	}
 	else if (len >= 8)
 	{
-	    	//assert(len < 12);
-		if (len >= 12)
-		    *(int *)0 = 0;
 		a = (u32)msg[ 0]      |
 		    (u32)msg[ 1] << 8 |
 		    (u32)msg[ 2] << 16|
@@ -137,9 +130,6 @@ u32 keyed_hash(const signed char *msg, int len)
 	}
 	else if (len >= 4)
 	{
-	    	//assert(len < 8);
-		if (len >= 8)
-		    *(int *)0 = 0;
 		a = (u32)msg[ 0]      |
 		    (u32)msg[ 1] << 8 |
 		    (u32)msg[ 2] << 16|
@@ -154,9 +144,6 @@ u32 keyed_hash(const signed char *msg, int len)
 	}
 	else
 	{
-	    	//assert(len < 4);
-		if (len >= 4)
-		    *(int *)0 = 0;
 		a = b = c = d = pad;
 		for(i = 0; i < len; i++)
 		{

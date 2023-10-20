@@ -5,7 +5,7 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: br_if.c,v 1.5 2000/11/08 05:16:40 davem Exp $
+ *	$Id: br_if.c,v 1.7 2001/12/24 00:59:55 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -17,11 +17,12 @@
 #include <linux/if_arp.h>
 #include <linux/if_bridge.h>
 #include <linux/inetdevice.h>
+#include <linux/module.h>
+#include <linux/init.h>
 #include <linux/rtnetlink.h>
+#include <net/sock.h>
 #include <asm/uaccess.h>
 #include "br_private.h"
-
-static struct net_bridge *bridge_list;
 
 static int br_initial_port_cost(struct net_device *dev)
 {
@@ -37,85 +38,78 @@ static int br_initial_port_cost(struct net_device *dev)
 	return 100;
 }
 
-/* called under bridge lock */
-static int __br_del_if(struct net_bridge *br, struct net_device *dev)
+static void destroy_nbp(void *arg)
 {
-	struct net_bridge_port *p;
-	struct net_bridge_port **pptr;
+	struct net_bridge_port *p = arg;
 
-	if ((p = dev->br_port) == NULL)
-		return -EINVAL;
+	p->dev->br_port = NULL;
+
+	BUG_ON(timer_pending(&p->message_age_timer));
+	BUG_ON(timer_pending(&p->forward_delay_timer));
+	BUG_ON(timer_pending(&p->hold_timer));
+
+	dev_put(p->dev);
+	kfree(p);
+}
+
+/* called under bridge lock */
+static void del_nbp(struct net_bridge_port *p)
+{
+	struct net_device *dev = p->dev;
 
 	br_stp_disable_port(p);
 
 	dev_set_promiscuity(dev, -1);
-	dev->br_port = NULL;
 
-	pptr = &br->port_list;
-	while (*pptr != NULL) {
-		if (*pptr == p) {
-			*pptr = p->next;
-			break;
-		}
+	list_del_rcu(&p->list);
 
-		pptr = &((*pptr)->next);
-	}
+	br_fdb_delete_by_port(p->br, p);
 
-	br_fdb_delete_by_port(br, p);
-	kfree(p);
-	dev_put(dev);
-
-	return 0;
+	del_timer(&p->message_age_timer);
+	del_timer(&p->forward_delay_timer);
+	del_timer(&p->hold_timer);
+	
+	call_rcu(&p->rcu, destroy_nbp, p);
 }
 
-static struct net_bridge **__find_br(char *name)
+static void del_br(struct net_bridge *br)
 {
-	struct net_bridge **b;
-	struct net_bridge *br;
+	struct list_head *p, *n;
 
-	b = &bridge_list;
-	while ((br = *b) != NULL) {
-		if (!strncmp(br->dev.name, name, IFNAMSIZ))
-			return b;
-
-		b = &(br->next);
+	spin_lock_bh(&br->lock);
+	list_for_each_safe(p, n, &br->port_list) {
+		del_nbp(list_entry(p, struct net_bridge_port, list));
 	}
+	spin_unlock_bh(&br->lock);
 
-	return NULL;
+	del_timer_sync(&br->gc_timer);
+
+ 	unregister_netdevice(br->dev);
 }
 
-static void del_ifs(struct net_bridge *br)
-{
-	write_lock_bh(&br->lock);
-	while (br->port_list != NULL)
-		__br_del_if(br, br->port_list->dev);
-	write_unlock_bh(&br->lock);
-}
-
-static struct net_bridge *new_nb(char *name)
+static struct net_bridge *new_nb(const char *name)
 {
 	struct net_bridge *br;
 	struct net_device *dev;
 
-	if ((br = kmalloc(sizeof(*br), GFP_KERNEL)) == NULL)
+	dev = alloc_netdev(sizeof(struct net_bridge), name,
+			   br_dev_setup);
+	
+	if (!dev)
 		return NULL;
 
-	memset(br, 0, sizeof(*br));
-	dev = &br->dev;
+	br = dev->priv;
+	br->dev = dev;
 
-	strncpy(dev->name, name, IFNAMSIZ);
-	dev->priv = br;
-	ether_setup(dev);
-	br_dev_setup(dev);
-
-	br->lock = RW_LOCK_UNLOCKED;
+	br->lock = SPIN_LOCK_UNLOCKED;
+	INIT_LIST_HEAD(&br->port_list);
 	br->hash_lock = RW_LOCK_UNLOCKED;
 
 	br->bridge_id.prio[0] = 0x80;
 	br->bridge_id.prio[1] = 0x00;
 	memset(br->bridge_id.addr, 0, ETH_ALEN);
 
-	br->stp_enabled = 1;
+	br->stp_enabled = 0;
 	br->designated_root = br->bridge_id;
 	br->root_path_cost = 0;
 	br->root_port = 0;
@@ -124,12 +118,10 @@ static struct net_bridge *new_nb(char *name)
 	br->bridge_forward_delay = br->forward_delay = 15 * HZ;
 	br->topology_change = 0;
 	br->topology_change_detected = 0;
-	br_timer_clear(&br->hello_timer);
-	br_timer_clear(&br->tcn_timer);
-	br_timer_clear(&br->topology_change_timer);
-
 	br->ageing_time = 300 * HZ;
-	br->gc_interval = 4 * HZ;
+	INIT_LIST_HEAD(&br->age_list);
+
+	br_stp_timer_init(br);
 
 	return br;
 }
@@ -140,7 +132,7 @@ static struct net_bridge_port *new_nbp(struct net_bridge *br, struct net_device 
 	int i;
 	struct net_bridge_port *p;
 
-	p = kmalloc(sizeof(*p), GFP_KERNEL);
+	p = kmalloc(sizeof(*p), GFP_ATOMIC);
 	if (p == NULL)
 		return p;
 
@@ -149,8 +141,6 @@ static struct net_bridge_port *new_nbp(struct net_bridge *br, struct net_device 
 	p->dev = dev;
 	p->path_cost = br_initial_port_cost(dev);
 	p->priority = 0x80;
-
-	dev->br_port = p;
 
 	for (i=1;i<255;i++)
 		if (br_get_port(br, i) == NULL)
@@ -161,61 +151,59 @@ static struct net_bridge_port *new_nbp(struct net_bridge *br, struct net_device 
 		return NULL;
 	}
 
+	dev->br_port = p;
+
 	p->port_no = i;
 	br_init_port(p);
 	p->state = BR_STATE_DISABLED;
 
-	p->next = br->port_list;
-	br->port_list = p;
+	list_add_rcu(&p->list, &br->port_list);
 
 	return p;
 }
 
-int br_add_bridge(char *name)
+int br_add_bridge(const char *name)
 {
 	struct net_bridge *br;
+	int ret;
 
-	if ((br = new_nb(name)) == NULL)
+	if ((br = new_nb(name)) == NULL) 
 		return -ENOMEM;
 
-	if (__dev_get_by_name(name) != NULL) {
-		kfree(br);
-		return -EEXIST;
+	ret = register_netdev(br->dev);
+	if (ret)
+		kfree(br->dev);
+	return ret;
+}
+
+int br_del_bridge(const char *name)
+{
+	struct net_device *dev;
+	int ret = 0;
+
+	rtnl_lock();
+	dev = __dev_get_by_name(name);
+	if (dev == NULL) 
+		ret =  -ENXIO; 	/* Could not find device */
+
+	else if (!(dev->priv_flags & IFF_EBRIDGE)) {
+		/* Attempt to delete non bridge device! */
+		ret = -EPERM;
 	}
 
-	br->next = bridge_list;
-	bridge_list = br;
+	else if (dev->flags & IFF_UP) {
+		/* Not shutdown yet. */
+		ret = -EBUSY;
+	} 
 
-	br_inc_use_count();
-	register_netdev(&br->dev);
+	else 
+		del_br(dev->priv);
 
-	return 0;
+	rtnl_unlock();
+	return ret;
 }
 
-int br_del_bridge(char *name)
-{
-	struct net_bridge **b;
-	struct net_bridge *br;
-
-	if ((b = __find_br(name)) == NULL)
-		return -ENXIO;
-
-	br = *b;
-
-	if (br->dev.flags & IFF_UP)
-		return -EBUSY;
-
-	del_ifs(br);
-
-	*b = br->next;
-
-	unregister_netdev(&br->dev);
-	kfree(br);
-	br_dec_use_count();
-
-	return 0;
-}
-
+/* called under bridge lock */
 int br_add_if(struct net_bridge *br, struct net_device *dev)
 {
 	struct net_bridge_port *p;
@@ -226,10 +214,12 @@ int br_add_if(struct net_bridge *br, struct net_device *dev)
 	if (dev->flags & IFF_LOOPBACK || dev->type != ARPHRD_ETHER)
 		return -EINVAL;
 
+	if (dev->hard_start_xmit == br_dev_xmit)
+		return -ELOOP;
+
 	dev_hold(dev);
-	write_lock_bh(&br->lock);
 	if ((p = new_nbp(br, dev)) == NULL) {
-		write_unlock_bh(&br->lock);
+		spin_unlock_bh(&br->lock);
 		dev_put(dev);
 		return -EXFULL;
 	}
@@ -238,52 +228,62 @@ int br_add_if(struct net_bridge *br, struct net_device *dev)
 
 	br_stp_recalculate_bridge_id(br);
 	br_fdb_insert(br, p, dev->dev_addr, 1);
-	if ((br->dev.flags & IFF_UP) && (dev->flags & IFF_UP))
+	if ((br->dev->flags & IFF_UP) && (dev->flags & IFF_UP))
 		br_stp_enable_port(p);
-	write_unlock_bh(&br->lock);
 
 	return 0;
 }
 
+/* called under bridge lock */
 int br_del_if(struct net_bridge *br, struct net_device *dev)
 {
-	int retval;
+	struct net_bridge_port *p;
 
-	write_lock_bh(&br->lock);
-	retval = __br_del_if(br, dev);
+	if ((p = dev->br_port) == NULL || p->br != br)
+		return -EINVAL;
+
+	del_nbp(p);
 	br_stp_recalculate_bridge_id(br);
-	write_unlock_bh(&br->lock);
-
-	return retval;
+	return 0;
 }
 
 int br_get_bridge_ifindices(int *indices, int num)
 {
-	struct net_bridge *br;
-	int i;
+	struct net_device *dev;
+	int i = 0;
 
-	i = 0;
-
-	br = bridge_list;
-	for (i=0;i<num;i++) {
-		if (br == NULL)
-			break;
-
-		indices[i] = br->dev.ifindex;
-		br = br->next;
+	rtnl_shlock();
+	for (dev = dev_base; dev && i < num; dev = dev->next) {
+		if (dev->priv_flags & IFF_EBRIDGE) 
+			indices[i++] = dev->ifindex;
 	}
+	rtnl_shunlock();
 
 	return i;
 }
 
-/* called under ioctl_lock */
 void br_get_port_ifindices(struct net_bridge *br, int *ifindices)
 {
 	struct net_bridge_port *p;
 
-	p = br->port_list;
-	while (p != NULL) {
+	rcu_read_lock();
+	list_for_each_entry_rcu(p, &br->port_list, list) {
 		ifindices[p->port_no] = p->dev->ifindex;
-		p = p->next;
 	}
+	rcu_read_unlock();
+}
+
+
+void __exit br_cleanup_bridges(void)
+{
+	struct net_device *dev, *nxt;
+
+	rtnl_lock();
+	for (dev = dev_base; dev; dev = nxt) {
+		nxt = dev->next;
+		if (dev->priv_flags & IFF_EBRIDGE)
+			del_br(dev->priv);
+	}
+	rtnl_unlock();
+
 }

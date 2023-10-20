@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.math.c 1.6 05/17/01 18:14:23 cort
- */
-/*
  * arch/ppc/math-emu/math.c
  *
  * Copyright (C) 1999  Eddie C. Dost  (ecd@atecom.com)
@@ -12,7 +9,7 @@
 #include <linux/sched.h>
 
 #include <asm/uaccess.h>
-#include <asm/processor.h>
+#include <asm/reg.h>
 
 #include "sfp-machine.h"
 #include "double.h"

@@ -1,11 +1,10 @@
 #include <linux/list.h>
 #include <linux/mm.h>
-#include <linux/smp_lock.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 
-#include <linux/intermezzo_fs.h>
-#include <linux/intermezzo_kml.h>
+#include "intermezzo_fs.h"
+#include "intermezzo_kml.h"
 
 
 // dlogit -- oppsite to logit ()
@@ -25,7 +24,7 @@ char * bdup_printf (char *format, ...)
         va_list args;
         int  i;
         char *path;
-        long flags;
+        unsigned long flags;
 
         spin_lock_irqsave(&kml_lock, flags);
         va_start(args, format);

@@ -1,5 +1,5 @@
 /*
- * i8k.h -- Linux driver for accessing the SMM BIOS on Dell I8000 laptops
+ * i8k.h -- Linux driver for accessing the SMM BIOS on Dell laptops
  *
  * Copyright (C) 2001  Massimo Dal Zotto <dz@debian.org>
  *
@@ -20,14 +20,14 @@
 #define I8K_PROC		"/proc/i8k"
 #define I8K_PROC_FMT		"1.0"
 
-#define I8K_BIOS_VERSION	_IOR ('i', 0x80, 4)
-#define I8K_MACHINE_ID		_IOR ('i', 0x81, 16)
-#define I8K_POWER_STATUS	_IOR ('i', 0x82, sizeof(int))
-#define I8K_FN_STATUS		_IOR ('i', 0x83, sizeof(int))
-#define I8K_GET_TEMP		_IOR ('i', 0x84, sizeof(int))
-#define I8K_GET_SPEED		_IOWR('i', 0x85, sizeof(int))
-#define I8K_GET_FAN		_IOWR('i', 0x86, sizeof(int))
-#define I8K_SET_FAN		_IOWR('i', 0x87, sizeof(int)*2)
+#define I8K_BIOS_VERSION	_IOR ('i', 0x80, int)	/* broken: meant 4 bytes */
+#define I8K_MACHINE_ID		_IOR ('i', 0x81, int)	/* broken: meant 16 bytes */
+#define I8K_POWER_STATUS	_IOR ('i', 0x82, size_t)
+#define I8K_FN_STATUS		_IOR ('i', 0x83, size_t)
+#define I8K_GET_TEMP		_IOR ('i', 0x84, size_t)
+#define I8K_GET_SPEED		_IOWR('i', 0x85, size_t)
+#define I8K_GET_FAN		_IOWR('i', 0x86, size_t)
+#define I8K_SET_FAN		_IOWR('i', 0x87, size_t)
 
 #define I8K_FAN_LEFT		1
 #define I8K_FAN_RIGHT		0
@@ -36,9 +36,9 @@
 #define I8K_FAN_HIGH		2
 #define I8K_FAN_MAX		I8K_FAN_HIGH
 
-#define I8K_VOL_UP		0x01
-#define I8K_VOL_DOWN		0x02
-#define I8K_VOL_MUTE		0x03
+#define I8K_VOL_UP		1
+#define I8K_VOL_DOWN		2
+#define I8K_VOL_MUTE		4
 
 #define I8K_AC			1
 #define I8K_BATTERY		0

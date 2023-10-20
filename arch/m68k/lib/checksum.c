@@ -125,6 +125,7 @@ csum_partial (const unsigned char *buff, int len, unsigned int sum)
 	return(sum);
 }
 
+EXPORT_SYMBOL(csum_partial);
 
 
 /*
@@ -243,7 +244,7 @@ csum_partial_copy_from_user(const char *src, char *dst, int len,
 	     "8:\n"
 		".section .fixup,\"ax\"\n"
 		".even\n"
-		/* If any execption occurs zero out the rest.
+		/* If any exception occurs zero out the rest.
 		   Similarities with the code above are intentional :-) */
 	     "90:\t"
 		"clrw %3@+\n\t"
@@ -324,7 +325,7 @@ csum_partial_copy_from_user(const char *src, char *dst, int len,
  */
 
 unsigned int
-csum_partial_copy(const char *src, char *dst, int len, int sum)
+csum_partial_copy_nocheck(const char *src, char *dst, int len, int sum)
 {
 	unsigned long tmp1, tmp2;
 	__asm__("movel %2,%4\n\t"

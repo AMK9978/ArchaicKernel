@@ -31,14 +31,15 @@
 
 
 struct atm_vcc *sigd = NULL;
+#ifdef WAIT_FOR_DEMON
 static DECLARE_WAIT_QUEUE_HEAD(sigd_sleep);
+#endif
 
-extern spinlock_t atm_dev_lock;
 
 static void sigd_put_skb(struct sk_buff *skb)
 {
 #ifdef WAIT_FOR_DEMON
-	static unsigned long silence = 0;
+	static unsigned long silence;
 	DECLARE_WAITQUEUE(wait,current);
 
 	add_wait_queue(&sigd_sleep,&wait);
@@ -61,8 +62,8 @@ static void sigd_put_skb(struct sk_buff *skb)
 	}
 #endif
 	atm_force_charge(sigd,skb->truesize);
-	skb_queue_tail(&sigd->recvq,skb);
-	wake_up(&sigd->sleep);
+	skb_queue_tail(&sigd->sk->sk_receive_queue,skb);
+	sigd->sk->sk_data_ready(sigd->sk, skb->len);
 }
 
 
@@ -98,13 +99,14 @@ static int sigd_send(struct atm_vcc *vcc,struct sk_buff *skb)
 	struct atm_vcc *session_vcc;
 
 	msg = (struct atmsvc_msg *) skb->data;
-	atomic_sub(skb->truesize+ATM_PDU_OVHD,&vcc->tx_inuse);
+	atomic_sub(skb->truesize, &vcc->sk->sk_wmem_alloc);
 	DPRINTK("sigd_send %d (0x%lx)\n",(int) msg->type,
 	  (unsigned long) msg->vcc);
 	vcc = *(struct atm_vcc **) &msg->vcc;
 	switch (msg->type) {
 		case as_okay:
-			vcc->reply = msg->reply;
+			vcc->sk->sk_err = -msg->reply;
+			clear_bit(ATM_VF_WAITING, &vcc->flags);
 			if (!*vcc->local.sas_addr.prv &&
 			    !*vcc->local.sas_addr.pub) {
 				vcc->local.sas_family = AF_ATMSVC;
@@ -124,27 +126,30 @@ static int sigd_send(struct atm_vcc *vcc,struct sk_buff *skb)
 		case as_error:
 			clear_bit(ATM_VF_REGIS,&vcc->flags);
 			clear_bit(ATM_VF_READY,&vcc->flags);
-			vcc->reply = msg->reply;
+			vcc->sk->sk_err = -msg->reply;
+			clear_bit(ATM_VF_WAITING, &vcc->flags);
 			break;
 		case as_indicate:
 			vcc = *(struct atm_vcc **) &msg->listen_vcc;
 			DPRINTK("as_indicate!!!\n");
-			if (!vcc->backlog_quota) {
+			lock_sock(vcc->sk);
+			if (vcc->sk->sk_ack_backlog ==
+			    vcc->sk->sk_max_ack_backlog) {
 				sigd_enq(0,as_reject,vcc,NULL,NULL);
-				return 0;
+				goto as_indicate_complete;
 			}
-			vcc->backlog_quota--;
-			skb_queue_tail(&vcc->listenq,skb);
-			if (vcc->callback) {
-				DPRINTK("waking vcc->sleep 0x%p\n",
-				    &vcc->sleep);
-				vcc->callback(vcc);
-			}
+			vcc->sk->sk_ack_backlog++;
+			skb_queue_tail(&vcc->sk->sk_receive_queue, skb);
+			DPRINTK("waking vcc->sk->sk_sleep 0x%p\n", vcc->sk->sk_sleep);
+			vcc->sk->sk_state_change(vcc->sk);
+as_indicate_complete:
+			release_sock(vcc->sk);
 			return 0;
 		case as_close:
 			set_bit(ATM_VF_RELEASED,&vcc->flags);
 			clear_bit(ATM_VF_READY,&vcc->flags);
-			vcc->reply = msg->reply;
+			vcc->sk->sk_err = -msg->reply;
+			clear_bit(ATM_VF_WAITING, &vcc->flags);
 			break;
 		case as_modify:
 			modify_qos(vcc,msg);
@@ -154,7 +159,7 @@ static int sigd_send(struct atm_vcc *vcc,struct sk_buff *skb)
 			    (int) msg->type);
 			return -EINVAL;
 	}
-	if (vcc->callback) vcc->callback(vcc);
+	vcc->sk->sk_state_change(vcc->sk);
 	dev_kfree_skb(skb);
 	return 0;
 }
@@ -195,53 +200,56 @@ void sigd_enq(struct atm_vcc *vcc,enum atmsvc_msg_type type,
 }
 
 
-static void purge_vccs(struct atm_vcc *vcc)
+static void purge_vcc(struct atm_vcc *vcc)
 {
-	while (vcc) {
-		if (vcc->family == PF_ATMSVC &&
-		    !test_bit(ATM_VF_META,&vcc->flags)) {
-			set_bit(ATM_VF_RELEASED,&vcc->flags);
-			vcc->reply = -EUNATCH;
-			wake_up(&vcc->sleep);
-		}
-		vcc = vcc->next;
+	if (vcc->sk->sk_family == PF_ATMSVC &&
+	    !test_bit(ATM_VF_META,&vcc->flags)) {
+		set_bit(ATM_VF_RELEASED,&vcc->flags);
+		vcc->sk->sk_err = EUNATCH;
+		clear_bit(ATM_VF_WAITING, &vcc->flags);
+		vcc->sk->sk_state_change(vcc->sk);
 	}
 }
 
 
 static void sigd_close(struct atm_vcc *vcc)
 {
-	struct atm_dev *dev;
+	struct hlist_node *node;
+	struct sock *s;
+	int i;
 
 	DPRINTK("sigd_close\n");
 	sigd = NULL;
-	if (skb_peek(&vcc->recvq))
+	if (skb_peek(&vcc->sk->sk_receive_queue))
 		printk(KERN_ERR "sigd_close: closing with requests pending\n");
-	skb_queue_purge(&vcc->recvq);
-	purge_vccs(nodev_vccs);
+	skb_queue_purge(&vcc->sk->sk_receive_queue);
 
-	spin_lock (&atm_dev_lock);
-	for (dev = atm_devs; dev; dev = dev->next) purge_vccs(dev->vccs);
-	spin_unlock (&atm_dev_lock);
+	read_lock(&vcc_sklist_lock);
+	for(i = 0; i < VCC_HTABLE_SIZE; ++i) {
+		struct hlist_head *head = &vcc_hash[i];
+
+		sk_for_each(s, node, head) {
+			struct atm_vcc *vcc = atm_sk(s);
+
+			if (vcc->dev)
+				purge_vcc(vcc);
+		}
+	}
+	read_unlock(&vcc_sklist_lock);
 }
 
 
 static struct atmdev_ops sigd_dev_ops = {
-	close:	sigd_close,
-	send:	sigd_send
+	.close = sigd_close,
+	.send =	sigd_send
 };
 
 
 static struct atm_dev sigd_dev = {
-	&sigd_dev_ops,
-	NULL,		/* no PHY */
-    	"sig",		/* type */
-	999,		/* dummy device number */
-	NULL,NULL,	/* pretend not to have any VCCs */
-	NULL,NULL,	/* no data */
-	{ 0 },		/* no flags */
-	NULL,		/* no local address */
-	{ 0 }		/* no ESI, no statistics */
+	.ops =		&sigd_dev_ops,
+	.type =		"sig",
+	.number =	999,
+	.lock =		SPIN_LOCK_UNLOCKED
 };
 
 
@@ -250,9 +258,12 @@ int sigd_attach(struct atm_vcc *vcc)
 	if (sigd) return -EADDRINUSE;
 	DPRINTK("sigd_attach\n");
 	sigd = vcc;
-	bind_vcc(vcc,&sigd_dev);
+	vcc->dev = &sigd_dev;
+	vcc_insert_socket(vcc->sk);
 	set_bit(ATM_VF_META,&vcc->flags);
 	set_bit(ATM_VF_READY,&vcc->flags);
+#ifdef WAIT_FOR_DEMON
 	wake_up(&sigd_sleep);
+#endif
 	return 0;
 }

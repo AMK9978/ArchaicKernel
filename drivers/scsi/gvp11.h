@@ -18,10 +18,6 @@ int wd33c93_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
 int wd33c93_abort(Scsi_Cmnd *);
 int wd33c93_reset(Scsi_Cmnd *, unsigned int);
 
-#ifndef NULL
-#define NULL 0
-#endif
-
 #ifndef CMD_PER_LUN
 #define CMD_PER_LUN 2
 #endif
@@ -30,21 +26,7 @@ int wd33c93_reset(Scsi_Cmnd *, unsigned int);
 #define CAN_QUEUE 16
 #endif
 
-#ifdef HOSTS_C
-
-#define GVP11_SCSI {  proc_name:	   "GVP11", \
-		      name:                "GVP Series II SCSI", \
-		      detect:              gvp11_detect,    \
-		      release:             gvp11_release,   \
-		      queuecommand:        wd33c93_queuecommand, \
-		      abort:               wd33c93_abort,   \
-		      reset:               wd33c93_reset,   \
-		      can_queue:           CAN_QUEUE,       \
-		      this_id:             7,               \
-		      sg_tablesize:        SG_ALL,          \
-		      cmd_per_lun:	   CMD_PER_LUN,     \
-		      use_clustering:      DISABLE_CLUSTERING }
-#else
+#ifndef HOSTS_C
 
 /*
  * if the transfer address ANDed with this results in a non-zero

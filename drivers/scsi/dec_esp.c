@@ -24,14 +24,13 @@
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/slab.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
 
 #include "scsi.h"
 #include "hosts.h"
 #include "NCR53C9x.h"
-#include "dec_esp.h"
 
 #include <asm/irq.h>
 #include <asm/jazz.h>
@@ -45,6 +44,11 @@
 #include <asm/dec/ioasic_addrs.h>
 #include <asm/dec/ioasic_ints.h>
 #include <asm/dec/machtype.h>
+
+#define DEC_SCSI_SREG 0
+#define DEC_SCSI_DMAREG 0x40000
+#define DEC_SCSI_SRAM 0x80000
+#define DEC_SCSI_DIAG 0xC0000
 
 /*
  * Once upon a time the pmaz code used to be working but
@@ -103,7 +107,35 @@ volatile unsigned long *scsi_sdr1;
 
 static void scsi_dma_int(int, void *, struct pt_regs *);
 
-static Scsi_Host_Template driver_template = SCSI_DEC_ESP;
+int dec_esp_detect(Scsi_Host_Template * tpnt);
+
+static int dec_esp_release(struct Scsi_Host *shost)
+{
+	if (shost->irq)
+		free_irq(shost->irq, NULL);
+	if (shost->io_port && shost->n_io_port)
+		release_region(shost->io_port, shost->n_io_port);
+	scsi_unregister(shost);
+	return 0;
+}
+
+static Scsi_Host_Template driver_template = {
+	.proc_name		= "esp",
+	.proc_info		= &esp_proc_info,
+	.name			= "NCR53C94",
+	.detect			= dec_esp_detect,
+	.release		= dec_esp_release,
+	.info			= esp_info,
+	.queuecommand		= esp_queue,
+	.eh_abort_handler	= esp_abort,
+	.eh_bus_reset_handler	= esp_reset,
+	.can_queue		= 7,
+	.this_id		= 7,
+	.sg_tablesize		= SG_ALL,
+	.cmd_per_lun		= 1,
+	.use_clustering		= DISABLE_CLUSTERING,
+};
+
 
 #include "scsi_module.c"
 
@@ -189,10 +221,10 @@ int dec_esp_detect(Scsi_Host_Template * tpnt)
 		esp_initialize(esp);
 
 		if (request_irq(esp->irq, esp_intr, SA_INTERRUPT, 
-				"NCR 53C94 SCSI", NULL))
+				"NCR 53C94 SCSI", esp->ehost))
 			goto err_dealloc;
 		if (request_irq(SCSI_DMA_INT, scsi_dma_int, SA_INTERRUPT, 
-				"JUNKIO SCSI DMA", NULL))
+				"JUNKIO SCSI DMA", esp->ehost))
 			goto err_free_irq;
  			
 	}
@@ -253,7 +285,7 @@ int dec_esp_detect(Scsi_Host_Template * tpnt)
 			esp->dma_advance_sg = 0;
 
  			if (request_irq(esp->irq, esp_intr, SA_INTERRUPT, 
- 					 "PMAZ_AA", NULL)) {
+ 					 "PMAZ_AA", esp->ehost)) {
  				esp_deallocate(esp);
  				release_tc_card(slot);
  				continue;
@@ -316,7 +348,7 @@ static int dma_bytes_sent(struct NCR_ESP *esp, int fifo_count)
 static void dma_drain(struct NCR_ESP *esp)
 {
 	unsigned long nw = *scsi_scr;
-	unsigned short *p = KSEG1ADDR((unsigned short *) ((*scsi_dma_ptr) >> 3));
+	unsigned short *p = (unsigned short *)KSEG1ADDR((*scsi_dma_ptr) >> 3);
 
     /*
 	 * Is there something in the dma buffers left?
@@ -446,8 +478,7 @@ static void dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write)
  */
 static void dma_mmu_get_scsi_one(struct NCR_ESP *esp, Scsi_Cmnd * sp)
 {
-	sp->SCp.have_data_in = PHYSADDR(sp->SCp.buffer);
-	sp->SCp.ptr = (char *) ((unsigned long) sp->SCp.have_data_in);
+	sp->SCp.ptr = (char *)PHYSADDR(sp->SCp.buffer);
 }
 
 static void dma_mmu_get_scsi_sgl(struct NCR_ESP *esp, Scsi_Cmnd * sp)
@@ -491,8 +522,8 @@ static void pmaz_dma_init_write(struct NCR_ESP *esp, __u32 vaddress, int length)
 {
 	volatile int *dmareg = (volatile int *) ( esp->slot + DEC_SCSI_DMAREG );
 
-	memcpy((void *) (esp->slot + DEC_SCSI_SRAM + ESP_TGT_DMA_SIZE),
-			KSEG0ADDR((void *) vaddress), length);
+	memcpy((void *)(esp->slot + DEC_SCSI_SRAM + ESP_TGT_DMA_SIZE),
+	       (void *)KSEG0ADDR(vaddress), length);
 
 	*dmareg = TC_ESP_DMAR_WRITE | 
 		TC_ESP_DMA_ADDR(esp->slot + DEC_SCSI_SRAM + ESP_TGT_DMA_SIZE);
@@ -522,7 +553,5 @@ static void pmaz_dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write
 
 static void pmaz_dma_mmu_get_scsi_one(struct NCR_ESP *esp, Scsi_Cmnd * sp)
 {
-	sp->SCp.have_data_in = (int) sp->SCp.ptr =
-	    (char *) KSEG0ADDR((sp->request_buffer));
+	sp->SCp.ptr = (char *)KSEG0ADDR((sp->request_buffer));
 }
-

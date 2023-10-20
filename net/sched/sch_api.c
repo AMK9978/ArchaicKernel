@@ -16,6 +16,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -31,6 +32,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/init.h>
 #include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <linux/kmod.h>
 
 #include <net/sock.h>
@@ -41,12 +43,10 @@
 #include <asm/system.h>
 #include <asm/bitops.h>
 
-#ifdef CONFIG_RTNETLINK
 static int qdisc_notify(struct sk_buff *oskb, struct nlmsghdr *n, u32 clid,
 			struct Qdisc *old, struct Qdisc *new);
 static int tclass_notify(struct sk_buff *oskb, struct nlmsghdr *n,
 			 struct Qdisc *q, unsigned long cl, int event);
-#endif
 
 /*
 
@@ -140,21 +140,19 @@ static rwlock_t qdisc_mod_lock = RW_LOCK_UNLOCKED;
 
 /* The list of all installed queueing disciplines. */
 
-static struct Qdisc_ops *qdisc_base = NULL;
+static struct Qdisc_ops *qdisc_base;
 
 /* Register/uregister queueing discipline */
 
 int register_qdisc(struct Qdisc_ops *qops)
 {
 	struct Qdisc_ops *q, **qp;
+	int rc = -EEXIST;
 
 	write_lock(&qdisc_mod_lock);
-	for (qp = &qdisc_base; (q=*qp)!=NULL; qp = &q->next) {
-		if (strcmp(qops->id, q->id) == 0) {
-			write_unlock(&qdisc_mod_lock);
-			return -EEXIST;
-		}
-	}
+	for (qp = &qdisc_base; (q = *qp) != NULL; qp = &q->next)
+		if (!strcmp(qops->id, q->id))
+			goto out;
 
 	if (qops->enqueue == NULL)
 		qops->enqueue = noop_qdisc_ops.enqueue;
@@ -165,8 +163,10 @@ int register_qdisc(struct Qdisc_ops *qops)
 
 	qops->next = NULL;
 	*qp = qops;
+	rc = 0;
+out:
 	write_unlock(&qdisc_mod_lock);
-	return 0;
+	return rc;
 }
 
 int unregister_qdisc(struct Qdisc_ops *qops)
@@ -379,8 +379,6 @@ int qdisc_graft(struct net_device *dev, struct Qdisc *parent, u32 classid,
 	return err;
 }
 
-#ifdef CONFIG_RTNETLINK
-
 /*
    Allocate and initialize new qdisc.
 
@@ -399,11 +397,8 @@ qdisc_create(struct net_device *dev, u32 handle, struct rtattr **tca, int *errp)
 	ops = qdisc_lookup_ops(kind);
 #ifdef CONFIG_KMOD
 	if (ops==NULL && tca[TCA_KIND-1] != NULL) {
-		char module_name[4 + IFNAMSIZ + 1];
-
 		if (RTA_PAYLOAD(kind) <= IFNAMSIZ) {
-			sprintf(module_name, "sch_%s", (char*)RTA_DATA(kind));
-			request_module (module_name);
+			request_module("sch_%s", (char*)RTA_DATA(kind));
 			ops = qdisc_lookup_ops(kind);
 		}
 	}
@@ -451,6 +446,10 @@ qdisc_create(struct net_device *dev, u32 handle, struct rtattr **tca, int *errp)
         else
                 sch->handle = handle;
 
+	err = -EBUSY;
+	if (!try_module_get(ops->owner))
+		goto err_out;
+
 	if (!ops->init || (err = ops->init(sch, tca[TCA_OPTIONS-1])) == 0) {
 		write_lock(&qdisc_tree_lock);
 		sch->next = dev->qdisc_list;
@@ -462,6 +461,7 @@ qdisc_create(struct net_device *dev, u32 handle, struct rtattr **tca, int *errp)
 #endif
 		return sch;
 	}
+	module_put(ops->owner);
 
 err_out:
 	*errp = err;
@@ -1055,33 +1055,32 @@ static int tc_dump_tclass(struct sk_buff *skb, struct netlink_callback *cb)
 	dev_put(dev);
 	return skb->len;
 }
-#endif
 
 int psched_us_per_tick = 1;
 int psched_tick_per_us = 1;
 
 #ifdef CONFIG_PROC_FS
-static int psched_read_proc(char *buffer, char **start, off_t offset,
-			     int length, int *eof, void *data)
+static int psched_show(struct seq_file *seq, void *v)
 {
-	int len;
-
-	len = sprintf(buffer, "%08x %08x %08x %08x\n",
+	seq_printf(seq, "%08x %08x %08x %08x\n",
 		      psched_tick_per_us, psched_us_per_tick,
 		      1000000, HZ);
 
-	len -= offset;
-
-	if (len > length)
-		len = length;
-	if(len < 0)
-		len = 0;
-
-	*start = buffer + offset;
-	*eof = 1;
-
-	return len;
+	return 0;
 }
+
+static int psched_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, psched_show, PDE(inode)->data);
+}
+
+static struct file_operations psched_fops = {
+	.owner = THIS_MODULE,
+	.open = psched_open,
+	.read  = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};	
 #endif
 
 #if PSCHED_CLOCK_SOURCE == PSCHED_GETTIMEOFDAY
@@ -1110,8 +1109,7 @@ PSCHED_WATCHER psched_time_mark;
 
 static void psched_tick(unsigned long);
 
-static struct timer_list psched_timer =
-	{ function: psched_tick };
+static struct timer_list psched_timer = TIMER_INITIALIZER(psched_tick, 0, 0);
 
 static void psched_tick(unsigned long dummy)
 {
@@ -1122,7 +1120,7 @@ static void psched_tick(unsigned long dummy)
 	psched_timer.expires = jiffies + 1*HZ;
 #else
 	unsigned long now = jiffies;
-	psched_time_base = ((u64)now)<<PSCHED_JSCALE;
+	psched_time_base += ((u64)(now-psched_time_mark))<<PSCHED_JSCALE;
 	psched_time_mark = now;
 	psched_timer.expires = now + 60*60*HZ;
 #endif
@@ -1169,9 +1167,7 @@ int __init psched_calibrate_clock(void)
 
 int __init pktsched_init(void)
 {
-#ifdef CONFIG_RTNETLINK
 	struct rtnetlink_link *link_p;
-#endif
 
 #if PSCHED_CLOCK_SOURCE == PSCHED_CPU
 	if (psched_calibrate_clock() < 0)
@@ -1184,7 +1180,6 @@ int __init pktsched_init(void)
 #endif
 #endif
 
-#ifdef CONFIG_RTNETLINK
 	link_p = rtnetlink_links[PF_UNSPEC];
 
 	/* Setup rtnetlink links. It is made here to avoid
@@ -1201,7 +1196,6 @@ int __init pktsched_init(void)
 		link_p[RTM_GETTCLASS-RTM_BASE].doit = tc_ctl_tclass;
 		link_p[RTM_GETTCLASS-RTM_BASE].dumpit = tc_dump_tclass;
 	}
-#endif
 
 #define INIT_QDISC(name) { \
           extern struct Qdisc_ops name##_qdisc_ops; \
@@ -1213,6 +1207,9 @@ int __init pktsched_init(void)
 
 #ifdef CONFIG_NET_SCH_CBQ
 	INIT_QDISC(cbq);
+#endif
+#ifdef CONFIG_NET_SCH_HTB
+	INIT_QDISC(htb);
 #endif
 #ifdef CONFIG_NET_SCH_CSZ
 	INIT_QDISC(csz);
@@ -1254,9 +1251,14 @@ int __init pktsched_init(void)
 	tc_filter_init();
 #endif
 
-#ifdef CONFIG_PROC_FS
-	create_proc_read_entry("net/psched", 0, 0, psched_read_proc, NULL);
-#endif
+	proc_net_fops_create("psched", 0, &psched_fops);
 
 	return 0;
 }
+
+EXPORT_SYMBOL(qdisc_copy_stats);
+EXPORT_SYMBOL(qdisc_get_rtab);
+EXPORT_SYMBOL(qdisc_put_rtab);
+EXPORT_SYMBOL(register_qdisc);
+EXPORT_SYMBOL(unregister_qdisc);
+PSCHED_EXPORTLIST;

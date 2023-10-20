@@ -4,13 +4,17 @@
  *  Written 1993 by Jacques Gelinas
  *
  *  Extended MS-DOS ioctl directory handling functions
+ *
+ *  Changes:
+ *  11/07/2003      Daniele Bellucci <bellucda@tiscali.it>
+ *                  - audit copy_to_user/put_user in umsdos_ioctl_fill.
  */
 
 #include <asm/uaccess.h>
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/msdos_fs.h>
 #include <linux/umsdos_fs.h>
@@ -36,11 +40,12 @@ static int umsdos_ioctl_fill (
 	struct UMSDOS_DIR_ONCE *d = (struct UMSDOS_DIR_ONCE *) buf;
 
 	if (d->count == 0) {
-		copy_to_user (d->ent->d_name, name, name_len);
-		put_user ('\0', d->ent->d_name + name_len);
-		put_user (name_len, &d->ent->d_reclen);
-		put_user (ino, &d->ent->d_ino);
-		put_user (offset, &d->ent->d_off);
+		if (copy_to_user (d->ent->d_name, name, name_len) ||
+		    put_user ('\0', d->ent->d_name + name_len) ||
+		    put_user (name_len, &d->ent->d_reclen) ||
+		    put_user (ino, &d->ent->d_ino) ||
+		    put_user (offset, &d->ent->d_off))
+			return -EFAULT;
 		d->count = 1;
 		ret = 0;
 	}
@@ -430,7 +435,9 @@ new_dentry->d_parent->d_name.name, new_dentry->d_name.name);
 		 */
 		dir->i_sb->u.msdos_sb.options.fs_uid = data.umsdos_dirent.uid;
 		dir->i_sb->u.msdos_sb.options.fs_gid = data.umsdos_dirent.gid;
-		dir->i_sb->u.msdos_sb.options.fs_umask = data.umsdos_dirent.mode;
+		dir->i_sb->u.msdos_sb.options.fs_fmask =
+			dir->i_sb->u.msdos_sb.options.fs_dmask =
+				data.umsdos_dirent.mode;
 		ret = 0;
 	}
 out:

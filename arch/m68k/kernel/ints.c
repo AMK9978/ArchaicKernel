@@ -26,6 +26,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/kernel_stat.h>
@@ -60,14 +61,14 @@ static irq_node_t nodes[NUM_IRQ_NODES];
 static void dummy_enable_irq(unsigned int irq);
 static void dummy_disable_irq(unsigned int irq);
 static int dummy_request_irq(unsigned int irq,
-		void (*handler) (int, void *, struct pt_regs *),
+		irqreturn_t (*handler) (int, void *, struct pt_regs *),
 		unsigned long flags, const char *devname, void *dev_id);
 static void dummy_free_irq(unsigned int irq, void *dev_id);
 
 void (*enable_irq) (unsigned int) = dummy_enable_irq;
 void (*disable_irq) (unsigned int) = dummy_disable_irq;
 
-int (*mach_request_irq) (unsigned int, void (*)(int, void *, struct pt_regs *),
+int (*mach_request_irq) (unsigned int, irqreturn_t (*)(int, void *, struct pt_regs *),
                       unsigned long, const char *, void *) = dummy_request_irq;
 void (*mach_free_irq) (unsigned int, void *) = dummy_free_irq;
 
@@ -121,19 +122,23 @@ irq_node_t *new_irq_node(void)
  * include/asm/irq.h.
  */
 int request_irq(unsigned int irq,
-		void (*handler) (int, void *, struct pt_regs *),
+		irqreturn_t (*handler) (int, void *, struct pt_regs *),
 		unsigned long flags, const char *devname, void *dev_id)
 {
 	return mach_request_irq(irq, handler, flags, devname, dev_id);
 }
+
+EXPORT_SYMBOL(request_irq);
 
 void free_irq(unsigned int irq, void *dev_id)
 {
 	mach_free_irq(irq, dev_id);
 }
 
+EXPORT_SYMBOL(free_irq);
+
 int sys_request_irq(unsigned int irq, 
-                    void (*handler)(int, void *, struct pt_regs *), 
+                    irqreturn_t (*handler)(int, void *, struct pt_regs *), 
                     unsigned long flags, const char *devname, void *dev_id)
 {
 	if (irq < IRQ1 || irq > IRQ7) {
@@ -195,6 +200,8 @@ unsigned long probe_irq_on (void)
 	return 0;
 }
 
+EXPORT_SYMBOL(probe_irq_on);
+
 int probe_irq_off (unsigned long irqs)
 {
 #ifdef CONFIG_Q40
@@ -203,6 +210,8 @@ int probe_irq_off (unsigned long irqs)
 #endif
 	return 0;
 }
+
+EXPORT_SYMBOL(probe_irq_off);
 
 static void dummy_enable_irq(unsigned int irq)
 {
@@ -215,7 +224,7 @@ static void dummy_disable_irq(unsigned int irq)
 }
 
 static int dummy_request_irq(unsigned int irq,
-		void (*handler) (int, void *, struct pt_regs *),
+		irqreturn_t (*handler) (int, void *, struct pt_regs *),
 		unsigned long flags, const char *devname, void *dev_id)
 {
 	printk("calling uninitialized request_irq()\n");
@@ -231,7 +240,7 @@ asmlinkage void process_int(unsigned long vec, struct pt_regs *fp)
 {
 	if (vec >= VEC_INT1 && vec <= VEC_INT7 && !MACH_IS_BVME6000) {
 		vec -= VEC_SPUR;
-		kstat.irqs[0][vec]++;
+		kstat_cpu(0).irqs[vec]++;
 		irq_list[vec].handler(vec, irq_list[vec].dev_id, fp);
 	} else {
 		if (mach_process_int)
@@ -242,22 +251,22 @@ asmlinkage void process_int(unsigned long vec, struct pt_regs *fp)
 	}
 }
 
-int get_irq_list(char *buf)
+int show_interrupts(struct seq_file *p, void *v)
 {
-	int i, len = 0;
+	int i;
 
 	/* autovector interrupts */
 	if (mach_default_handler) {
 		for (i = 0; i < SYS_IRQS; i++) {
-			len += sprintf(buf+len, "auto %2d: %10u ", i,
-			               i ? kstat.irqs[0][i] : num_spurious);
-				len += sprintf(buf+len, "  ");
-			len += sprintf(buf+len, "%s\n", irq_list[i].devname);
+			seq_printf(p, "auto %2d: %10u ", i,
+			               i ? kstat_cpu(0).irqs[i] : num_spurious);
+			seq_puts(p, "  ");
+			seq_printf(p, "%s\n", irq_list[i].devname);
 		}
 	}
 
-	len += mach_get_irq_list(buf+len);
-	return len;
+	mach_get_irq_list(p, v);
+	return 0;
 }
 
 void init_irq_proc(void)

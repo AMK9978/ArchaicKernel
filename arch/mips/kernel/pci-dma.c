@@ -10,40 +10,55 @@
 #include <linux/config.h>
 #include <linux/types.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/string.h>
 #include <linux/pci.h>
 
 #include <asm/io.h>
 
-void *pci_alloc_consistent(struct pci_dev *hwdev, size_t size,
-			   dma_addr_t * dma_handle)
+#ifndef UNCAC_BASE	/* Hack ... */
+#define UNCAC_BASE	0x9000000000000000UL
+#endif
+
+void *dma_alloc_coherent(struct device *dev, size_t size,
+			 dma_addr_t * dma_handle, int gfp)
 {
 	void *ret;
-	int gfp = GFP_ATOMIC;
+	/* ignore region specifiers */
+	gfp &= ~(__GFP_DMA | __GFP_HIGHMEM);
 
-	if (hwdev == NULL || hwdev->dma_mask != 0xffffffff)
+	if (dev == NULL || (*dev->dma_mask < 0xffffffff))
 		gfp |= GFP_DMA;
 	ret = (void *) __get_free_pages(gfp, get_order(size));
 
 	if (ret != NULL) {
 		memset(ret, 0, size);
-#ifndef CONFIG_COHERENT_IO
-		dma_cache_wback_inv((unsigned long) ret, size);
-		ret = KSEG1ADDR(ret);
+#if 0	/* Broken support for some platforms ...  */
+		if (hwdev)
+			bus = hwdev->bus;
+		*dma_handle = bus_to_baddr(bus, __pa(ret));
+#else
+		*dma_handle = virt_to_phys(ret);
 #endif
-		*dma_handle = virt_to_bus(ret);
+#ifdef CONFIG_NONCOHERENT_IO
+		dma_cache_wback_inv((unsigned long) ret, size);
+		ret = UNCAC_ADDR(ret);
+#endif
 	}
 
 	return ret;
 }
 
-void pci_free_consistent(struct pci_dev *hwdev, size_t size,
-			 void *vaddr, dma_addr_t dma_handle)
+void dma_free_coherent(struct device *dev, size_t size,
+                       void *vaddr, dma_addr_t dma_handle)
 {
 	unsigned long addr = (unsigned long) vaddr;
 
-#ifndef CONFIG_COHERENT_IO
-	addr = KSEG0ADDR(addr);
+#ifdef CONFIG_NONCOHERENT_IO
+	addr = CAC_ADDR(addr);
 #endif
 	free_pages(addr, get_order(size));
 }
+
+EXPORT_SYMBOL(pci_alloc_consistent);
+EXPORT_SYMBOL(pci_free_consistent);

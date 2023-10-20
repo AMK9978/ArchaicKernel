@@ -7,11 +7,9 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/tty.h>
-#include <linux/sched.h>
 #include <linux/init.h>
 
 #include <net/irda/irda.h>
-#include <net/irda/irmod.h>
 #include <net/irda/irda_device.h>
 
 #include <asm/io.h>
@@ -26,12 +24,12 @@ static int  ep7211_ir_change_speed(struct irda_task *task);
 static int  ep7211_ir_reset(struct irda_task *task);
 
 static struct dongle_reg dongle = {
-	Q_NULL,
-	IRDA_EP7211_IR,
-	ep7211_ir_open,
-	ep7211_ir_close,
-	ep7211_ir_reset,
-	ep7211_ir_change_speed,
+	.type = IRDA_EP7211_IR,
+	.open = ep7211_ir_open,
+	.close = ep7211_ir_close,
+	.reset = ep7211_ir_reset,
+	.change_speed = ep7211_ir_change_speed,
+	.owner = THIS_MODULE,
 };
 
 static void ep7211_ir_open(dongle_t *self, struct qos_info *qos)
@@ -49,8 +47,6 @@ static void ep7211_ir_open(dongle_t *self, struct qos_info *qos)
 		UART (interrupt #14). */
 
 	restore_flags(flags);
-
-	MOD_INC_USE_COUNT;
 }
 
 static void ep7211_ir_close(dongle_t *self)
@@ -68,8 +64,6 @@ static void ep7211_ir_close(dongle_t *self)
 		reset them back to their original state. */
 
 	restore_flags(flags);
-
-	MOD_DEC_USE_COUNT;
 }
 
 /*
@@ -122,8 +116,7 @@ static void __exit ep7211_ir_cleanup(void)
 MODULE_AUTHOR("Jon McClintock <jonm@bluemug.com>");
 MODULE_DESCRIPTION("EP7211 I/R driver");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("irda-dongle-8"); /* IRDA_EP7211_IR */
 		
-#ifdef MODULE
 module_init(ep7211_ir_init);
-#endif /* MODULE */
 module_exit(ep7211_ir_cleanup);

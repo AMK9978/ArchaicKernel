@@ -16,8 +16,10 @@
  *
  * $Id: checksum.c,v 1.3 1997/12/01 17:57:34 ralf Exp $
  */
-#include <net/checksum.h>
+#include <linux/module.h>
 #include <linux/types.h>
+
+#include <net/checksum.h>
 #include <asm/byteorder.h>
 #include <asm/string.h>
 #include <asm/uaccess.h>
@@ -94,11 +96,13 @@ unsigned int csum_partial(const unsigned char *buff, int len, unsigned int sum)
 	return result;
 }
 
+EXPORT_SYMBOL(csum_partial);
+
 /*
  * copy while checksumming, otherwise like csum_partial
  */
-unsigned int csum_partial_copy(const char *src, char *dst, 
-                               int len, unsigned int sum)
+unsigned int csum_partial_copy_nocheck(const char *src, char *dst, 
+				       int len, unsigned int sum)
 {
 	/*
 	 * It's 2:30 am and I don't feel like doing it real ...
@@ -109,6 +113,7 @@ unsigned int csum_partial_copy(const char *src, char *dst,
 
 	return sum;
 }
+EXPORT_SYMBOL(csum_partial_copy_nocheck);
 
 /*
  * Copy from userspace and compute checksum.  If we catch an exception
@@ -128,3 +133,4 @@ unsigned int csum_partial_copy_from_user (const char *src, char *dst,
 		
 	return csum_partial(dst, len, sum);
 }
+EXPORT_SYMBOL(csum_partial_copy_from_user);

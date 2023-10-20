@@ -18,10 +18,6 @@ int wd33c93_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
 int wd33c93_abort(Scsi_Cmnd *);
 int wd33c93_reset(Scsi_Cmnd *, unsigned int);
 
-#ifndef NULL
-#define NULL 0
-#endif
-
 #ifndef CMD_PER_LUN
 #define CMD_PER_LUN 2
 #endif
@@ -29,20 +25,6 @@ int wd33c93_reset(Scsi_Cmnd *, unsigned int);
 #ifndef CAN_QUEUE
 #define CAN_QUEUE 16
 #endif
-
-#define _A3000_SCSI { proc_name:	   "A3000",			\
-		      proc_info:           NULL,			\
-		      name:                "Amiga 3000 built-in SCSI",	\
-		      detect:              a3000_detect,		\
-		      release:             a3000_release,		\
-		      queuecommand:        wd33c93_queuecommand,	\
-		      abort:               wd33c93_abort,		\
-		      reset:               wd33c93_reset,		\
-		      can_queue:           CAN_QUEUE,			\
-		      this_id:             7,				\
-		      sg_tablesize:        SG_ALL,			\
-		      cmd_per_lun:	   CMD_PER_LUN,			\
-		      use_clustering:      ENABLE_CLUSTERING }
 
 /*
  * if the transfer address ANDed with this results in a non-zero

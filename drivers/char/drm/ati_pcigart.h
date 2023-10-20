@@ -1,4 +1,11 @@
-/* ati_pcigart.h -- ATI PCI GART support -*- linux-c -*-
+/**
+ * \file ati_pcigart.h 
+ * ATI PCI GART support
+ *
+ * \author Gareth Hughes <gareth@valinux.com>
+ */
+
+/*
  * Created: Wed Dec 13 21:52:19 2000 by gareth@valinux.com
  *
  * Copyright 2000 VA Linux Systems, Inc., Sunnyvale, California.
@@ -22,26 +29,28 @@
  * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
- *
- * Authors:
- *   Gareth Hughes <gareth@valinux.com>
  */
 
-#define __NO_VERSION__
 #include "drmP.h"
 
-#if PAGE_SIZE == 8192
+#if PAGE_SIZE == 65536
+# define ATI_PCIGART_TABLE_ORDER	0
+# define ATI_PCIGART_TABLE_PAGES	(1 << 0)
+#elif PAGE_SIZE == 16384
+# define ATI_PCIGART_TABLE_ORDER	1
+# define ATI_PCIGART_TABLE_PAGES	(1 << 1)
+#elif PAGE_SIZE == 8192
 # define ATI_PCIGART_TABLE_ORDER 	2
 # define ATI_PCIGART_TABLE_PAGES 	(1 << 2)
 #elif PAGE_SIZE == 4096
 # define ATI_PCIGART_TABLE_ORDER 	3
 # define ATI_PCIGART_TABLE_PAGES 	(1 << 3)
 #else
-# error - PAGE_SIZE not 8K or 4K
+# error - PAGE_SIZE not 64K, 16K, 8K or 4K
 #endif
 
-# define ATI_MAX_PCIGART_PAGES		8192	/* 32 MB aperture, 4K pages */
-# define ATI_PCIGART_PAGE_SIZE		4096	/* PCI GART page size */
+# define ATI_MAX_PCIGART_PAGES		8192	/**< 32 MB aperture, 4K pages */
+# define ATI_PCIGART_PAGE_SIZE		4096	/**< PCI GART page size */
 
 static unsigned long DRM(ati_alloc_pcigart_table)( void )
 {

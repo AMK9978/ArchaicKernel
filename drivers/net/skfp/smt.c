@@ -417,7 +417,7 @@ int event ;
 		/*
 		 * Make sure the fddiMACUNDA_Flag = FALSE is
 		 * included in the SRF so we don't generate
-		 * a seperate SRF for the deassertion of this
+		 * a separate SRF for the deassertion of this
 		 * condition
 		 */
 		update_dac(smc,0) ;
@@ -817,7 +817,7 @@ int fs ;			/* frame status */
 #endif
 	}
 	if (illegal) {
-		DB_SMT("SMT: discarding illegal frame, reason = %d\n",
+		DB_SMT("SMT: discarding invalid frame, reason = %d\n",
 			illegal,0) ;
 	}
 	smt_free_mbuf(smc,mb) ;

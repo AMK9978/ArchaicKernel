@@ -15,6 +15,10 @@
 #include <linux/netfilter_ipv6/ip6_tables.h>
 #include <linux/netfilter_ipv6/ip6t_limit.h>
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Herve Eychenne <rv@wallfire.org>");
+MODULE_DESCRIPTION("rate limiting within ip6tables");
+
 /* The algorithm used is the Simple Token Bucket Filter (TBF)
  * see net/sched/sch_tbf.c in the linux source tree
  */
@@ -115,9 +119,12 @@ ip6t_limit_checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ip6t_match ip6t_limit_reg
-= { { NULL, NULL }, "limit", ip6t_limit_match, ip6t_limit_checkentry, NULL,
-    THIS_MODULE };
+static struct ip6t_match ip6t_limit_reg = {
+	.name		= "limit",
+	.match		= ip6t_limit_match,
+	.checkentry	= ip6t_limit_checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {
@@ -133,4 +140,3 @@ static void __exit fini(void)
 
 module_init(init);
 module_exit(fini);
-MODULE_LICENSE("GPL");

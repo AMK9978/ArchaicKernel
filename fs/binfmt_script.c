@@ -13,6 +13,8 @@
 #include <linux/init.h>
 #include <linux/file.h>
 #include <linux/smp_lock.h>
+#include <linux/err.h>
+#include <linux/fs.h>
 
 static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 {
@@ -67,7 +69,7 @@ static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	 * user environment and arguments are stored.
 	 */
 	remove_arg_zero(bprm);
-	retval = copy_strings_kernel(1, &bprm->filename, bprm);
+	retval = copy_strings_kernel(1, &bprm->interp, bprm);
 	if (retval < 0) return retval; 
 	bprm->argc++;
 	if (i_arg) {
@@ -78,6 +80,8 @@ static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	retval = copy_strings_kernel(1, &i_name, bprm);
 	if (retval) return retval; 
 	bprm->argc++;
+	bprm->interp = interp;
+
 	/*
 	 * OK, now restart the process with the interpreter's dentry.
 	 */
@@ -93,7 +97,8 @@ static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 }
 
 struct linux_binfmt script_format = {
-	NULL, THIS_MODULE, load_script, NULL, NULL, 0
+	.module		= THIS_MODULE,
+	.load_binary	= load_script,
 };
 
 static int __init init_script_binfmt(void)
@@ -108,3 +113,4 @@ static void __exit exit_script_binfmt(void)
 
 module_init(init_script_binfmt)
 module_exit(exit_script_binfmt)
+MODULE_LICENSE("GPL");

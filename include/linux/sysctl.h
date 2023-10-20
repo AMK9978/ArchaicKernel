@@ -6,16 +6,10 @@
  ****************************************************************
  ****************************************************************
  **
- **  WARNING:  
  **  The values in this file are exported to user space via 
- **  the sysctl() binary interface.  Do *NOT* change the 
- **  numbering of any existing values here, and do not change
- **  any numbers within any one set of values.  If you have
- **  to redefine an existing interface, use a new number for it.
- **  The kernel will then return ENOTDIR to any application using
- **  the old binary interface.
- **
- **  --sct
+ **  the sysctl() binary interface.  However this interface
+ **  is unstable and deprecated and will be removed in the future. 
+ **  For a stable interface use /proc/sys.
  **
  ****************************************************************
  ****************************************************************
@@ -27,17 +21,21 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/list.h>
+#include <linux/compiler.h>
 
 struct file;
 
-#define CTL_MAXNAME 10
+#define CTL_MAXNAME 10		/* how many path components do we allow in a
+				   call to sysctl?   In other words, what is
+				   the largest acceptable value for the nlen
+				   member of a struct __sysctl_args to have? */
 
 struct __sysctl_args {
-	int *name;
+	int __user *name;
 	int nlen;
-	void *oldval;
-	size_t *oldlenp;
-	void *newval;
+	void __user *oldval;
+	size_t __user *oldlenp;
+	void __user *newval;
 	size_t newlen;
 	unsigned long __unused[4];
 };
@@ -69,7 +67,7 @@ enum
 /* CTL_BUS names: */
 enum
 {
-	BUS_ISA=1		/* ISA */
+	CTL_BUS_ISA=1		/* ISA */
 };
 
 /* CTL_KERN names: */
@@ -124,22 +122,38 @@ enum
 	KERN_CORE_USES_PID=52,		/* int: use core or core.%pid */
 	KERN_TAINTED=53,	/* int: various kernel tainted flags */
 	KERN_CADPID=54,		/* int: PID of the process to notify on CAD */
+	KERN_PIDMAX=55,		/* int: PID # limit */
+  	KERN_CORE_PATTERN=56,	/* string: pattern for core-file names */
+	KERN_PANIC_ON_OOPS=57,  /* int: whether we will panic on an oops */
+	KERN_HPPA_PWRSW=58,	/* int: hppa soft-power enable */
+	KERN_HPPA_UNALIGNED=59,	/* int: hppa unaligned-trap enable */
 };
 
 
 /* CTL_VM names: */
 enum
 {
-	VM_SWAPCTL=1,		/* struct: Set vm swapping control */
-	VM_SWAPOUT=2,		/* int: Linear or sqrt() swapout for hogs */
-	VM_FREEPG=3,		/* struct: Set free page thresholds */
-	VM_BDFLUSH=4,		/* struct: Control buffer cache flushing */
+	VM_UNUSED1=1,		/* was: struct: Set vm swapping control */
+	VM_UNUSED2=2,		/* was; int: Linear or sqrt() swapout for hogs */
+	VM_UNUSED3=3,		/* was: struct: Set free page thresholds */
+	VM_UNUSED4=4,		/* Spare */
 	VM_OVERCOMMIT_MEMORY=5,	/* Turn off the virtual memory safety limit */
-	VM_BUFFERMEM=6,		/* struct: Set buffer memory thresholds */
-	VM_PAGECACHE=7,		/* struct: Set cache memory thresholds */
-	VM_PAGERDAEMON=8,	/* struct: Control kswapd behaviour */
-	VM_PGT_CACHE=9,		/* struct: Set page table cache parameters */
-	VM_PAGE_CLUSTER=10	/* int: set number of pages to swap together */
+	VM_UNUSED5=6,		/* was: struct: Set buffer memory thresholds */
+	VM_UNUSED7=7,		/* was: struct: Set cache memory thresholds */
+	VM_UNUSED8=8,		/* was: struct: Control kswapd behaviour */
+	VM_UNUSED9=9,		/* was: struct: Set page table cache parameters */
+	VM_PAGE_CLUSTER=10,	/* int: set number of pages to swap together */
+	VM_DIRTY_BACKGROUND=11,	/* dirty_background_ratio */
+	VM_DIRTY_RATIO=12,	/* dirty_ratio */
+	VM_DIRTY_WB_CS=13,	/* dirty_writeback_centisecs */
+	VM_DIRTY_EXPIRE_CS=14,	/* dirty_expire_centisecs */
+	VM_NR_PDFLUSH_THREADS=15, /* nr_pdflush_threads */
+	VM_OVERCOMMIT_RATIO=16, /* percent of RAM to allow overcommit in */
+	VM_PAGEBUF=17,		/* struct: Control pagebuf parameters */
+	VM_HUGETLB_PAGES=18,	/* int: Number of available Huge Pages */
+	VM_SWAPPINESS=19,	/* Tendency to steal mapped memory */
+	VM_LOWER_ZONE_PROTECTION=20,/* Amount of protection of lower zones */
+	VM_MIN_FREE_KBYTES=21,	/* Minimum free kilobytes to maintain */
 };
 
 
@@ -162,7 +176,7 @@ enum
 	NET_TR=14,
 	NET_DECNET=15,
 	NET_ECONET=16,
-	NET_KHTTPD=17
+	NET_SCTP=17, 
 };
 
 /* /proc/sys/kernel/random */
@@ -202,7 +216,9 @@ enum
 	NET_CORE_NO_CONG_THRESH=13,
 	NET_CORE_NO_CONG=14,
 	NET_CORE_LO_CONG=15,
-	NET_CORE_MOD_CONG=16
+	NET_CORE_MOD_CONG=16,
+	NET_CORE_DEV_WEIGHT=17,
+	NET_CORE_SOMAXCONN=18,
 };
 
 /* /proc/sys/net/ethernet */
@@ -229,6 +245,7 @@ enum
 	NET_IPV4_NEIGH=17,
 	NET_IPV4_ROUTE=18,
 	NET_IPV4_FIB_HASH=19,
+	NET_IPV4_NETFILTER=20,
 
 	NET_IPV4_TCP_TIMESTAMPS=33,
 	NET_IPV4_TCP_WINDOW_SCALING=34,
@@ -287,7 +304,11 @@ enum
 	NET_TCP_ADV_WIN_SCALE=87,
 	NET_IPV4_NONLOCAL_BIND=88,
 	NET_IPV4_ICMP_RATELIMIT=89,
-	NET_IPV4_ICMP_RATEMASK=90
+	NET_IPV4_ICMP_RATEMASK=90,
+	NET_TCP_TW_REUSE=91,
+	NET_TCP_FRTO=92,
+	NET_TCP_LOW_LATENCY=93,
+	NET_IPV4_IPFRAG_SECRET_INTERVAL=94,
 };
 
 enum {
@@ -307,7 +328,8 @@ enum {
 	NET_IPV4_ROUTE_GC_ELASTICITY=14,
 	NET_IPV4_ROUTE_MTU_EXPIRES=15,
 	NET_IPV4_ROUTE_MIN_PMTU=16,
-	NET_IPV4_ROUTE_MIN_ADVMSS=17
+	NET_IPV4_ROUTE_MIN_ADVMSS=17,
+	NET_IPV4_ROUTE_SECRET_INTERVAL=18,
 };
 
 enum
@@ -332,14 +354,41 @@ enum
 	NET_IPV4_CONF_BOOTP_RELAY=10,
 	NET_IPV4_CONF_LOG_MARTIANS=11,
 	NET_IPV4_CONF_TAG=12,
-	NET_IPV4_CONF_ARPFILTER=13
+	NET_IPV4_CONF_ARPFILTER=13,
+	NET_IPV4_CONF_MEDIUM_ID=14,
+	NET_IPV4_CONF_NOXFRM=15,
+	NET_IPV4_CONF_NOPOLICY=16,
 };
 
+/* /proc/sys/net/ipv4/netfilter */
+enum
+{
+	NET_IPV4_NF_CONNTRACK_MAX=1,
+	NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_SYN_SENT=2,
+	NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_SYN_RECV=3,
+	NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_ESTABLISHED=4,
+	NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_FIN_WAIT=5,
+	NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_CLOSE_WAIT=6,
+	NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_LAST_ACK=7,
+	NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_TIME_WAIT=8,
+	NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_CLOSE=9,
+	NET_IPV4_NF_CONNTRACK_UDP_TIMEOUT=10,
+	NET_IPV4_NF_CONNTRACK_UDP_TIMEOUT_STREAM=11,
+	NET_IPV4_NF_CONNTRACK_ICMP_TIMEOUT=12,
+	NET_IPV4_NF_CONNTRACK_GENERIC_TIMEOUT=13,
+};
+ 
 /* /proc/sys/net/ipv6 */
 enum {
 	NET_IPV6_CONF=16,
 	NET_IPV6_NEIGH=17,
-	NET_IPV6_ROUTE=18
+	NET_IPV6_ROUTE=18,
+	NET_IPV6_ICMP=19,
+	NET_IPV6_BINDV6ONLY=20,
+	NET_IPV6_IP6FRAG_HIGH_THRESH=21,
+	NET_IPV6_IP6FRAG_LOW_THRESH=22,
+	NET_IPV6_IP6FRAG_TIME=23,
+	NET_IPV6_IP6FRAG_SECRET_INTERVAL=24
 };
 
 enum {
@@ -364,7 +413,17 @@ enum {
 	NET_IPV6_DAD_TRANSMITS=7,
 	NET_IPV6_RTR_SOLICITS=8,
 	NET_IPV6_RTR_SOLICIT_INTERVAL=9,
-	NET_IPV6_RTR_SOLICIT_DELAY=10
+	NET_IPV6_RTR_SOLICIT_DELAY=10,
+	NET_IPV6_USE_TEMPADDR=11,
+	NET_IPV6_TEMP_VALID_LFT=12,
+	NET_IPV6_TEMP_PREFERED_LFT=13,
+	NET_IPV6_REGEN_MAX_RETRY=14,
+	NET_IPV6_MAX_DESYNC_FACTOR=15
+};
+
+/* /proc/sys/net/ipv6/icmp */
+enum {
+	NET_IPV6_ICMP_RATELIMIT=1
 };
 
 /* /proc/sys/net/<protocol>/neigh/<dev> */
@@ -481,23 +540,6 @@ enum {
 	NET_DECNET_DEBUG_LEVEL = 255
 };
 
-/* /proc/sys/net/khttpd/ */
-enum {
-	NET_KHTTPD_DOCROOT	= 1,
-	NET_KHTTPD_START	= 2,
-	NET_KHTTPD_STOP		= 3,
-	NET_KHTTPD_UNLOAD	= 4,
-	NET_KHTTPD_CLIENTPORT	= 5,
-	NET_KHTTPD_PERMREQ	= 6,
-	NET_KHTTPD_PERMFORBID	= 7,
-	NET_KHTTPD_LOGGING	= 8,
-	NET_KHTTPD_SERVERPORT	= 9,
-	NET_KHTTPD_DYNAMICSTRING= 10,
-	NET_KHTTPD_SLOPPYMIME   = 11,
-	NET_KHTTPD_THREADS	= 12,
-	NET_KHTTPD_MAXCONNECT	= 13
-};
-
 /* /proc/sys/net/decnet/conf/<dev> */
 enum {
 	NET_DECNET_CONF_LOOPBACK = -2,
@@ -521,6 +563,22 @@ enum {
 	NET_DECNET_CONF_DEV_STATE = 7
 };
 
+/* /proc/sys/net/sctp */
+enum {
+	NET_SCTP_RTO_INITIAL = 1,
+	NET_SCTP_RTO_MIN     = 2,
+	NET_SCTP_RTO_MAX     = 3,
+	NET_SCTP_RTO_ALPHA   = 4,
+	NET_SCTP_RTO_BETA    = 5,
+	NET_SCTP_VALID_COOKIE_LIFE       =  6,
+	NET_SCTP_ASSOCIATION_MAX_RETRANS =  7,
+	NET_SCTP_PATH_MAX_RETRANS        =  8,
+	NET_SCTP_MAX_INIT_RETRANSMITS    =  9,
+	NET_SCTP_HB_INTERVAL             = 10,
+	NET_SCTP_PRESERVE_ENABLE         = 11,
+	NET_SCTP_MAX_BURST               = 12,
+};
+
 /* CTL_PROC names: */
 
 /* CTL_FS names: */
@@ -541,6 +599,20 @@ enum
 	FS_LEASES=13,	/* int: leases enabled */
 	FS_DIR_NOTIFY=14,	/* int: directory notification enabled */
 	FS_LEASE_TIME=15,	/* int: maximum time to wait for a lease break */
+	FS_DQSTATS=16,	/* disc quota usage statistics */
+	FS_XFS=17,	/* struct: control xfs parameters */
+};
+
+/* /proc/sys/fs/quota/ */
+enum {
+	FS_DQ_LOOKUPS = 1,
+	FS_DQ_DROPS = 2,
+	FS_DQ_READS = 3,
+	FS_DQ_WRITES = 4,
+	FS_DQ_CACHE_HITS = 5,
+	FS_DQ_ALLOCATED = 6,
+	FS_DQ_FREE = 7,
+	FS_DQ_SYNCS = 8,
 };
 
 /* CTL_DEBUG names: */
@@ -551,7 +623,8 @@ enum {
 	DEV_HWMON=2,
 	DEV_PARPORT=3,
 	DEV_RAID=4,
-	DEV_MAC_HID=5
+	DEV_MAC_HID=5,
+	DEV_SCSI=6,
 };
 
 /* /proc/sys/dev/cdrom */
@@ -612,6 +685,11 @@ enum {
 	DEV_MAC_HID_ADB_MOUSE_SENDS_KEYCODES=6
 };
 
+/* /proc/sys/dev/scsi */
+enum {
+	DEV_SCSI_LOGGING_LEVEL=1,
+};
+
 /* /proc/sys/abi */
 enum
 {
@@ -625,42 +703,42 @@ enum
 
 #ifdef __KERNEL__
 
-extern asmlinkage long sys_sysctl(struct __sysctl_args *);
+extern asmlinkage long sys_sysctl(struct __sysctl_args __user *);
 extern void sysctl_init(void);
 
 typedef struct ctl_table ctl_table;
 
-typedef int ctl_handler (ctl_table *table, int *name, int nlen,
-			 void *oldval, size_t *oldlenp,
-			 void *newval, size_t newlen, 
+typedef int ctl_handler (ctl_table *table, int __user *name, int nlen,
+			 void __user *oldval, size_t __user *oldlenp,
+			 void __user *newval, size_t newlen, 
 			 void **context);
 
 typedef int proc_handler (ctl_table *ctl, int write, struct file * filp,
-			  void *buffer, size_t *lenp);
+			  void __user *buffer, size_t *lenp);
 
 extern int proc_dostring(ctl_table *, int, struct file *,
-			 void *, size_t *);
+			 void __user *, size_t *);
 extern int proc_dointvec(ctl_table *, int, struct file *,
-			 void *, size_t *);
+			 void __user *, size_t *);
 extern int proc_dointvec_bset(ctl_table *, int, struct file *,
-			      void *, size_t *);
+			      void __user *, size_t *);
 extern int proc_dointvec_minmax(ctl_table *, int, struct file *,
-				void *, size_t *);
+				void __user *, size_t *);
 extern int proc_dointvec_jiffies(ctl_table *, int, struct file *,
-				 void *, size_t *);
+				 void __user *, size_t *);
 extern int proc_doulongvec_minmax(ctl_table *, int, struct file *,
-				  void *, size_t *);
+				  void __user *, size_t *);
 extern int proc_doulongvec_ms_jiffies_minmax(ctl_table *table, int,
-				      struct file *, void *, size_t *);
+				      struct file *, void __user *, size_t *);
 
-extern int do_sysctl (int *name, int nlen,
-		      void *oldval, size_t *oldlenp,
-		      void *newval, size_t newlen);
+extern int do_sysctl (int __user *name, int nlen,
+		      void __user *oldval, size_t __user *oldlenp,
+		      void __user *newval, size_t newlen);
 
 extern int do_sysctl_strategy (ctl_table *table, 
-			       int *name, int nlen,
-			       void *oldval, size_t *oldlenp,
-			       void *newval, size_t newlen, void ** context);
+			       int __user *name, int nlen,
+			       void __user *oldval, size_t __user *oldlenp,
+			       void __user *newval, size_t newlen, void ** context);
 
 extern ctl_handler sysctl_string;
 extern ctl_handler sysctl_intvec;

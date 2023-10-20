@@ -28,18 +28,19 @@
 void atm_push_raw(struct atm_vcc *vcc,struct sk_buff *skb)
 {
 	if (skb) {
-		skb_queue_tail(&vcc->recvq,skb);
-		wake_up(&vcc->sleep);
+		skb_queue_tail(&vcc->sk->sk_receive_queue, skb);
+		vcc->sk->sk_data_ready(vcc->sk, skb->len);
 	}
 }
 
 
 static void atm_pop_raw(struct atm_vcc *vcc,struct sk_buff *skb)
 {
-	DPRINTK("APopR (%d) %d -= %d\n",vcc->vci,vcc->tx_inuse,skb->truesize);
-	atomic_sub(skb->truesize+ATM_PDU_OVHD,&vcc->tx_inuse);
+	DPRINTK("APopR (%d) %d -= %d\n", vcc->vci, vcc->sk->sk_wmem_alloc,
+		skb->truesize);
+	atomic_sub(skb->truesize, &vcc->sk->sk_wmem_alloc);
 	dev_kfree_skb_any(skb);
-	wake_up(&vcc->sleep);
+	vcc->sk->sk_write_space(vcc->sk);
 }
 
 

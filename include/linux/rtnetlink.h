@@ -3,9 +3,6 @@
 
 #include <linux/netlink.h>
 
-#define RTNL_DEBUG 1
-
-
 /****
  *		Routing/neighbour discovery messages.
  ****/
@@ -17,6 +14,7 @@
 #define	RTM_NEWLINK	(RTM_BASE+0)
 #define	RTM_DELLINK	(RTM_BASE+1)
 #define	RTM_GETLINK	(RTM_BASE+2)
+#define	RTM_SETLINK	(RTM_BASE+3)
 
 #define	RTM_NEWADDR	(RTM_BASE+4)
 #define	RTM_DELADDR	(RTM_BASE+5)
@@ -49,7 +47,7 @@
 #define	RTM_MAX		(RTM_BASE+31)
 
 /* 
-   Generic structure for encapsulation optional route information.
+   Generic structure for encapsulation of optional route information.
    It is reminiscent of sockaddr, but with sa_family replaced
    with attribute type.
  */
@@ -77,7 +75,7 @@ struct rtattr
 
 
 /******************************************************************************
- *		Definitions used in routing table administation.
+ *		Definitions used in routing table administration.
  ****/
 
 struct rtmsg
@@ -128,18 +126,19 @@ enum
 #define RTPROT_STATIC	4	/* Route installed by administrator	*/
 
 /* Values of protocol >= RTPROT_STATIC are not interpreted by kernel;
-   they just passed from user and back as is.
+   they are just passed from user and back as is.
    It will be used by hypothetical multiple routing daemons.
    Note that protocol values should be standardized in order to
    avoid conflicts.
  */
 
 #define RTPROT_GATED	8	/* Apparently, GateD */
-#define RTPROT_RA	9	/* RDISC/ND router advertisments */
+#define RTPROT_RA	9	/* RDISC/ND router advertisements */
 #define RTPROT_MRT	10	/* Merit MRT */
 #define RTPROT_ZEBRA	11	/* Zebra */
 #define RTPROT_BIRD	12	/* BIRD */
 #define RTPROT_DNROUTED	13	/* DECnet routing daemon */
+#define RTPROT_XORP	14	/* XORP */
 
 /* rtm_scope
 
@@ -167,6 +166,7 @@ enum rt_scope_t
 #define RTM_F_NOTIFY		0x100	/* Notify user of route change	*/
 #define RTM_F_CLONED		0x200	/* This route is cloned		*/
 #define RTM_F_EQUALIZE		0x400	/* Multipath equalizer: NI	*/
+#define RTM_F_PREFIX		0x800	/* Prefix addresses		*/
 
 /* Reserved table identifiers */
 
@@ -198,18 +198,19 @@ enum rtattr_type_t
 	RTA_MULTIPATH,
 	RTA_PROTOINFO,
 	RTA_FLOW,
-	RTA_CACHEINFO
+	RTA_CACHEINFO,
+	RTA_SESSION,
 };
 
-#define RTA_MAX RTA_CACHEINFO
+#define RTA_MAX RTA_SESSION
 
 #define RTM_RTA(r)  ((struct rtattr*)(((char*)(r)) + NLMSG_ALIGN(sizeof(struct rtmsg))))
 #define RTM_PAYLOAD(n) NLMSG_PAYLOAD(n,sizeof(struct rtmsg))
 
 /* RTM_MULTIPATH --- array of struct rtnexthop.
  *
- * "struct rtnexthop" describres all necessary nexthop information,
- * i.e. parameters of path to a destination via this nextop.
+ * "struct rtnexthop" describes all necessary nexthop information,
+ * i.e. parameters of path to a destination via this nexthop.
  *
  * At the moment it is impossible to set different prefsrc, mtu, window
  * and rtt for different paths from multipath.
@@ -280,10 +281,39 @@ enum
 #define RTAX_ADVMSS RTAX_ADVMSS
 	RTAX_REORDERING,
 #define RTAX_REORDERING RTAX_REORDERING
+	RTAX_HOPLIMIT,
+#define RTAX_HOPLIMIT RTAX_HOPLIMIT
+	RTAX_INITCWND,
+#define RTAX_INITCWND RTAX_INITCWND
+	RTAX_FEATURES,
+#define RTAX_FEATURES RTAX_FEATURES
 };
 
-#define RTAX_MAX RTAX_REORDERING
+#define RTAX_MAX RTAX_FEATURES
 
+#define RTAX_FEATURE_ECN	0x00000001
+#define RTAX_FEATURE_SACK	0x00000002
+#define RTAX_FEATURE_TIMESTAMP	0x00000004
+
+struct rta_session
+{
+	__u8	proto;
+
+	union {
+		struct {
+			__u16	sport;
+			__u16	dport;
+		} ports;
+
+		struct {
+			__u8	type;
+			__u8	code;
+			__u16	ident;
+		} icmpt;
+
+		__u32		spi;
+	} u;
+};
 
 
 /*********************************************************
@@ -315,6 +345,7 @@ enum
 /* ifa_flags */
 
 #define IFA_F_SECONDARY		0x01
+#define IFA_F_TEMPORARY		IFA_F_SECONDARY
 
 #define IFA_F_DEPRECATED	0x20
 #define IFA_F_TENTATIVE		0x40
@@ -322,8 +353,10 @@ enum
 
 struct ifa_cacheinfo
 {
-	__s32	ifa_prefered;
-	__s32	ifa_valid;
+	__u32	ifa_prefered;
+	__u32	ifa_valid;
+	__u32	cstamp; /* created timestamp, hundredths of seconds */
+	__u32	tstamp; /* updated timestamp, hundredths of seconds */
 };
 
 
@@ -426,6 +459,40 @@ struct ifinfomsg
 	unsigned	ifi_change;		/* IFF_* change mask */
 };
 
+/* The struct should be in sync with struct net_device_stats */
+struct rtnl_link_stats
+{
+	__u32	rx_packets;		/* total packets received	*/
+	__u32	tx_packets;		/* total packets transmitted	*/
+	__u32	rx_bytes;		/* total bytes received 	*/
+	__u32	tx_bytes;		/* total bytes transmitted	*/
+	__u32	rx_errors;		/* bad packets received		*/
+	__u32	tx_errors;		/* packet transmit problems	*/
+	__u32	rx_dropped;		/* no space in linux buffers	*/
+	__u32	tx_dropped;		/* no space available in linux	*/
+	__u32	multicast;		/* multicast packets received	*/
+	__u32	collisions;
+
+	/* detailed rx_errors: */
+	__u32	rx_length_errors;
+	__u32	rx_over_errors;		/* receiver ring buff overflow	*/
+	__u32	rx_crc_errors;		/* recved pkt with crc error	*/
+	__u32	rx_frame_errors;	/* recv'd frame alignment error */
+	__u32	rx_fifo_errors;		/* recv'r fifo overrun		*/
+	__u32	rx_missed_errors;	/* receiver missed packet	*/
+
+	/* detailed tx_errors */
+	__u32	tx_aborted_errors;
+	__u32	tx_carrier_errors;
+	__u32	tx_fifo_errors;
+	__u32	tx_heartbeat_errors;
+	__u32	tx_window_errors;
+	
+	/* for cslip etc */
+	__u32	rx_compressed;
+	__u32	tx_compressed;
+};
+
 enum
 {
 	IFLA_UNSPEC,
@@ -440,12 +507,16 @@ enum
 #define IFLA_COST IFLA_COST
 	IFLA_PRIORITY,
 #define IFLA_PRIORITY IFLA_PRIORITY
-	IFLA_MASTER
+	IFLA_MASTER,
 #define IFLA_MASTER IFLA_MASTER
+	IFLA_WIRELESS,		/* Wireless Extension event - see wireless.h */
+#define IFLA_WIRELESS IFLA_WIRELESS
+	IFLA_PROTINFO,		/* Protocol specific information for a link */
+#define IFLA_PROTINFO IFLA_PROTINFO
 };
 
 
-#define IFLA_MAX IFLA_MASTER
+#define IFLA_MAX IFLA_PROTINFO
 
 #define IFLA_RTA(r)  ((struct rtattr*)(((char*)(r)) + NLMSG_ALIGN(sizeof(struct ifinfomsg))))
 #define IFLA_PAYLOAD(n) NLMSG_PAYLOAD(n,sizeof(struct ifinfomsg))
@@ -461,7 +532,7 @@ enum
 
    Comments:
    - Combination IFF_BROADCAST|IFF_POINTOPOINT is invalid
-   - If neiher of these three flags are set;
+   - If neither of these three flags are set;
      the interface is NBMA.
 
    - IFF_MULTICAST does not mean anything special:
@@ -478,6 +549,18 @@ enum
    or maybe 0, what means, that real media is unknown (usual
    for IPIP tunnels, when route to endpoint is allowed to change)
  */
+
+/* Subtype attributes for IFLA_PROTINFO */
+enum
+{
+	IFLA_INET6_UNSPEC,
+	IFLA_INET6_FLAGS,	/* link flags			*/
+	IFLA_INET6_CONF,	/* sysctl parameters		*/
+	IFLA_INET6_STATS,	/* statistics			*/
+	IFLA_INET6_MCAST,	/* MC things. What of them?	*/
+};
+
+#define IFLA_INET6_MAX	IFLA_INET6_MCAST
 
 /*****************************************************************
  *		Traffic control messages.
@@ -538,7 +621,7 @@ enum
 
 #include <linux/config.h>
 
-static __inline__ int rtattr_strcmp(struct rtattr *rta, char *str)
+static __inline__ int rtattr_strcmp(const struct rtattr *rta, const char *str)
 {
 	int len = strlen(str) + 1;
 	return len > rta->rta_len || memcmp(RTA_DATA(rta), str, len);
@@ -546,7 +629,6 @@ static __inline__ int rtattr_strcmp(struct rtattr *rta, char *str)
 
 extern int rtattr_parse(struct rtattr *tb[], int maxattr, struct rtattr *rta, int len);
 
-#ifdef CONFIG_RTNETLINK
 extern struct sock *rtnl;
 
 struct rtnetlink_link
@@ -558,21 +640,33 @@ struct rtnetlink_link
 extern struct rtnetlink_link * rtnetlink_links[NPROTO];
 extern int rtnetlink_dump_ifinfo(struct sk_buff *skb, struct netlink_callback *cb);
 extern int rtnetlink_send(struct sk_buff *skb, u32 pid, u32 group, int echo);
-extern int rtnetlink_put_metrics(struct sk_buff *skb, unsigned *metrics);
+extern int rtnetlink_put_metrics(struct sk_buff *skb, u32 *metrics);
 
 extern void __rta_fill(struct sk_buff *skb, int attrtype, int attrlen, const void *data);
 
 #define RTA_PUT(skb, attrtype, attrlen, data) \
-({ if (skb_tailroom(skb) < (int)RTA_SPACE(attrlen)) goto rtattr_failure; \
-   __rta_fill(skb, attrtype, attrlen, data); })
+({	if (unlikely(skb_tailroom(skb) < (int)RTA_SPACE(attrlen))) \
+		 goto rtattr_failure; \
+   	__rta_fill(skb, attrtype, attrlen, data); }) 
+
+static inline struct rtattr *
+__rta_reserve(struct sk_buff *skb, int attrtype, int attrlen)
+{
+	struct rtattr *rta;
+	int size = RTA_LENGTH(attrlen);
+
+	rta = (struct rtattr*)skb_put(skb, RTA_ALIGN(size));
+	rta->rta_type = attrtype;
+	rta->rta_len = size;
+	return rta;
+}
+
+#define __RTA_PUT(skb, attrtype, attrlen) \
+({ 	if (unlikely(skb_tailroom(skb) < (int)RTA_SPACE(attrlen))) \
+		goto rtattr_failure; \
+   	__rta_reserve(skb, attrtype, attrlen); })
 
 extern void rtmsg_ifinfo(int type, struct net_device *dev, unsigned change);
-
-#else
-
-#define rtmsg_ifinfo(a,b,c) do { } while (0)
-
-#endif
 
 extern struct semaphore rtnl_sem;
 
@@ -583,24 +677,30 @@ extern struct semaphore rtnl_sem;
 #define rtnl_shlock()		down(&rtnl_sem)
 #define rtnl_shlock_nowait()	down_trylock(&rtnl_sem)
 
-#ifndef CONFIG_RTNETLINK
-#define rtnl_shunlock()	up(&rtnl_sem)
-#else
 #define rtnl_shunlock()	do { up(&rtnl_sem); \
-		             if (rtnl && rtnl->receive_queue.qlen) \
-				     rtnl->data_ready(rtnl, 0); \
+		             if (rtnl && rtnl->sk_receive_queue.qlen) \
+				     rtnl->sk_data_ready(rtnl, 0); \
 		        } while(0)
-#endif
 
 extern void rtnl_lock(void);
 extern void rtnl_unlock(void);
 extern void rtnetlink_init(void);
 
-#define ASSERT_RTNL() do { if (down_trylock(&rtnl_sem) == 0)  { up(&rtnl_sem); \
-printk("RTNL: assertion failed at " __FILE__ "(%d):" __FUNCTION__ "\n", __LINE__); } \
-		   } while(0);
-#define BUG_TRAP(x) if (!(x)) { printk("KERNEL: assertion (" #x ") failed at " __FILE__ "(%d):" __FUNCTION__ "\n", __LINE__); }
+#define ASSERT_RTNL() do { \
+	if (unlikely(down_trylock(&rtnl_sem) == 0)) { \
+		up(&rtnl_sem); \
+		printk(KERN_ERR "RTNL: assertion failed at %s (%d)\n", \
+		       __FILE__,  __LINE__); \
+		dump_stack(); \
+	} \
+} while(0)
 
+#define BUG_TRAP(x) do { \
+	if (unlikely(!(x))) { \
+		printk(KERN_ERR "KERNEL: assertion (%s) failed at %s (%d)\n", \
+			#x,  __FILE__ , __LINE__); \
+	} \
+} while(0)
 
 #endif /* __KERNEL__ */
 

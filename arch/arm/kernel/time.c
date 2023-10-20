@@ -2,7 +2,7 @@
  *  linux/arch/arm/kernel/time.c
  *
  *  Copyright (C) 1991, 1992, 1995  Linus Torvalds
- *  Modifications for ARM (C) 1994, 1995, 1996,1997 Russell King
+ *  Modifications for ARM (C) 1994-2001 Russell King
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -18,34 +18,36 @@
  */
 #include <linux/config.h>
 #include <linux/module.h>
-#include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/interrupt.h>
 #include <linux/time.h>
 #include <linux/init.h>
 #include <linux/smp.h>
+#include <linux/timex.h>
+#include <linux/errno.h>
+#include <linux/profile.h>
+#include <linux/sysdev.h>
 
-#include <asm/uaccess.h>
+#include <asm/hardware.h>
 #include <asm/io.h>
 #include <asm/irq.h>
+#include <asm/leds.h>
 
-#include <linux/timex.h>
-#include <asm/hardware.h>
+u64 jiffies_64 = INITIAL_JIFFIES;
 
-extern int setup_arm_irq(int, struct irqaction *);
-extern rwlock_t xtime_lock;
+EXPORT_SYMBOL(jiffies_64);
+
 extern unsigned long wall_jiffies;
+
+/* this needs a better home */
+spinlock_t rtc_lock = SPIN_LOCK_UNLOCKED;
+
+#ifdef CONFIG_SA1100_RTC_MODULE
+EXPORT_SYMBOL(rtc_lock);
+#endif
 
 /* change this if you have some constant time drift */
 #define USECS_PER_JIFFY	(1000000/HZ)
-
-#ifndef BCD_TO_BIN
-#define BCD_TO_BIN(val) ((val)=((val)&15) + ((val)>>4)*10)
-#endif
-
-#ifndef BIN_TO_BCD
-#define BIN_TO_BCD(val) ((val)=(((val)/10)<<4) + (val)%10)
-#endif
 
 static int dummy_set_rtc(void)
 {
@@ -69,6 +71,14 @@ static unsigned long dummy_gettimeoffset(void)
 unsigned long (*gettimeoffset)(void) = dummy_gettimeoffset;
 
 /*
+ * Scheduler clock - returns current time in nanosec units.
+ */
+unsigned long long sched_clock(void)
+{
+	return (unsigned long long)jiffies * (1000000000 / HZ);
+}
+
+/*
  * Handle kernel profile stuff...
  */
 static inline void do_profile(struct pt_regs *regs)
@@ -90,7 +100,7 @@ static inline void do_profile(struct pt_regs *regs)
 	}
 }
 
-static long next_rtc_update;
+static unsigned long next_rtc_update;
 
 /*
  * If we have an externally synchronized linux clock, then update
@@ -107,8 +117,8 @@ static inline void do_set_rtc(void)
 	    time_before(xtime.tv_sec, next_rtc_update))
 		return;
 
-	if (xtime.tv_usec < 50000 - (tick >> 1) &&
-	    xtime.tv_usec >= 50000 + (tick >> 1))
+	if (xtime.tv_nsec < 500000000 - ((unsigned) tick_nsec >> 1) &&
+	    xtime.tv_nsec >= 500000000 + ((unsigned) tick_nsec >> 1))
 		return;
 
 	if (set_rtc())
@@ -122,17 +132,54 @@ static inline void do_set_rtc(void)
 
 #ifdef CONFIG_LEDS
 
-#include <asm/leds.h>
-
 static void dummy_leds_event(led_event_t evt)
 {
 }
 
 void (*leds_event)(led_event_t) = dummy_leds_event;
 
-#ifdef CONFIG_MODULES
+static int leds_suspend(struct sys_device *dev, u32 state)
+{
+	leds_event(led_stop);
+	return 0;
+}
+
+static int leds_resume(struct sys_device *dev)
+{
+	leds_event(led_start);
+	return 0;
+}
+
+static int leds_shutdown(struct sys_device *dev)
+{
+	leds_event(led_halted);
+	return 0;
+}
+
+static struct sysdev_class leds_sysclass = {
+	set_kset_name("leds"),
+	.shutdown	= leds_shutdown,
+	.suspend	= leds_suspend,
+	.resume		= leds_resume,
+};
+
+static struct sys_device leds_device = {
+	.id		= 0,
+	.cls		= &leds_sysclass,
+};
+
+static int __init leds_init(void)
+{
+	int ret;
+	ret = sysdev_class_register(&leds_sysclass);
+	if (ret == 0)
+		ret = sys_device_register(&leds_device);
+	return ret;
+}
+
+device_initcall(leds_init);
+
 EXPORT_SYMBOL(leds_event);
-#endif
 #endif
 
 #ifdef CONFIG_LEDS_TIMER
@@ -152,19 +199,20 @@ static void do_leds(void)
 void do_gettimeofday(struct timeval *tv)
 {
 	unsigned long flags;
-	unsigned long usec, sec;
+	unsigned long seq;
+	unsigned long usec, sec, lost;
 
-	read_lock_irqsave(&xtime_lock, flags);
-	usec = gettimeoffset();
-	{
-		unsigned long lost = jiffies - wall_jiffies;
+	do {
+		seq = read_seqbegin_irqsave(&xtime_lock, flags);
+		usec = gettimeoffset();
 
+		lost = jiffies - wall_jiffies;
 		if (lost)
 			usec += lost * USECS_PER_JIFFY;
-	}
-	sec = xtime.tv_sec;
-	usec += xtime.tv_usec;
-	read_unlock_irqrestore(&xtime_lock, flags);
+
+		sec = xtime.tv_sec;
+		usec += xtime.tv_nsec / 1000;
+	} while (read_seqretry_irqrestore(&xtime_lock, seq, flags));
 
 	/* usec may have gone up a lot: be safe */
 	while (usec >= 1000000) {
@@ -176,50 +224,49 @@ void do_gettimeofday(struct timeval *tv)
 	tv->tv_usec = usec;
 }
 
-void do_settimeofday(struct timeval *tv)
+EXPORT_SYMBOL(do_gettimeofday);
+
+int do_settimeofday(struct timespec *tv)
 {
-	write_lock_irq(&xtime_lock);
-	/* This is revolting. We need to set the xtime.tv_usec
-	 * correctly. However, the value in this location is
-	 * is value at the last tick.
-	 * Discover what correction gettimeofday
-	 * would have done, and then undo it!
+	time_t wtm_sec, sec = tv->tv_sec;
+	long wtm_nsec, nsec = tv->tv_nsec;
+
+	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
+		return -EINVAL;
+
+	write_seqlock_irq(&xtime_lock);
+	/*
+	 * This is revolting. We need to set "xtime" correctly. However, the
+	 * value in this location is the value at the most recent update of
+	 * wall time.  Discover what correction gettimeofday() would have
+	 * done, and then undo it!
 	 */
-	tv->tv_usec -= gettimeoffset();
-	tv->tv_usec -= (jiffies - wall_jiffies) * USECS_PER_JIFFY;
+	nsec -= gettimeoffset() * NSEC_PER_USEC;
+	nsec -= (jiffies - wall_jiffies) * TICK_NSEC;
 
-	while (tv->tv_usec < 0) {
-		tv->tv_usec += 1000000;
-		tv->tv_sec--;
-	}
+	wtm_sec  = wall_to_monotonic.tv_sec + (xtime.tv_sec - sec);
+	wtm_nsec = wall_to_monotonic.tv_nsec + (xtime.tv_nsec - nsec);
 
-	xtime = *tv;
+	set_normalized_timespec(&xtime, sec, nsec);
+	set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
+
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
-	write_unlock_irq(&xtime_lock);
+	write_sequnlock_irq(&xtime_lock);
+	clock_was_set();
+	return 0;
 }
 
+EXPORT_SYMBOL(do_settimeofday);
+
 static struct irqaction timer_irq = {
-	name: "timer",
+	.name	= "timer",
+	.flags	= SA_INTERRUPT,
 };
 
 /*
  * Include architecture specific code
  */
 #include <asm/arch/time.h>
-
-/*
- * This must cause the timer to start ticking.
- * It doesn't have to set the current time though
- * from an RTC - it can be done later once we have
- * some buses initialised.
- */
-void __init time_init(void)
-{
-	xtime.tv_usec = 0;
-	xtime.tv_sec  = 0;
-
-	setup_timer();
-}

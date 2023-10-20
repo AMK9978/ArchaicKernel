@@ -53,10 +53,7 @@ static int __init com20020isa_probe(struct net_device *dev)
 	int ioaddr;
 	unsigned long airqmask;
 	struct arcnet_local *lp = dev->priv;
-
-#ifndef MODULE
-	arcnet_init();
-#endif
+	int err;
 
 	BUGLVL(D_NORMAL) printk(VERSION);
 
@@ -66,17 +63,20 @@ static int __init com20020isa_probe(struct net_device *dev)
 		       "must specify the base address!\n");
 		return -ENODEV;
 	}
-	if (check_region(ioaddr, ARCNET_TOTAL_SIZE)) {
+	if (!request_region(ioaddr, ARCNET_TOTAL_SIZE, "arcnet (COM20020)")) {
 		BUGMSG(D_NORMAL, "IO region %xh-%xh already allocated.\n",
 		       ioaddr, ioaddr + ARCNET_TOTAL_SIZE - 1);
 		return -ENXIO;
 	}
 	if (ASTATUS() == 0xFF) {
 		BUGMSG(D_NORMAL, "IO address %x empty\n", ioaddr);
-		return -ENODEV;
+		err = -ENODEV;
+		goto out;
 	}
-	if (com20020_check(dev))
-		return -ENODEV;
+	if (com20020_check(dev)) {
+		err = -ENODEV;
+		goto out;
+	}
 
 	if (!dev->irq) {
 		/* if we do this, we're sure to get an IRQ since the
@@ -100,13 +100,21 @@ static int __init com20020isa_probe(struct net_device *dev)
 			dev->irq = probe_irq_off(airqmask);
 			if (dev->irq <= 0) {
 				BUGMSG(D_NORMAL, "Autoprobe IRQ failed.\n");
-				return -ENODEV;
+				err = -ENODEV;
+				goto out;
 			}
 		}
 	}
 
 	lp->card_name = "ISA COM20020";
-	return com20020_found(dev, 0);
+	if ((err = com20020_found(dev, 0)) != 0)
+		goto out;
+
+	return 0;
+
+out:
+	release_region(ioaddr, ARCNET_TOTAL_SIZE);
+	return err;
 }
 
 
@@ -133,14 +141,7 @@ MODULE_PARM(timeout, "i");
 MODULE_PARM(backplane, "i");
 MODULE_PARM(clockp, "i");
 MODULE_PARM(clockm, "i");
-
-static void com20020isa_open_close(struct net_device *dev, bool open)
-{
-	if (open)
-		MOD_INC_USE_COUNT;
-	else
-		MOD_DEC_USE_COUNT;
-}
+MODULE_LICENSE("GPL");
 
 int init_module(void)
 {
@@ -163,7 +164,7 @@ int init_module(void)
 	lp->clockp = clockp & 7;
 	lp->clockm = clockm & 3;
 	lp->timeout = timeout & 3;
-	lp->hw.open_close_ll = com20020isa_open_close;
+	lp->hw.owner = THIS_MODULE;
 
 	dev->base_addr = io;
 	dev->irq = irq;
@@ -181,6 +182,7 @@ int init_module(void)
 void cleanup_module(void)
 {
 	com20020_remove(my_dev);
+	release_region(my_dev->base_addr, ARCNET_TOTAL_SIZE);
 }
 
 #else

@@ -12,6 +12,10 @@
 #include <linux/netfilter_ipv4/ip_tables.h>
 #include <linux/netfilter_ipv4/ipt_TCPMSS.h>
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Marc Boucher <marc@mbsi.ca>");
+MODULE_DESCRIPTION("iptables TCP MSS modification module");
+
 #if 0
 #define DEBUGP printk
 #else
@@ -36,19 +40,23 @@ optlen(const u_int8_t *opt, unsigned int offset)
 
 static unsigned int
 ipt_tcpmss_target(struct sk_buff **pskb,
-		  unsigned int hooknum,
 		  const struct net_device *in,
 		  const struct net_device *out,
+		  unsigned int hooknum,
 		  const void *targinfo,
 		  void *userinfo)
 {
 	const struct ipt_tcpmss_info *tcpmssinfo = targinfo;
 	struct tcphdr *tcph;
-	struct iphdr *iph = (*pskb)->nh.iph;
+	struct iphdr *iph;
 	u_int16_t tcplen, newtotlen, oldval, newmss;
 	unsigned int i;
 	u_int8_t *opt;
 
+	if (!skb_ip_make_writable(pskb, (*pskb)->len))
+		return NF_DROP;
+
+	iph = (*pskb)->nh.iph;
 	tcplen = (*pskb)->len - iph->ihl*4;
 
 	tcph = (void *)iph + iph->ihl*4;
@@ -74,14 +82,14 @@ ipt_tcpmss_target(struct sk_buff **pskb,
 			return NF_DROP; /* or IPT_CONTINUE ?? */
 		}
 
-		if((*pskb)->dst->pmtu <= (sizeof(struct iphdr) + sizeof(struct tcphdr))) {
+		if(dst_pmtu((*pskb)->dst) <= (sizeof(struct iphdr) + sizeof(struct tcphdr))) {
 			if (net_ratelimit())
 				printk(KERN_ERR
-		       			"ipt_tcpmss_target: unknown or invalid path-MTU (%d)\n", (*pskb)->dst->pmtu);
+		       			"ipt_tcpmss_target: unknown or invalid path-MTU (%d)\n", dst_pmtu((*pskb)->dst));
 			return NF_DROP; /* or IPT_CONTINUE ?? */
 		}
 
-		newmss = (*pskb)->dst->pmtu - sizeof(struct iphdr) - sizeof(struct tcphdr);
+		newmss = dst_pmtu((*pskb)->dst) - sizeof(struct iphdr) - sizeof(struct tcphdr);
 	} else
 		newmss = tcpmssinfo->mss;
 
@@ -227,9 +235,12 @@ ipt_tcpmss_checkentry(const char *tablename,
 	return 0;
 }
 
-static struct ipt_target ipt_tcpmss_reg
-= { { NULL, NULL }, "TCPMSS",
-    ipt_tcpmss_target, ipt_tcpmss_checkentry, NULL, THIS_MODULE };
+static struct ipt_target ipt_tcpmss_reg = {
+	.name		= "TCPMSS",
+	.target		= ipt_tcpmss_target,
+	.checkentry	= ipt_tcpmss_checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {
@@ -243,4 +254,3 @@ static void __exit fini(void)
 
 module_init(init);
 module_exit(fini);
-MODULE_LICENSE("GPL");

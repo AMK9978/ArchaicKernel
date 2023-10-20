@@ -45,7 +45,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/string.h>
-#include <linux/tqueue.h>
+#include <linux/workqueue.h>
 #include <linux/fs.h>
 #include <linux/parport.h>
 #include <linux/smp_lock.h>
@@ -54,7 +54,6 @@
 #include <linux/kmod.h>
 #include <linux/hdlcdrv.h>
 #include <linux/baycom.h>
-#include <linux/soundmodem.h>
 #if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 /* prototypes for ax25_encapsulate and ax25_rebuild_header */
 #include <net/ax25.h> 
@@ -99,7 +98,7 @@ KERN_INFO "baycom_epp: version 0.7 compiled " __TIME__ " " __DATE__ "\n";
 
 #define NR_PORTS 4
 
-static struct net_device baycom_device[NR_PORTS];
+static struct net_device *baycom_device[NR_PORTS];
 
 /* --------------------------------------------------------------------- */
 
@@ -194,8 +193,8 @@ struct baycom_state {
 	int magic;
 
         struct pardevice *pdev;
-	unsigned int bh_running;
-	struct tq_struct run_bh;
+	unsigned int work_running;
+	struct work_struct run_work;
 	unsigned int modem;
 	unsigned int bitrate;
 	unsigned char stat;
@@ -302,7 +301,7 @@ static const unsigned short crc_ccitt_table[] = {
 /*---------------------------------------------------------------------------*/
 
 #if 0
-extern inline void append_crc_ccitt(unsigned char *buffer, int len)
+static inline void append_crc_ccitt(unsigned char *buffer, int len)
 {
  	unsigned int crc = 0xffff;
 
@@ -316,7 +315,7 @@ extern inline void append_crc_ccitt(unsigned char *buffer, int len)
 
 /*---------------------------------------------------------------------------*/
 
-extern inline int check_crc_ccitt(const unsigned char *buf, int cnt)
+static inline int check_crc_ccitt(const unsigned char *buf, int cnt)
 {
 	unsigned int crc = 0xffff;
 
@@ -327,7 +326,7 @@ extern inline int check_crc_ccitt(const unsigned char *buf, int cnt)
 
 /*---------------------------------------------------------------------------*/
 
-extern inline int calc_crc_ccitt(const unsigned char *buf, int cnt)
+static inline int calc_crc_ccitt(const unsigned char *buf, int cnt)
 {
 	unsigned int crc = 0xffff;
 
@@ -343,7 +342,7 @@ extern inline int calc_crc_ccitt(const unsigned char *buf, int cnt)
 
 /* --------------------------------------------------------------------- */
 
-static void inline baycom_int_freq(struct baycom_state *bc)
+static inline void baycom_int_freq(struct baycom_state *bc)
 {
 #ifdef BAYCOM_DEBUG
 	unsigned long cur_jiffies = jiffies;
@@ -370,15 +369,13 @@ static char eppconfig_path[256] = "/usr/sbin/eppfpga";
 
 static char *envp[] = { "HOME=/", "TERM=linux", "PATH=/usr/bin:/bin", NULL };
 
-static int errno;
-
-static int exec_eppfpga(void *b)
+/* eppconfig: called during ifconfig up to configure the modem */
+static int eppconfig(struct baycom_state *bc)
 {
-	struct baycom_state *bc = (struct baycom_state *)b;
 	char modearg[256];
 	char portarg[16];
-        char *argv[] = { eppconfig_path, "-s", "-p", portarg, "-m", modearg, NULL};
-        int i;
+        char *argv[] = { eppconfig_path, "-s", "-p", portarg, "-m", modearg,
+			 NULL };
 
 	/* set up arguments */
 	sprintf(modearg, "%sclk,%smodem,fclk=%d,bps=%d,divider=%d%s,extstat",
@@ -389,39 +386,7 @@ static int exec_eppfpga(void *b)
 	sprintf(portarg, "%ld", bc->pdev->port->base);
 	printk(KERN_DEBUG "%s: %s -s -p %s -m %s\n", bc_drvname, eppconfig_path, portarg, modearg);
 
-	i = exec_usermodehelper(eppconfig_path, argv, envp);
-	if (i < 0) {
-                printk(KERN_ERR "%s: failed to exec %s -s -p %s -m %s, errno = %d\n",
-                       bc_drvname, eppconfig_path, portarg, modearg, i);
-                return i;
-        }
-        return 0;
-}
-
-
-/* eppconfig: called during ifconfig up to configure the modem */
-
-static int eppconfig(struct baycom_state *bc)
-{
-        int i, pid, r;
-	mm_segment_t fs;
-
-        pid = kernel_thread(exec_eppfpga, bc, CLONE_FS);
-        if (pid < 0) {
-                printk(KERN_ERR "%s: fork failed, errno %d\n", bc_drvname, -pid);
-                return pid;
-        }
-	fs = get_fs();
-        set_fs(KERNEL_DS);      /* Allow i to be in kernel space. */
-	r = waitpid(pid, &i, __WCLONE);
-	set_fs(fs);
-        if (r != pid) {
-                printk(KERN_ERR "%s: waitpid(%d) failed, returning %d\n",
-		       bc_drvname, pid, r);
-		return -1;
-        }
-	printk(KERN_DEBUG "%s: eppfpga returned %d\n", bc_drvname, i);
-	return i;
+	return call_usermodehelper(eppconfig_path, argv, envp, 1);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -432,7 +397,7 @@ static void epp_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 /* ---------------------------------------------------------------------- */
 
-static void inline do_kiss_params(struct baycom_state *bc,
+static inline void do_kiss_params(struct baycom_state *bc,
 				  unsigned char *data, unsigned long len)
 {
 
@@ -481,7 +446,7 @@ static void inline do_kiss_params(struct baycom_state *bc,
 ({                                             \
         if (!(notbitstream & (0x1f0 << j)))    \
                 goto stuff##j;                 \
-  encodeend##j:                                \
+  encodeend##j:    	;                      \
 })
 
 #define ENCODEITERB(j)                                          \
@@ -706,6 +671,7 @@ static void do_rxpacket(struct net_device *dev)
 	skb->protocol = htons(ETH_P_AX25);
 	skb->mac.raw = skb->data;
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 	bc->stats.rx_packets++;
 }
 
@@ -715,7 +681,7 @@ static void do_rxpacket(struct net_device *dev)
                 goto flgabrt##j;                                              \
         if ((bitstream & (0x1f8 << j)) == (0xf8 << j))   /* stuffed bit */    \
                 goto stuff##j;                                                \
-  enditer##j:                                                                 \
+  enditer##j:      ;                                                           \
 })
 
 #define DECODEITERB(j)                                                                 \
@@ -807,10 +773,11 @@ static int receive(struct net_device *dev, int cnt)
 /* --------------------------------------------------------------------- */
 
 #ifdef __i386__
+#include <asm/msr.h>
 #define GETTICK(x)                                                \
 ({                                                                \
 	if (cpu_has_tsc)                                          \
-		__asm__ __volatile__("rdtsc" : "=a" (x) : : "dx");\
+		rdtscl(x);                                        \
 })
 #else /* __i386__ */
 #define GETTICK(x)
@@ -827,7 +794,7 @@ static void epp_bh(struct net_device *dev)
 	
 	baycom_paranoia_check_void(dev, "epp_bh");
 	bc = (struct baycom_state *)dev->priv;
-	if (!bc->bh_running)
+	if (!bc->work_running)
 		return;
 	baycom_int_freq(bc);
 	pp = bc->pdev->port;
@@ -926,7 +893,7 @@ static void epp_bh(struct net_device *dev)
 	bc->debug_vals.mod_cycles = time2 - time1;
 	bc->debug_vals.demod_cycles = time3 - time2;
 #endif /* BAYCOM_DEBUG */
-	queue_task(&bc->run_bh, &tq_timer);
+	schedule_delayed_work(&bc->run_work, 1);
 	if (!bc->skb)
 		netif_wake_queue(dev);
 	return;
@@ -1017,10 +984,6 @@ static int epp_open(struct net_device *dev)
 {
 	struct baycom_state *bc;
         struct parport *pp;
-	const struct tq_struct run_bh = {
-		routine: (void *)(void *)epp_bh,
-		data: dev
-	};
 	unsigned int i, j;
 	unsigned char tmp[128];
 	unsigned char stat;
@@ -1058,8 +1021,8 @@ static int epp_open(struct net_device *dev)
                 return -EBUSY;
         }
         dev->irq = /*pp->irq*/ 0;
-	bc->run_bh = run_bh;
-	bc->bh_running = 1;
+	INIT_WORK(&bc->run_work, (void *)(void *)epp_bh, dev);
+	bc->work_running = 1;
 	bc->modem = EPP_CONVENTIONAL;
 	if (eppconfig(bc))
 		printk(KERN_INFO "%s: no FPGA detected, assuming conventional EPP modem\n", bc_drvname);
@@ -1119,9 +1082,8 @@ static int epp_open(struct net_device *dev)
 	bc->hdlctx.slotcnt = bc->ch_params.slottime;
 	bc->hdlctx.calibrate = 0;
 	/* start the bottom half stuff */
-	queue_task(&bc->run_bh, &tq_timer);
+	schedule_delayed_work(&bc->run_work, 1);
 	netif_start_queue(dev);
-	MOD_INC_USE_COUNT;
 	return 0;
 
  epptimeout:
@@ -1143,8 +1105,8 @@ static int epp_close(struct net_device *dev)
 	baycom_paranoia_check(dev, "epp_close", -EINVAL);
 	bc = (struct baycom_state *)dev->priv;
 	pp = bc->pdev->port;
-	bc->bh_running = 0;
-	run_task_queue(&tq_timer);  /* dequeue bottom half */
+	bc->work_running = 0;
+	flush_scheduled_work();
 	bc->stat = EPP_DCDBIT;
 	tmp[0] = 0;
 	pp->ops->epp_write_addr(pp, tmp, 1, 0);
@@ -1156,7 +1118,6 @@ static int epp_close(struct net_device *dev)
 	bc->skb = NULL;
 	printk(KERN_INFO "%s: close epp at iobase 0x%lx irq %u\n",
 	       bc_drvname, dev->base_addr, dev->irq);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -1200,9 +1161,7 @@ static int baycom_setmode(struct baycom_state *bc, const char *modestr)
 static int baycom_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
 	struct baycom_state *bc;
-	struct baycom_ioctl bi;
 	struct hdlcdrv_ioctl hi;
-	struct sm_ioctl si;
 
 	baycom_paranoia_check(dev, "baycom_ioctl", -EINVAL);
 	bc = (struct baycom_state *)dev->priv;
@@ -1210,28 +1169,6 @@ static int baycom_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		return -ENOIOCTLCMD;
 	if (get_user(cmd, (int *)ifr->ifr_data))
 		return -EFAULT;
-#ifdef BAYCOM_DEBUG
-	if (cmd == BAYCOMCTL_GETDEBUG) {
-		bi.data.dbg.debug1 = bc->ptt_keyed;
-		bi.data.dbg.debug2 = bc->debug_vals.last_intcnt;
-		bi.data.dbg.debug3 = bc->debug_vals.last_pllcorr;
-		bc->debug_vals.last_intcnt = 0;
-		if (copy_to_user(ifr->ifr_data, &bi, sizeof(bi)))
-			return -EFAULT;
-		return 0;
-	}
-	if (cmd == SMCTL_GETDEBUG) {
-                si.data.dbg.int_rate = bc->debug_vals.last_intcnt;
-                si.data.dbg.mod_cycles = bc->debug_vals.mod_cycles;
-                si.data.dbg.demod_cycles = bc->debug_vals.demod_cycles;
-                si.data.dbg.dma_residue = 0;
-                bc->debug_vals.mod_cycles = bc->debug_vals.demod_cycles = 0;
-		bc->debug_vals.last_intcnt = 0;
-                if (copy_to_user(ifr->ifr_data, &si, sizeof(si)))
-                        return -EFAULT;
-                return 0;
-	}
-#endif /* BAYCOM_DEBUG */
 
 	if (copy_from_user(&hi, ifr->ifr_data, sizeof(hi)))
 		return -EFAULT;
@@ -1414,72 +1351,80 @@ MODULE_PARM_DESC(iobase, "baycom io base address");
 
 MODULE_AUTHOR("Thomas M. Sailer, sailer@ife.ee.ethz.ch, hb9jnx@hb9w.che.eu");
 MODULE_DESCRIPTION("Baycom epp amateur radio modem driver");
+MODULE_LICENSE("GPL");
 
 /* --------------------------------------------------------------------- */
 
+static void __init baycom_epp_dev_setup(struct net_device *dev)
+{
+	struct baycom_state *bc = dev->priv;
+
+	/*
+	 * initialize part of the baycom_state struct
+	 */
+	bc->magic = BAYCOM_MAGIC;
+	bc->cfg.fclk = 19666600;
+	bc->cfg.bps = 9600;
+	/*
+	 * initialize part of the device struct
+	 */
+	dev->init = baycom_probe;
+}
+
 static int __init init_baycomepp(void)
 {
-	struct net_device *dev;
 	int i, found = 0;
 	char set_hw = 1;
-	struct baycom_state *bc;
 
 	printk(bc_drvinfo);
 	/*
 	 * register net devices
 	 */
 	for (i = 0; i < NR_PORTS; i++) {
-		dev = baycom_device+i;
+		struct net_device *dev;
+		
+		dev = alloc_netdev(sizeof(struct baycom_state), "bce%d",
+				   baycom_epp_dev_setup);
+
+		if (!dev) {
+			printk(KERN_WARNING "bce%d : out of memory\n", i);
+			return found ? 0 : -ENOMEM;
+		}
+			
+		sprintf(dev->name, "bce%d", i);
+		dev->base_addr = iobase[i];
+
 		if (!mode[i])
 			set_hw = 0;
 		if (!set_hw)
 			iobase[i] = 0;
-		memset(dev, 0, sizeof(struct net_device));
-		if (!(bc = dev->priv = kmalloc(sizeof(struct baycom_state), GFP_KERNEL)))
-			return -ENOMEM;
-		/*
-		 * initialize part of the baycom_state struct
-		 */
-		memset(bc, 0, sizeof(struct baycom_state));
-		bc->magic = BAYCOM_MAGIC;
-		sprintf(dev->name, "bce%d", i);
-		bc->cfg.fclk = 19666600;
-		bc->cfg.bps = 9600;
-		/*
-		 * initialize part of the device struct
-		 */
-		dev->if_port = 0;
-		dev->init = baycom_probe;
-		dev->base_addr = iobase[i];
-		dev->irq = 0;
-		dev->dma = 0;
+
 		if (register_netdev(dev)) {
 			printk(KERN_WARNING "%s: cannot register net device %s\n", bc_drvname, dev->name);
-			kfree(dev->priv);
-			return -ENXIO;
+			kfree(dev);
+			break;
 		}
-		if (set_hw && baycom_setmode(bc, mode[i]))
+		if (set_hw && baycom_setmode(dev->priv, mode[i]))
 			set_hw = 0;
+		baycom_device[i] = dev;
 		found++;
 	}
-	if (!found)
-		return -ENXIO;
-	return 0;
+
+	return found ? 0 : -ENXIO;
 }
 
 static void __exit cleanup_baycomepp(void)
 {
-	struct net_device *dev;
-	struct baycom_state *bc;
 	int i;
 
 	for(i = 0; i < NR_PORTS; i++) {
-		dev = baycom_device+i;
-		bc = (struct baycom_state *)dev->priv;
-		if (bc) {
+		struct net_device *dev = baycom_device[i];
+
+		if (dev) {
+			struct baycom_state *bc = dev->priv;
 			if (bc->magic == BAYCOM_MAGIC) {
 				unregister_netdev(dev);
-				kfree(dev->priv);
+				free_netdev(dev);
 			} else
 				printk(paranoia_str, "cleanup_module");
 		}

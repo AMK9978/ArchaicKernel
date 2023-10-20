@@ -31,11 +31,9 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/tty.h>
-#include <linux/sched.h>
 #include <linux/init.h>
 
 #include <net/irda/irda.h>
-#include <net/irda/irmod.h>
 #include <net/irda/irda_device.h>
 
 #define MIN_DELAY 25      /* 15 us, but wait a little more to be sure */
@@ -50,12 +48,12 @@ static int  litelink_reset(struct irda_task *task);
 static __u32 baud_rates[] = { 115200, 57600, 38400, 19200, 9600 };
 
 static struct dongle_reg dongle = {
-	Q_NULL,
-	IRDA_LITELINK_DONGLE,
-	litelink_open,
-	litelink_close,
-	litelink_reset,
-	litelink_change_speed,
+	.type = IRDA_LITELINK_DONGLE,
+	.open = litelink_open,
+	.close = litelink_close,
+	.reset = litelink_reset,
+	.change_speed = litelink_change_speed,
+	.owner = THIS_MODULE,
 };
 
 int __init litelink_init(void)
@@ -63,7 +61,7 @@ int __init litelink_init(void)
 	return irda_device_register_dongle(&dongle);
 }
 
-void litelink_cleanup(void)
+void __exit litelink_cleanup(void)
 {
 	irda_device_unregister_dongle(&dongle);
 }
@@ -72,16 +70,12 @@ static void litelink_open(dongle_t *self, struct qos_info *qos)
 {
 	qos->baud_rate.bits &= IR_9600|IR_19200|IR_38400|IR_57600|IR_115200;
 	qos->min_turn_time.bits = 0x7f; /* Needs 0.01 ms */
-
-	MOD_INC_USE_COUNT;
 }
 
 static void litelink_close(dongle_t *self)
 {
 	/* Power off dongle */
 	self->set_dtr_rts(self->dev, FALSE, FALSE);
-
-	MOD_DEC_USE_COUNT;
 }
 
 /*
@@ -163,11 +157,10 @@ static int litelink_reset(struct irda_task *task)
 	return 0;
 }
 
-#ifdef MODULE
 MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");
 MODULE_DESCRIPTION("Parallax Litelink dongle driver");	
 MODULE_LICENSE("GPL");
-
+MODULE_ALIAS("irda-dongle-5"); /* IRDA_LITELINK_DONGLE */
 		
 /*
  * Function init_module (void)
@@ -175,10 +168,7 @@ MODULE_LICENSE("GPL");
  *    Initialize Litelink module
  *
  */
-int init_module(void)
-{
-	return litelink_init();
-}
+module_init(litelink_init);
 
 /*
  * Function cleanup_module (void)
@@ -186,8 +176,4 @@ int init_module(void)
  *    Cleanup Litelink module
  *
  */
-void cleanup_module(void)
-{
-	litelink_cleanup();
-}
-#endif /* MODULE */
+module_exit(litelink_cleanup);

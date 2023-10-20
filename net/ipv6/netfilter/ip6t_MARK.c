@@ -7,6 +7,9 @@
 #include <linux/netfilter_ipv6/ip6_tables.h>
 #include <linux/netfilter_ipv6/ip6t_MARK.h>
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+
 static unsigned int
 target(struct sk_buff **pskb,
        unsigned int hooknum,
@@ -51,7 +54,7 @@ static struct ip6t_target ip6t_mark_reg
 
 static int __init init(void)
 {
-	printk(KERN_DEBUG "registreing ipv6 mark target\n");
+	printk(KERN_DEBUG "registering ipv6 mark target\n");
 	if (ip6t_register_target(&ip6t_mark_reg))
 		return -EINVAL;
 
@@ -65,4 +68,3 @@ static void __exit fini(void)
 
 module_init(init);
 module_exit(fini);
-MODULE_LICENSE("GPL");

@@ -47,7 +47,6 @@ static void arcrimi_command(struct net_device *dev, int command);
 static int arcrimi_status(struct net_device *dev);
 static void arcrimi_setmask(struct net_device *dev, int mask);
 static int arcrimi_reset(struct net_device *dev, int really_reset);
-static void arcrimi_openclose(struct net_device *dev, bool open);
 static void arcrimi_copy_to_card(struct net_device *dev, int bufnum, int offset,
 				 void *buf, int count);
 static void arcrimi_copy_from_card(struct net_device *dev, int bufnum, int offset,
@@ -86,6 +85,8 @@ static void arcrimi_copy_from_card(struct net_device *dev, int bufnum, int offse
  */
 static int __init arcrimi_probe(struct net_device *dev)
 {
+	int retval;
+
 	BUGLVL(D_NORMAL) printk(VERSION);
 	BUGLVL(D_NORMAL) printk("E-mail me if you actually test the RIM I driver, please!\n");
 
@@ -97,16 +98,27 @@ static int __init arcrimi_probe(struct net_device *dev)
 		       "must specify the shmem and irq!\n");
 		return -ENODEV;
 	}
-	if (check_mem_region(dev->mem_start, BUFFER_SIZE)) {
+	/*
+	 * Grab the memory region at mem_start for BUFFER_SIZE bytes.
+	 * Later in arcrimi_found() the real size will be determined
+	 * and this reserve will be released and the correct size
+	 * will be taken.
+	 */
+	if (!request_mem_region(dev->mem_start, BUFFER_SIZE, "arcnet (90xx)")) {
 		BUGMSG(D_NORMAL, "Card memory already allocated\n");
 		return -ENODEV;
 	}
 	if (dev->dev_addr[0] == 0) {
+		release_mem_region(dev->mem_start, BUFFER_SIZE);
 		BUGMSG(D_NORMAL, "You need to specify your card's station "
 		       "ID!\n");
 		return -ENODEV;
 	}
-	return arcrimi_found(dev);
+	retval = arcrimi_found(dev);
+	if (retval < 0) {
+		release_mem_region(dev->mem_start, BUFFER_SIZE);
+	}
+	return retval;
 }
 
 
@@ -120,9 +132,9 @@ static int __init arcrimi_found(struct net_device *dev)
 	u_long first_mirror, last_mirror, shmem;
 	int mirror_size;
 
-	/* reserve the irq */  {
-		if (request_irq(dev->irq, &arcnet_interrupt, 0, "arcnet (RIM I)", dev))
-			BUGMSG(D_NORMAL, "Can't get IRQ %d!\n", dev->irq);
+	/* reserve the irq */
+	if (request_irq(dev->irq, &arcnet_interrupt, 0, "arcnet (RIM I)", dev)) {
+		BUGMSG(D_NORMAL, "Can't get IRQ %d!\n", dev->irq);
 		return -ENODEV;
 	}
 
@@ -153,8 +165,6 @@ static int __init arcrimi_found(struct net_device *dev)
 
 	dev->mem_start = first_mirror;
 	dev->mem_end = last_mirror + MIRROR_SIZE - 1;
-	dev->rmem_start = dev->mem_start + BUFFER_SIZE * 0;
-	dev->rmem_end = dev->mem_start + BUFFER_SIZE * 2 - 1;
 
 	/* initialize the rest of the device structure. */
 
@@ -168,7 +178,7 @@ static int __init arcrimi_found(struct net_device *dev)
 	lp->hw.status = arcrimi_status;
 	lp->hw.intmask = arcrimi_setmask;
 	lp->hw.reset = arcrimi_reset;
-	lp->hw.open_close = arcrimi_openclose;
+	lp->hw.owner = THIS_MODULE;
 	lp->hw.copy_to_card = arcrimi_copy_to_card;
 	lp->hw.copy_from_card = arcrimi_copy_from_card;
 	lp->mem_start = ioremap(dev->mem_start, dev->mem_end - dev->mem_start + 1);
@@ -184,8 +194,19 @@ static int __init arcrimi_found(struct net_device *dev)
 	/* get and check the station ID from offset 1 in shmem */
 	dev->dev_addr[0] = readb(lp->mem_start + 1);
 
-	/* reserve the memory region - guaranteed to work by check_region */
-	request_mem_region(dev->mem_start, dev->mem_end - dev->mem_start + 1, "arcnet (90xx)");
+	/*
+	 * re-reserve the memory region - arcrimi_probe() alloced this reqion
+	 * but didn't know the real size.  Free that region and then re-get
+	 * with the correct size.  There is a VERY slim chance this could
+	 * fail.
+	 */
+	release_mem_region(dev->mem_start, BUFFER_SIZE);
+	if (!request_mem_region(dev->mem_start,
+				dev->mem_end - dev->mem_start + 1,
+				"arcnet (90xx)")) {
+		BUGMSG(D_NORMAL, "Card memory already allocated\n");
+		goto err_free_dev_priv;
+	}
 
 	BUGMSG(D_NORMAL, "ARCnet RIM I: station %02Xh found at IRQ %d, "
 	       "ShMem %lXh (%ld*%d bytes).\n",
@@ -230,15 +251,6 @@ static int arcrimi_reset(struct net_device *dev, int really_reset)
 
 	/* done!  return success. */
 	return 0;
-}
-
-
-static void arcrimi_openclose(struct net_device *dev, int open)
-{
-	if (open)
-		MOD_INC_USE_COUNT;
-	else
-		MOD_DEC_USE_COUNT;
 }
 
 static void arcrimi_setmask(struct net_device *dev, int mask)
@@ -297,6 +309,7 @@ MODULE_PARM(node, "i");
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
 MODULE_PARM(device, "s");
+MODULE_LICENSE("GPL");
 
 int init_module(void)
 {
@@ -332,7 +345,7 @@ void cleanup_module(void)
 	iounmap(lp->mem_start);
 	release_mem_region(dev->mem_start, dev->mem_end - dev->mem_start + 1);
 	kfree(dev->priv);
-	kfree(dev);
+	free_netdev(dev);
 }
 
 #else

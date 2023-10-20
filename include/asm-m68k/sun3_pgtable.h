@@ -38,6 +38,8 @@
 #define _PAGE_PRESENT	(SUN3_PAGE_VALID)
 #define _PAGE_ACCESSED	(SUN3_PAGE_ACCESSED)
 
+#define PTE_FILE_MAX_BITS 28
+
 /* Compound page protection values. */
 //todo: work out which ones *should* have SUN3_PAGE_NOCACHE and fix...
 // is it just PAGE_KERNEL and PAGE_SHARED?
@@ -99,11 +101,8 @@
  * Conversion functions: convert a page and protection to a page entry,
  * and a page entry and page directory to the page they refer to.
  */
-#define __mk_pte(page, pgprot) \
-({ pte_t __pte; pte_val(__pte) = (__pa(page) >> PAGE_SHIFT) | pgprot_val(pgprot); __pte; })
-#define mk_pte(page, pgprot) __mk_pte(page_address(page), (pgprot))
-#define mk_pte_phys(physpage, pgprot) \
-({ pte_t __pte; pte_val(__pte) = ((physpage) >> PAGE_SHIFT) | pgprot_val(pgprot); __pte; })
+#define mk_pte(page, pgprot) pfn_pte(page_to_pfn(page), (pgprot))
+
 extern inline pte_t pte_modify (pte_t pte, pgprot_t newprot)
 { pte_val(pte) = (pte_val(pte) & SUN3_PAGE_CHG_MASK) | pgprot_val(newprot); return pte; }
 
@@ -121,12 +120,12 @@ extern inline int pte_none (pte_t pte) { return !pte_val (pte); }
 extern inline int pte_present (pte_t pte) { return pte_val (pte) & SUN3_PAGE_VALID; }
 extern inline void pte_clear (pte_t *ptep) { pte_val (*ptep) = 0; }
 
-/* FIXME: this is only a guess */
-#define pte_pagenr(pte)		((__pte_page(pte) - PAGE_OFFSET) >> PAGE_SHIFT)
-/* Permanent address of a page. */
-#define page_address(page)	({ if (!(page)->virtual) BUG(); (page)->virtual; })
-#define __page_address(page)	(PAGE_OFFSET + (((page) - mem_map) << PAGE_SHIFT))
-#define pte_page(pte)		(mem_map+pte_pagenr(pte))
+#define pte_pfn(pte)            (pte_val(pte) & SUN3_PAGE_PGNUM_MASK)
+#define pfn_pte(pfn, pgprot) \
+({ pte_t __pte; pte_val(__pte) = pfn | pgprot_val(pgprot); __pte; })
+
+#define pte_page(pte)		(mem_map+((__pte_page(pte) - PAGE_OFFSET) >> PAGE_SHIFT))
+#define pmd_page(pmd)		(mem_map+((__pmd_page(pmd) - PAGE_OFFSET) >> PAGE_SHIFT))
 
 
 extern inline int pmd_none2 (pmd_t *pmd) { return !pmd_val (*pmd); }
@@ -163,6 +162,7 @@ extern inline int pte_write(pte_t pte)		{ return pte_val(pte) & SUN3_PAGE_WRITEA
 extern inline int pte_exec(pte_t pte)		{ return 1; }
 extern inline int pte_dirty(pte_t pte)		{ return pte_val(pte) & SUN3_PAGE_MODIFIED; }
 extern inline int pte_young(pte_t pte)		{ return pte_val(pte) & SUN3_PAGE_ACCESSED; }
+extern inline int pte_file(pte_t pte)		{ return pte_val(pte) & SUN3_PAGE_ACCESSED; }
 
 extern inline pte_t pte_wrprotect(pte_t pte)	{ pte_val(pte) &= ~SUN3_PAGE_WRITEABLE; return pte; }
 extern inline pte_t pte_rdprotect(pte_t pte)	{ return pte; }
@@ -198,23 +198,33 @@ extern inline pmd_t *pmd_offset (pgd_t *pgd, unsigned long address)
 	return (pmd_t *) pgd;
 }
 
+static inline unsigned long pte_to_pgoff(pte_t pte)
+{
+	return pte.pte & SUN3_PAGE_PGNUM_MASK;
+}
+
+static inline pte_t pgoff_to_pte(inline unsigned off)
+{
+	pte_t pte = { off + SUN3_PAGE_ACCESSED };
+	return pte;
+}
+
+
 /* Find an entry in the third-level pagetable. */
-#define pte_offset(pmd, address) \
-((pte_t *) __pmd_page (*pmd) + ((address >> PAGE_SHIFT) & (PTRS_PER_PTE-1)))
+#define pte_index(address) ((address >> PAGE_SHIFT) & (PTRS_PER_PTE-1))
+#define pte_offset_kernel(pmd, address) ((pte_t *) __pmd_page(*pmd) + pte_index(address))
+/* FIXME: should we bother with kmap() here? */
+#define pte_offset_map(pmd, address) ((pte_t *)kmap(pmd_page(*pmd)) + pte_index(address))
+#define pte_offset_map_nested(pmd, address) pte_offset_map(pmd, address)
+#define pte_unmap(pte) kunmap(pte)
+#define pte_unmap_nested(pte) kunmap(pte)
 
-/* Disable caching for page at given kernel virtual address. */
-static inline void nocache_page (unsigned long vaddr)
-{
-	/* Don't think this is required on sun3. --m */
-}
-
-/* Enable caching for page at given kernel virtual address. */
-static inline void cache_page (unsigned long vaddr)
-{
-	/* Don't think this is required on sun3. --m */
-}
-
-
+/* Macros to (de)construct the fake PTEs representing swap pages. */
+#define __swp_type(x)		((x).val & 0x7F)
+#define __swp_offset(x)		(((x).val) >> 7)
+#define __swp_entry(type,offset) ((swp_entry_t) { ((type) | ((offset) << 7)) })
+#define __pte_to_swp_entry(pte)	((swp_entry_t) { pte_val(pte) })
+#define __swp_entry_to_pte(x)	((pte_t) { (x).val })
 
 #endif	/* !__ASSEMBLY__ */
 #endif	/* !_SUN3_PGTABLE_H */

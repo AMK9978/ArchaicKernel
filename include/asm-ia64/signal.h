@@ -2,7 +2,7 @@
 #define _ASM_IA64_SIGNAL_H
 
 /*
- * Copyright (C) 1998-2001 Hewlett-Packard Co
+ * Copyright (C) 1998-2001, 2003 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  *
  * Unfortunately, this file is being included by bits/signal.h in
@@ -50,7 +50,7 @@
 
 /* These should not be considered constants from userland.  */
 #define SIGRTMIN	32
-#define SIGRTMAX	(_NSIG-1)
+#define SIGRTMAX	_NSIG
 
 /*
  * SA_FLAGS values:
@@ -67,7 +67,7 @@
  * Unix names RESETHAND and NODEFER respectively.
  */
 #define SA_NOCLDSTOP	0x00000001
-#define SA_NOCLDWAIT	0x00000002 /* not supported yet */
+#define SA_NOCLDWAIT	0x00000002
 #define SA_SIGINFO	0x00000004
 #define SA_ONSTACK	0x08000000
 #define SA_RESTART	0x10000000
@@ -96,7 +96,16 @@
  * ar.rsc.loadrs is 14 bits, we can assume that they'll never take up
  * more than 16KB of space.
  */
-#define MINSIGSTKSZ	131027	/* min. stack size for sigaltstack() */
+#if 1
+  /*
+   * This is a stupid typo: the value was _meant_ to be 131072 (0x20000), but I typed it
+   * in wrong. ;-(  To preserve backwards compatibility, we leave the kernel at the
+   * incorrect value and fix libc only.
+   */
+# define MINSIGSTKSZ	131027	/* min. stack size for sigaltstack() */
+#else
+# define MINSIGSTKSZ	131072	/* min. stack size for sigaltstack() */
+#endif
 #define SIGSTKSZ	262144	/* default stack size for sigaltstack() */
 
 #ifdef __KERNEL__
@@ -115,6 +124,7 @@
 #define SA_PROBE		SA_ONESHOT
 #define SA_SAMPLE_RANDOM	SA_RESTART
 #define SA_SHIRQ		0x04000000
+#define SA_PERCPU_IRQ		0x02000000
 
 #endif /* __KERNEL__ */
 
@@ -164,6 +174,9 @@ struct k_sigaction {
 };
 
 #  include <asm/sigcontext.h>
+
+#define ptrace_signal_deliver(regs, cookie) do { } while (0)
+#define HAVE_ARCH_SYS_PAUSE
 
 #endif /* __KERNEL__ */
 

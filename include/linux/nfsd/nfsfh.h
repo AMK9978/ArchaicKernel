@@ -96,7 +96,7 @@ struct knfsd_fh {
 					 */
 	union {
 		struct nfs_fhbase_old	fh_old;
-		__u32			fh_pad[NFS3_FHSIZE/4];
+		__u32			fh_pad[NFS4_FHSIZE/4];
 		struct nfs_fhbase_new	fh_new;
 	} fh_base;
 };
@@ -116,19 +116,6 @@ struct knfsd_fh {
 #define	fh_auth			fh_base.fh_new.fb_auth
 
 #ifdef __KERNEL__
-
-/*
- * Conversion macros for the filehandle fields.
- */
-static inline __u32 kdev_t_to_u32(kdev_t dev)
-{
-	return (__u32) dev;
-}
-
-static inline kdev_t u32_to_kdev_t(__u32 udev)
-{
-	return (kdev_t) udev;
-}
 
 static inline __u32 ino_t_to_u32(ino_t ino)
 {
@@ -158,8 +145,8 @@ typedef struct svc_fh {
 
 	/* Pre-op attributes saved during fh_lock */
 	__u64			fh_pre_size;	/* size before operation */
-	time_t			fh_pre_mtime;	/* mtime before oper */
-	time_t			fh_pre_ctime;	/* ctime before oper */
+	struct timespec		fh_pre_mtime;	/* mtime before oper */
+	struct timespec		fh_pre_ctime;	/* ctime before oper */
 
 	/* Post-op attributes saved in fh_unlock */
 	umode_t			fh_post_mode;	/* i_mode */
@@ -169,13 +156,32 @@ typedef struct svc_fh {
 	__u64			fh_post_size;	/* i_size */
 	unsigned long		fh_post_blocks; /* i_blocks */
 	unsigned long		fh_post_blksize;/* i_blksize */
-	kdev_t			fh_post_rdev;	/* i_rdev */
-	time_t			fh_post_atime;	/* i_atime */
-	time_t			fh_post_mtime;	/* i_mtime */
-	time_t			fh_post_ctime;	/* i_ctime */
+	__u32			fh_post_rdev[2];/* i_rdev */
+	struct timespec		fh_post_atime;	/* i_atime */
+	struct timespec		fh_post_mtime;	/* i_mtime */
+	struct timespec		fh_post_ctime;	/* i_ctime */
 #endif /* CONFIG_NFSD_V3 */
 
 } svc_fh;
+
+static inline void mk_fsid_v0(u32 *fsidv, dev_t dev, ino_t ino)
+{
+	fsidv[0] = htonl((MAJOR(dev)<<16) |
+			MINOR(dev));
+	fsidv[1] = ino_t_to_u32(ino);
+}
+
+static inline void mk_fsid_v1(u32 *fsidv, u32 fsid)
+{
+	fsidv[0] = fsid;
+}
+
+static inline void mk_fsid_v2(u32 *fsidv, dev_t dev, ino_t ino)
+{
+	fsidv[0] = htonl(MAJOR(dev));
+	fsidv[1] = htonl(MINOR(dev));
+	fsidv[2] = ino_t_to_u32(ino);
+}
 
 /*
  * Shorthand for dprintk()'s
@@ -216,6 +222,14 @@ fh_copy(struct svc_fh *dst, struct svc_fh *src)
 	return dst;
 }
 
+static __inline__ void
+fh_dup2(struct svc_fh *dst, struct svc_fh *src)
+{
+	fh_put(dst);
+	dget(src->fh_dentry);
+	*dst = *src;
+}
+
 static __inline__ struct svc_fh *
 fh_init(struct svc_fh *fhp, int maxsize)
 {
@@ -236,7 +250,7 @@ fill_pre_wcc(struct svc_fh *fhp)
 	inode = fhp->fh_dentry->d_inode;
 	if (!fhp->fh_pre_saved) {
 		fhp->fh_pre_mtime = inode->i_mtime;
-			fhp->fh_pre_ctime = inode->i_ctime;
+		fhp->fh_pre_ctime = inode->i_ctime;
 			fhp->fh_pre_size  = inode->i_size;
 			fhp->fh_pre_saved = 1;
 	}
@@ -266,7 +280,8 @@ fill_post_wcc(struct svc_fh *fhp)
 		/* how much do we care for accuracy with MinixFS? */
 		fhp->fh_post_blocks     = (inode->i_size+511) >> 9;
 	}
-	fhp->fh_post_rdev       = inode->i_rdev;
+	fhp->fh_post_rdev[0]    = htonl((u32)imajor(inode));
+	fhp->fh_post_rdev[1]    = htonl((u32)iminor(inode));
 	fhp->fh_post_atime      = inode->i_atime;
 	fhp->fh_post_mtime      = inode->i_mtime;
 	fhp->fh_post_ctime      = inode->i_ctime;

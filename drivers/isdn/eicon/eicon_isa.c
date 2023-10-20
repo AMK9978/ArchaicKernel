@@ -1,4 +1,4 @@
-/* $Id: eicon_isa.c,v 1.16.6.2 2001/11/06 20:58:29 kai Exp $
+/* $Id: eicon_isa.c,v 1.1.4.1.2.3 2002/10/01 11:29:13 armin Exp $
  *
  * ISDN low-level module for Eicon active ISDN-Cards.
  * Hardware-specific code for old ISA cards.
@@ -20,7 +20,7 @@
 #define release_shmem release_region
 #define request_shmem request_region
 
-char *eicon_isa_revision = "$Revision: 1.16.6.2 $";
+char *eicon_isa_revision = "$Revision: 1.1.4.1.2.3 $";
 
 #undef EICON_MCA_DEBUG
 
@@ -90,7 +90,7 @@ eicon_isa_find_card(int Mem, int Irq, char * Id)
 	if ((Mem < 0x0c0000) ||
 	    (Mem > 0x0fc000) ||
 	    (Mem & 0xfff)) { 
-		printk(KERN_WARNING "eicon_isa: illegal membase 0x%x for %s\n",
+		printk(KERN_WARNING "eicon_isa: invalid membase 0x%x for %s\n",
 			 Mem, Id);
 		return -1;
 	}
@@ -123,7 +123,7 @@ eicon_isa_find_card(int Mem, int Irq, char * Id)
 int
 eicon_isa_bootload(eicon_isa_card *card, eicon_isa_codebuf *cb) {
 	int	tmp;
-	int               timeout;
+	unsigned long     timeout;
 	eicon_isa_codebuf cbuf;
 	unsigned char     *code;
 	eicon_isa_boot    *boot;
@@ -300,7 +300,7 @@ int
 eicon_isa_load(eicon_isa_card *card, eicon_isa_codebuf *cb) {
 	eicon_isa_boot    *boot;
 	int               tmp;
-	int               timeout;
+	unsigned long     timeout;
 	int 		  j;
 	eicon_isa_codebuf cbuf;
 	unsigned char     *code;
@@ -326,7 +326,7 @@ eicon_isa_load(eicon_isa_card *card, eicon_isa_codebuf *cb) {
 		/* Check for valid IRQ */
 		if ((card->irq < 0) || (card->irq > 15) || 
 		    (!((1 << card->irq) & eicon_isa_valid_irq[card->type & 0x0f]))) {
-			printk(KERN_WARNING "eicon_isa_load: illegal irq: %d\n", card->irq);
+			printk(KERN_WARNING "eicon_isa_load: invalid irq: %d\n", card->irq);
 			eicon_isa_release_shmem(card);
 			kfree(code);
 			return -EINVAL;

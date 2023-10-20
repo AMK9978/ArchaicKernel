@@ -34,11 +34,11 @@
 /* the following macro is used when enabling interrupts */
 #if defined(MACH_ATARI_ONLY) && !defined(CONFIG_HADES)
 	/* block out HSYNC on the atari */
-#define ALLOWINT 0xfbff
+#define ALLOWINT	(~0x400)
 #define	MAX_NOINT_IPL	3
 #else
 	/* portable version */
-#define ALLOWINT 0xf8ff
+#define ALLOWINT	(~0x700)
 #define	MAX_NOINT_IPL	0
 #endif /* machine compilation types */ 
 
@@ -109,8 +109,9 @@ PT_DTRACE_BIT = 2
 
 .macro	get_current reg=%d0
 	movel	%sp,\reg
-	andw	#-KTHREAD_SIZE,\reg
+	andw	#-THREAD_SIZE,\reg
 	movel	\reg,%curptr
+	movel	%curptr@,%curptr
 .endm
 
 #else /* C source */
@@ -128,8 +129,9 @@ PT_DTRACE_BIT = 2
 	"moveml	%%d1-%%d5/%%a0-%%a2,%%sp@-"
 #define GET_CURRENT(tmp) \
 	"movel	%%sp,"#tmp"\n\t" \
-	"andw	#-"STR(KTHREAD_SIZE)","#tmp"\n\t" \
-	"movel	"#tmp",%%a2"
+	"andw	#-"STR(THREAD_SIZE)","#tmp"\n\t" \
+	"movel	"#tmp",%%a2\n\t" \
+	"movel	%%a2@,%%a2"
 
 #endif
 

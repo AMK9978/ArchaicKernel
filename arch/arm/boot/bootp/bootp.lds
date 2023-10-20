@@ -1,7 +1,7 @@
 /*
  *  linux/arch/arm/boot/bootp/bootp.lds
  *
- *  Copyright (C) 2000 Russell King
+ *  Copyright (C) 2000-2002 Russell King
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -15,15 +15,11 @@ SECTIONS
   _text = .;
   .text : {
    _stext = .;
-   _start = .;
-   init.o(.start)
-   kernel_start = .;
-   kernel.o
-   kernel_len = . - kernel_start;
+   *(.start)
+   arch/arm/boot/bootp/kernel.o
    . = ALIGN(32);
-   *(.text)
    initrd_start = .;
-   initrd.o
+   arch/arm/boot/bootp/initrd.o
    initrd_len = . - initrd_start;
    . = ALIGN(32);
    _etext = .;

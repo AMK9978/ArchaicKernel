@@ -1,6 +1,7 @@
 /*
  *  hosts.c Copyright (C) 1992 Drew Eckhardt
  *          Copyright (C) 1993, 1994, 1995 Eric Youngdale
+ *          Copyright (C) 2002-2003 Christoph Hellwig
  *
  *  mid to lowlevel SCSI driver interface
  *      Initial versions: Drew Eckhardt
@@ -15,281 +16,355 @@
  *  Updated to reflect the new initialization scheme for the higher 
  *  level of scsi drivers (sd/sr/st)
  *  September 17, 2000 Torben Mathiasen <tmm@image.dk>
+ *
+ *  Restructured scsi_host lists and associated functions.
+ *  September 04, 2002 Mike Anderson (andmike@us.ibm.com)
  */
 
-
-/*
- *  This file contains the medium level SCSI
- *  host interface initialization, as well as the scsi_hosts array of SCSI
- *  hosts currently present in the system.
- */
-
-#define __NO_VERSION__
 #include <linux/module.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/proc_fs.h>
 #include <linux/init.h>
-
-#define __KERNEL_SYSCALLS__
-
+#include <linux/list.h>
+#include <linux/completion.h>
 #include <linux/unistd.h>
 
+#include <scsi/scsi_host.h>
 #include "scsi.h"
-#include "hosts.h"
 
-/*
-static const char RCSid[] = "$Header: /vger/u4/cvs/linux/drivers/scsi/hosts.c,v 1.20 1996/12/12 19:18:32 davem Exp $";
-*/
-
-/*
- *  The scsi host entries should be in the order you wish the
- *  cards to be detected.  A driver may appear more than once IFF
- *  it can deal with being detected (and therefore initialized)
- *  with more than one simultaneous host number, can handle being
- *  reentrant, etc.
- *
- *  They may appear in any order, as each SCSI host is told which host 
- *  number it is during detection.
- */
-
-/* This is a placeholder for controllers that are not configured into
- * the system - we do this to ensure that the controller numbering is
- * always consistent, no matter how the kernel is configured. */
-
-#define NO_CONTROLLER {NULL, NULL, NULL, NULL, NULL, NULL, NULL, \
-			   NULL, NULL, 0, 0, 0, 0, 0, 0}
-
-/*
- *  When figure is run, we don't want to link to any object code.  Since
- *  the macro for each host will contain function pointers, we cannot
- *  use it and instead must use a "blank" that does no such
- *  idiocy.
- */
-
-Scsi_Host_Template * scsi_hosts;
+#include "scsi_priv.h"
+#include "scsi_logging.h"
 
 
-/*
- *  Our semaphores and timeout counters, where size depends on 
- *      MAX_SCSI_HOSTS here.
- */
-
-Scsi_Host_Name * scsi_host_no_list;
-struct Scsi_Host * scsi_hostlist;
-struct Scsi_Device_Template * scsi_devicelist;
-
-int max_scsi_hosts;
-int next_scsi_host;
-
-void
-scsi_unregister(struct Scsi_Host * sh){
-    struct Scsi_Host * shpnt;
-    Scsi_Host_Name *shn;
-        
-    if(scsi_hostlist == sh)
-	scsi_hostlist = sh->next;
-    else {
-	shpnt = scsi_hostlist;
-	while(shpnt->next != sh) shpnt = shpnt->next;
-	shpnt->next = shpnt->next->next;
-    }
-
-    /*
-     * We have to unregister the host from the scsi_host_no_list as well.
-     * Decide by the host_no not by the name because most host drivers are
-     * able to handle more than one adapters from the same kind (or family).
-     */
-    for ( shn=scsi_host_no_list; shn && (sh->host_no != shn->host_no);
-	  shn=shn->next);
-    if (shn) shn->host_registered = 0;
-    /* else {} : This should not happen, we should panic here... */
-    
-    /* If we are removing the last host registered, it is safe to reuse
-     * its host number (this avoids "holes" at boot time) (DB) 
-     * It is also safe to reuse those of numbers directly below which have
-     * been released earlier (to avoid some holes in numbering).
-     */
-    if(sh->host_no == max_scsi_hosts - 1) {
-	while(--max_scsi_hosts >= next_scsi_host) {
-	    shpnt = scsi_hostlist;
-	    while(shpnt && shpnt->host_no != max_scsi_hosts - 1)
-		shpnt = shpnt->next;
-	    if(shpnt)
-		break;
-	}
-    }
-    next_scsi_host--;
-    kfree((char *) sh);
-}
-
-/* We call this when we come across a new host adapter. We only do this
- * once we are 100% sure that we want to use this host adapter -  it is a
- * pain to reverse this, so we try to avoid it 
- */
-
-struct Scsi_Host * scsi_register(Scsi_Host_Template * tpnt, int j){
-    struct Scsi_Host * retval, *shpnt, *o_shp;
-    Scsi_Host_Name *shn, *shn2;
-    int flag_new = 1;
-    const char * hname;
-    size_t hname_len;
-    retval = (struct Scsi_Host *)kmalloc(sizeof(struct Scsi_Host) + j,
-					 (tpnt->unchecked_isa_dma && j ? 
-					  GFP_DMA : 0) | GFP_ATOMIC);
-    if(retval == NULL)
-    {
-        printk("scsi: out of memory in scsi_register.\n");
-    	return NULL;
-    }
-    	
-    memset(retval, 0, sizeof(struct Scsi_Host) + j);
-
-    /* trying to find a reserved entry (host_no) */
-    hname = (tpnt->proc_name) ?  tpnt->proc_name : "";
-    hname_len = strlen(hname);
-    for (shn = scsi_host_no_list;shn;shn = shn->next) {
-	if (!(shn->host_registered) && 
-	    (hname_len > 0) && (0 == strncmp(hname, shn->name, hname_len))) {
-	    flag_new = 0;
-	    retval->host_no = shn->host_no;
-	    shn->host_registered = 1;
-	    shn->loaded_as_module = 1;
-	    break;
-	}
-    }
-    atomic_set(&retval->host_active,0);
-    retval->host_busy = 0;
-    retval->host_failed = 0;
-    if(j > 0xffff) panic("Too many extra bytes requested\n");
-    retval->extra_bytes = j;
-    retval->loaded_as_module = 1;
-    if (flag_new) {
-	shn = (Scsi_Host_Name *) kmalloc(sizeof(Scsi_Host_Name), GFP_ATOMIC);
-        if (!shn) {
-                kfree(retval);
-                printk(KERN_ERR "scsi: out of memory(2) in scsi_register.\n");
-                return NULL;
-        }
-	shn->name = kmalloc(hname_len + 1, GFP_ATOMIC);
-	if (hname_len > 0)
-	    strncpy(shn->name, hname, hname_len);
-	shn->name[hname_len] = 0;
-	shn->host_no = max_scsi_hosts++;
-	shn->host_registered = 1;
-	shn->loaded_as_module = 1;
-	shn->next = NULL;
-	if (scsi_host_no_list) {
-	    for (shn2 = scsi_host_no_list;shn2->next;shn2 = shn2->next)
-		;
-	    shn2->next = shn;
-	}
-	else
-	    scsi_host_no_list = shn;
-	retval->host_no = shn->host_no;
-    }
-    next_scsi_host++;
-    retval->host_queue = NULL;
-    init_waitqueue_head(&retval->host_wait);
-    retval->resetting = 0;
-    retval->last_reset = 0;
-    retval->irq = 0;
-    retval->dma_channel = 0xff;
-
-    /* These three are default values which can be overridden */
-    retval->max_channel = 0; 
-    retval->max_id = 8;      
-    retval->max_lun = 8;
-
-    /*
-     * All drivers right now should be able to handle 12 byte commands.
-     * Every so often there are requests for 16 byte commands, but individual
-     * low-level drivers need to certify that they actually do something
-     * sensible with such commands.
-     */
-    retval->max_cmd_len = 12;
-
-    retval->unique_id = 0;
-    retval->io_port = 0;
-    retval->hostt = tpnt;
-    retval->next = NULL;
-    retval->in_recovery = 0;
-    retval->ehandler = NULL;    /* Initial value until the thing starts up. */
-    retval->eh_notify   = NULL;    /* Who we notify when we exit. */
+static int scsi_host_next_hn;		/* host_no for next new host */
 
 
-    retval->host_blocked = FALSE;
-    retval->host_self_blocked = FALSE;
-
-#ifdef DEBUG
-    printk("Register %x %x: %d\n", (int)retval, (int)retval->hostt, j);
-#endif
-
-    /* The next six are the default values which can be overridden
-     * if need be */
-    retval->this_id = tpnt->this_id;
-    retval->can_queue = tpnt->can_queue;
-    retval->sg_tablesize = tpnt->sg_tablesize;
-    retval->cmd_per_lun = tpnt->cmd_per_lun;
-    retval->unchecked_isa_dma = tpnt->unchecked_isa_dma;
-    retval->use_clustering = tpnt->use_clustering;   
-
-    retval->select_queue_depths = tpnt->select_queue_depths;
-    retval->max_sectors = tpnt->max_sectors;
-
-    if(!scsi_hostlist)
-	scsi_hostlist = retval;
-    else {
-	shpnt = scsi_hostlist;
-	if (retval->host_no < shpnt->host_no) {
-	    retval->next = shpnt;
-	    wmb(); /* want all to see these writes in this order */
-	    scsi_hostlist = retval;
-	}
-	else {
-	    for (o_shp = shpnt, shpnt = shpnt->next; shpnt; 
-		 o_shp = shpnt, shpnt = shpnt->next) {
-		if (retval->host_no < shpnt->host_no) {
-		    retval->next = shpnt;
-		    wmb();
-		    o_shp->next = retval;
-		    break;
-		}
-	    }
-	    if (! shpnt)
-		o_shp->next = retval;
-        }
-    }
-    
-    return retval;
-}
-
-int
-scsi_register_device(struct Scsi_Device_Template * sdpnt)
+static void scsi_host_cls_release(struct class_device *class_dev)
 {
-    if(sdpnt->next) panic("Device already registered");
-    sdpnt->next = scsi_devicelist;
-    scsi_devicelist = sdpnt;
-    return 0;
+	put_device(&class_to_shost(class_dev)->shost_gendev);
 }
 
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-indent-level: 4
- * c-brace-imaginary-offset: 0
- * c-brace-offset: -4
- * c-argdecl-indent: 4
- * c-label-offset: -4
- * c-continued-statement-offset: 4
- * c-continued-brace-offset: 0
- * indent-tabs-mode: nil
- * tab-width: 8
- * End:
- */
+static struct class shost_class = {
+	.name		= "scsi_host",
+	.release	= scsi_host_cls_release,
+};
+
+static int scsi_device_cancel_cb(struct device *dev, void *data)
+{
+	return scsi_device_cancel(to_scsi_device(dev), *(int *)data);
+}
+
+/**
+ * scsi_host_cancel - cancel outstanding IO to this host
+ * @shost:	pointer to struct Scsi_Host
+ * recovery:	recovery requested to run.
+ **/
+void scsi_host_cancel(struct Scsi_Host *shost, int recovery)
+{
+	set_bit(SHOST_CANCEL, &shost->shost_state);
+	device_for_each_child(&shost->shost_gendev, &recovery,
+			      scsi_device_cancel_cb);
+	wait_event(shost->host_wait, (!test_bit(SHOST_RECOVERY,
+						&shost->shost_state)));
+}
+
+/**
+ * scsi_remove_host - remove a scsi host
+ * @shost:	a pointer to a scsi host to remove
+ **/
+void scsi_remove_host(struct Scsi_Host *shost)
+{
+	scsi_host_cancel(shost, 0);
+	scsi_proc_host_rm(shost);
+	scsi_forget_host(shost);
+
+	set_bit(SHOST_DEL, &shost->shost_state);
+
+	class_device_unregister(&shost->shost_classdev);
+	device_del(&shost->shost_gendev);
+}
+
+/**
+ * scsi_add_host - add a scsi host
+ * @shost:	scsi host pointer to add
+ * @dev:	a struct device of type scsi class
+ *
+ * Return value: 
+ * 	0 on success / != 0 for error
+ **/
+int scsi_add_host(struct Scsi_Host *shost, struct device *dev)
+{
+	struct scsi_host_template *sht = shost->hostt;
+	int error;
+
+	printk(KERN_INFO "scsi%d : %s\n", shost->host_no,
+			sht->info ? sht->info(shost) : sht->name);
+
+	if (!shost->can_queue) {
+		printk(KERN_ERR "%s: can_queue = 0 no longer supported\n",
+				sht->name);
+		return -EINVAL;
+	}
+
+	if (!shost->shost_gendev.parent)
+		shost->shost_gendev.parent = dev ? dev : &legacy_bus;
+
+	error = device_add(&shost->shost_gendev);
+	if (error)
+		goto out;
+
+	set_bit(SHOST_ADD, &shost->shost_state);
+	get_device(shost->shost_gendev.parent);
+
+	error = class_device_add(&shost->shost_classdev);
+	if (error)
+		goto out_del_gendev;
+
+	get_device(&shost->shost_gendev);
+
+	error = scsi_sysfs_add_host(shost);
+	if (error)
+		goto out_del_classdev;
+
+	scsi_proc_host_add(shost);
+	return error;
+
+ out_del_classdev:
+	class_device_del(&shost->shost_classdev);
+ out_del_gendev:
+	device_del(&shost->shost_gendev);
+ out:
+	return error;
+}
+
+static void scsi_host_dev_release(struct device *dev)
+{
+	struct Scsi_Host *shost = dev_to_shost(dev);
+	struct device *parent = dev->parent;
+
+	if (shost->ehandler) {
+		DECLARE_COMPLETION(sem);
+		shost->eh_notify = &sem;
+		shost->eh_kill = 1;
+		up(shost->eh_wait);
+		wait_for_completion(&sem);
+		shost->eh_notify = NULL;
+	}
+
+	scsi_proc_hostdir_rm(shost->hostt);
+	scsi_destroy_command_freelist(shost);
+
+	/*
+	 * Some drivers (eg aha1542) do scsi_register()/scsi_unregister()
+	 * during probing without performing a scsi_set_device() in between.
+	 * In this case dev->parent is NULL.
+	 */
+	if (parent)
+		put_device(parent);
+	kfree(shost);
+}
+
+/**
+ * scsi_host_alloc - register a scsi host adapter instance.
+ * @sht:	pointer to scsi host template
+ * @privsize:	extra bytes to allocate for driver
+ *
+ * Note:
+ * 	Allocate a new Scsi_Host and perform basic initialization.
+ * 	The host is not published to the scsi midlayer until scsi_add_host
+ * 	is called.
+ *
+ * Return value:
+ * 	Pointer to a new Scsi_Host
+ **/
+struct Scsi_Host *scsi_host_alloc(struct scsi_host_template *sht, int privsize)
+{
+	struct Scsi_Host *shost;
+	int gfp_mask = GFP_KERNEL, rval;
+	DECLARE_COMPLETION(complete);
+
+	if (sht->unchecked_isa_dma && privsize)
+		gfp_mask |= __GFP_DMA;
+
+        /* Check to see if this host has any error handling facilities */
+        if (!sht->eh_strategy_handler && !sht->eh_abort_handler &&
+	    !sht->eh_device_reset_handler && !sht->eh_bus_reset_handler &&
+            !sht->eh_host_reset_handler) {
+		printk(KERN_ERR "ERROR: SCSI host `%s' has no error handling\n"
+				"ERROR: This is not a safe way to run your "
+				        "SCSI host\n"
+				"ERROR: The error handling must be added to "
+				"this driver\n", sht->proc_name);
+		dump_stack();
+        }
+
+	shost = kmalloc(sizeof(struct Scsi_Host) + privsize, gfp_mask);
+	if (!shost)
+		return NULL;
+	memset(shost, 0, sizeof(struct Scsi_Host) + privsize);
+
+	spin_lock_init(&shost->default_lock);
+	scsi_assign_lock(shost, &shost->default_lock);
+	INIT_LIST_HEAD(&shost->__devices);
+	INIT_LIST_HEAD(&shost->eh_cmd_q);
+	INIT_LIST_HEAD(&shost->starved_list);
+	init_waitqueue_head(&shost->host_wait);
+
+	init_MUTEX(&shost->scan_mutex);
+
+	shost->host_no = scsi_host_next_hn++; /* XXX(hch): still racy */
+	shost->dma_channel = 0xff;
+
+	/* These three are default values which can be overridden */
+	shost->max_channel = 0;
+	shost->max_id = 8;
+	shost->max_lun = 8;
+
+	/*
+	 * All drivers right now should be able to handle 12 byte
+	 * commands.  Every so often there are requests for 16 byte
+	 * commands, but individual low-level drivers need to certify that
+	 * they actually do something sensible with such commands.
+	 */
+	shost->max_cmd_len = 12;
+	shost->hostt = sht;
+	shost->this_id = sht->this_id;
+	shost->can_queue = sht->can_queue;
+	shost->sg_tablesize = sht->sg_tablesize;
+	shost->cmd_per_lun = sht->cmd_per_lun;
+	shost->unchecked_isa_dma = sht->unchecked_isa_dma;
+	shost->use_clustering = sht->use_clustering;
+
+	if (sht->max_host_blocked)
+		shost->max_host_blocked = sht->max_host_blocked;
+	else
+		shost->max_host_blocked = SCSI_DEFAULT_HOST_BLOCKED;
+
+	/*
+	 * If the driver imposes no hard sector transfer limit, start at
+	 * machine infinity initially.
+	 */
+	if (sht->max_sectors)
+		shost->max_sectors = sht->max_sectors;
+	else
+		shost->max_sectors = SCSI_DEFAULT_MAX_SECTORS;
+
+	/*
+	 * assume a 4GB boundary, if not set
+	 */
+	if (sht->dma_boundary)
+		shost->dma_boundary = sht->dma_boundary;
+	else
+		shost->dma_boundary = 0xffffffff;
+
+	rval = scsi_setup_command_freelist(shost);
+	if (rval)
+		goto fail_kfree;
+
+	device_initialize(&shost->shost_gendev);
+	snprintf(shost->shost_gendev.bus_id, BUS_ID_SIZE, "host%d",
+		shost->host_no);
+	shost->shost_gendev.release = scsi_host_dev_release;
+
+	class_device_initialize(&shost->shost_classdev);
+	shost->shost_classdev.dev = &shost->shost_gendev;
+	shost->shost_classdev.class = &shost_class;
+	snprintf(shost->shost_classdev.class_id, BUS_ID_SIZE, "host%d",
+		  shost->host_no);
+
+	shost->eh_notify = &complete;
+	rval = kernel_thread(scsi_error_handler, shost, 0);
+	if (rval < 0)
+		goto fail_destroy_freelist;
+	wait_for_completion(&complete);
+	shost->eh_notify = NULL;
+	scsi_proc_hostdir_add(shost->hostt);
+	return shost;
+
+ fail_destroy_freelist:
+	scsi_destroy_command_freelist(shost);
+ fail_kfree:
+	kfree(shost);
+	return NULL;
+}
+
+struct Scsi_Host *scsi_register(struct scsi_host_template *sht, int privsize)
+{
+	struct Scsi_Host *shost = scsi_host_alloc(sht, privsize);
+
+	if (!sht->detect) {
+		printk(KERN_WARNING "scsi_register() called on new-style "
+				    "template for driver %s\n", sht->name);
+		dump_stack();
+	}
+
+	if (shost)
+		list_add_tail(&shost->sht_legacy_list, &sht->legacy_hosts);
+	return shost;
+}
+
+void scsi_unregister(struct Scsi_Host *shost)
+{
+	list_del(&shost->sht_legacy_list);
+	scsi_host_put(shost);
+}
+
+/**
+ * scsi_host_lookup - get a reference to a Scsi_Host by host no
+ *
+ * @hostnum:	host number to locate
+ *
+ * Return value:
+ *	A pointer to located Scsi_Host or NULL.
+ **/
+struct Scsi_Host *scsi_host_lookup(unsigned short hostnum)
+{
+	struct class *class = &shost_class;
+	struct class_device *cdev;
+	struct Scsi_Host *shost = ERR_PTR(-ENXIO), *p;
+
+	down_read(&class->subsys.rwsem);
+	list_for_each_entry(cdev, &class->children, node) {
+		p = class_to_shost(cdev);
+		if (p->host_no == hostnum) {
+			shost = scsi_host_get(p);
+			break;
+		}
+	}
+	up_read(&class->subsys.rwsem);
+
+	return shost;
+}
+
+/**
+ * *scsi_host_get - inc a Scsi_Host ref count
+ * @shost:	Pointer to Scsi_Host to inc.
+ **/
+struct Scsi_Host *scsi_host_get(struct Scsi_Host *shost)
+{
+	if (test_bit(SHOST_DEL, &shost->shost_state) ||
+		!get_device(&shost->shost_gendev))
+		return NULL;
+	return shost;
+}
+
+/**
+ * *scsi_host_put - dec a Scsi_Host ref count
+ * @shost:	Pointer to Scsi_Host to dec.
+ **/
+void scsi_host_put(struct Scsi_Host *shost)
+{
+	put_device(&shost->shost_gendev);
+}
+
+int scsi_init_hosts(void)
+{
+	return class_register(&shost_class);
+}
+
+void scsi_exit_hosts(void)
+{
+	class_unregister(&shost_class);
+}

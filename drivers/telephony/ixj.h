@@ -42,6 +42,7 @@ static char ixj_h_rcsid[] = "$Id: ixj.h,v 4.1 2001/08/04 14:49:27 craigs Exp $";
 
 #define IXJ_VERSION 3031
 
+#include <linux/version.h>
 #include <linux/types.h>
 
 #include <linux/ixjuser.h>
@@ -1182,11 +1183,7 @@ typedef struct {
 	atomic_t DSPWrite;
 	struct phone_capability caplist[30];
 	unsigned int caps;
-#if LINUX_VERSION_CODE < 0x020400
 	struct pnp_dev *dev;
-#else
-	struct pci_dev *dev;
-#endif
 	unsigned int cardtype;
 	unsigned int rec_codec;
 	unsigned int cid_rec_codec;
@@ -1199,7 +1196,7 @@ typedef struct {
 	unsigned char cid_play_flag;
 	char play_mode;
 	IXJ_FLAGS flags;
-	unsigned int busyflags;
+	unsigned long busyflags;
 	unsigned int rec_frame_size;
 	unsigned int play_frame_size;
 	unsigned int cid_play_frame_size;
@@ -1217,7 +1214,7 @@ typedef struct {
 #endif
 	char *read_buffer, *read_buffer_end;
 	char *read_convert_buffer;
-	unsigned int read_buffer_size;
+	size_t read_buffer_size;
 	unsigned int read_buffer_ready;
 #if LINUX_VERSION_CODE < 0x020400
 	struct wait_queue *write_q;
@@ -1226,7 +1223,7 @@ typedef struct {
 #endif
 	char *write_buffer, *write_buffer_end;
 	char *write_convert_buffer;
-	unsigned int write_buffer_size;
+	size_t write_buffer_size;
 	unsigned int write_buffers_empty;
 	unsigned long drybuffer;
 	char *write_buffer_rp, *write_buffer_wp;
@@ -1285,7 +1282,7 @@ typedef struct {
 	unsigned char fskcnt;
         unsigned int cidsize;
 	unsigned int cidcnt;
-	unsigned pstn_cid_received;
+	unsigned long pstn_cid_received;
 	PHONE_CID cid;
 	PHONE_CID cid_send;
 	unsigned long pstn_ring_int;

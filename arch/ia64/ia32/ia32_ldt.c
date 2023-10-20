@@ -14,7 +14,8 @@
 #include <linux/vmalloc.h>
 
 #include <asm/uaccess.h>
-#include <asm/ia32.h>
+
+#include "ia32priv.h"
 
 #define P(p)	((void *) (unsigned long) (p))
 
@@ -81,7 +82,7 @@ read_default_ldt (void * ptr, unsigned long bytecount)
 static int
 write_ldt (void * ptr, unsigned long bytecount, int oldmode)
 {
-	struct ia32_modify_ldt_ldt_s ldt_info;
+	struct ia32_user_desc ldt_info;
 	__u64 entry;
 	int ret;
 

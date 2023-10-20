@@ -1,18 +1,24 @@
 /*
  * This is a module which is used for rejecting packets.
  * Added support for customized reject packets (Jozsef Kadlecsik).
+ * Added support for ICMP type-3-code-13 (Maciej Soltysiak). [RFC 1812]
  */
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/ip.h>
+#include <linux/udp.h>
+#include <linux/icmp.h>
 #include <net/icmp.h>
 #include <net/ip.h>
 #include <net/tcp.h>
-struct in_device;
 #include <net/route.h>
 #include <linux/netfilter_ipv4/ip_tables.h>
 #include <linux/netfilter_ipv4/ipt_REJECT.h>
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+MODULE_DESCRIPTION("iptables REJECT target module");
 
 #if 0
 #define DEBUGP printk
@@ -28,44 +34,94 @@ static void connection_attach(struct sk_buff *new_skb, struct nf_ct_info *nfct)
 	void (*attach)(struct sk_buff *, struct nf_ct_info *);
 
 	/* Avoid module unload race with ip_ct_attach being NULLed out */
-	if (nfct && (attach = ip_ct_attach) != NULL)
+	if (nfct && (attach = ip_ct_attach) != NULL) {
+		mb(); /* Just to be sure: must be read before executing this */
 		attach(new_skb, nfct);
+	}
+}
+
+static inline struct rtable *route_reverse(struct sk_buff *skb, int hook)
+{
+	struct iphdr *iph = skb->nh.iph;
+	struct dst_entry *odst;
+	struct flowi fl = {};
+	struct rtable *rt;
+
+	if (hook != NF_IP_FORWARD) {
+		fl.nl_u.ip4_u.daddr = iph->saddr;
+		if (hook == NF_IP_LOCAL_IN)
+			fl.nl_u.ip4_u.saddr = iph->daddr;
+		fl.nl_u.ip4_u.tos = RT_TOS(iph->tos);
+
+		if (ip_route_output_key(&rt, &fl) != 0)
+			return NULL;
+	} else {
+		/* non-local src, find valid iif to satisfy
+		 * rp-filter when calling ip_route_input. */
+		fl.nl_u.ip4_u.daddr = iph->daddr;
+		if (ip_route_output_key(&rt, &fl) != 0)
+			return NULL;
+
+		odst = skb->dst;
+		if (ip_route_input(skb, iph->saddr, iph->daddr,
+		                   RT_TOS(iph->tos), rt->u.dst.dev) != 0) {
+			dst_release(&rt->u.dst);
+			return NULL;
+		}
+		dst_release(&rt->u.dst);
+		rt = (struct rtable *)skb->dst;
+		skb->dst = odst;
+	}
+
+	if (rt->u.dst.error) {
+		dst_release(&rt->u.dst);
+		rt = NULL;
+	}
+
+	return rt;
 }
 
 /* Send RST reply */
-static void send_reset(struct sk_buff *oldskb, int local)
+static void send_reset(struct sk_buff *oldskb, int hook)
 {
 	struct sk_buff *nskb;
-	struct tcphdr *otcph, *tcph;
+	struct tcphdr otcph, *tcph;
 	struct rtable *rt;
-	unsigned int otcplen;
-	u_int16_t tmp;
+	u_int16_t tmp_port;
+	u_int32_t tmp_addr;
 	int needs_ack;
+	int hh_len;
 
-	/* IP header checks: fragment, too short. */
-	if (oldskb->nh.iph->frag_off & htons(IP_OFFSET)
-	    || oldskb->len < (oldskb->nh.iph->ihl<<2) + sizeof(struct tcphdr))
+	/* IP header checks: fragment. */
+	if (oldskb->nh.iph->frag_off & htons(IP_OFFSET))
 		return;
 
-	otcph = (struct tcphdr *)((u_int32_t*)oldskb->nh.iph + oldskb->nh.iph->ihl);
-	otcplen = oldskb->len - oldskb->nh.iph->ihl*4;
+	if (skb_copy_bits(oldskb, oldskb->nh.iph->ihl*4,
+			  &otcph, sizeof(otcph)) < 0)
+ 		return;
 
 	/* No RST for RST. */
-	if (otcph->rst)
+	if (otcph.rst)
 		return;
 
-	/* Check checksum. */
-	if (tcp_v4_check(otcph, otcplen, oldskb->nh.iph->saddr,
-			 oldskb->nh.iph->daddr,
-			 csum_partial((char *)otcph, otcplen, 0)) != 0)
+	/* FIXME: Check checksum --RR */
+	if ((rt = route_reverse(oldskb, hook)) == NULL)
 		return;
 
-	/* Copy skb (even if skb is about to be dropped, we can't just
-           clone it because there may be other things, such as tcpdump,
-           interested in it) */
-	nskb = skb_copy(oldskb, GFP_ATOMIC);
-	if (!nskb)
+	hh_len = (rt->u.dst.dev->hard_header_len + 15)&~15;
+
+	/* We need a linear, writeable skb.  We also need to expand
+	   headroom in case hh_len of incoming interface < hh_len of
+	   outgoing interface */
+	nskb = skb_copy_expand(oldskb, hh_len, skb_tailroom(oldskb),
+			       GFP_ATOMIC);
+	if (!nskb) {
+		dst_release(&rt->u.dst);
 		return;
+	}
+
+	dst_release(nskb->dst);
+	nskb->dst = &rt->u.dst;
 
 	/* This packet will not be the same as the other: clear nf fields */
 	nf_conntrack_put(nskb->nfct);
@@ -74,14 +130,21 @@ static void send_reset(struct sk_buff *oldskb, int local)
 #ifdef CONFIG_NETFILTER_DEBUG
 	nskb->nf_debug = 0;
 #endif
+	nskb->nfmark = 0;
+#ifdef CONFIG_BRIDGE_NETFILTER
+	nf_bridge_put(nskb->nf_bridge);
+	nskb->nf_bridge = NULL;
+#endif
 
 	tcph = (struct tcphdr *)((u_int32_t*)nskb->nh.iph + nskb->nh.iph->ihl);
 
 	/* Swap source and dest */
-	nskb->nh.iph->daddr = xchg(&nskb->nh.iph->saddr, nskb->nh.iph->daddr);
-	tmp = tcph->source;
+	tmp_addr = nskb->nh.iph->saddr;
+	nskb->nh.iph->saddr = nskb->nh.iph->daddr;
+	nskb->nh.iph->daddr = tmp_addr;
+	tmp_port = tcph->source;
 	tcph->source = tcph->dest;
-	tcph->dest = tmp;
+	tcph->dest = tmp_port;
 
 	/* Truncate to length (no data) */
 	tcph->doff = sizeof(struct tcphdr)/4;
@@ -90,12 +153,13 @@ static void send_reset(struct sk_buff *oldskb, int local)
 
 	if (tcph->ack) {
 		needs_ack = 0;
-		tcph->seq = otcph->ack_seq;
+		tcph->seq = otcph.ack_seq;
 		tcph->ack_seq = 0;
 	} else {
 		needs_ack = 1;
-		tcph->ack_seq = htonl(ntohl(otcph->seq) + otcph->syn + otcph->fin
-				      + otcplen - (otcph->doff<<2));
+		tcph->ack_seq = htonl(ntohl(otcph.seq) + otcph.syn + otcph.fin
+				      + oldskb->len - oldskb->nh.iph->ihl*4
+				      - (otcph.doff<<2));
 		tcph->seq = 0;
 	}
 
@@ -126,18 +190,8 @@ static void send_reset(struct sk_buff *oldskb, int local)
 	nskb->nh.iph->check = ip_fast_csum((unsigned char *)nskb->nh.iph, 
 					   nskb->nh.iph->ihl);
 
-	/* Routing: if not headed for us, route won't like source */
-	if (ip_route_output(&rt, nskb->nh.iph->daddr,
-			    local ? nskb->nh.iph->saddr : 0,
-			    RT_TOS(nskb->nh.iph->tos) | RTO_CONN,
-			    0) != 0)
-		goto free_nskb;
-
-	dst_release(nskb->dst);
-	nskb->dst = &rt->u.dst;
-
 	/* "Never happens" */
-	if (nskb->len > nskb->dst->pmtu)
+	if (nskb->len > dst_pmtu(nskb->dst))
 		goto free_nskb;
 
 	connection_attach(nskb, oldskb->nfct);
@@ -153,6 +207,7 @@ static void send_reset(struct sk_buff *oldskb, int local)
 static void send_unreach(struct sk_buff *skb_in, int code)
 {
 	struct iphdr *iph;
+	struct udphdr *udph;
 	struct icmphdr *icmph;
 	struct sk_buff *nskb;
 	u32 saddr;
@@ -182,10 +237,32 @@ static void send_unreach(struct sk_buff *skb_in, int code)
 	if (iph->frag_off&htons(IP_OFFSET))
 		return;
 
+	/* Ensure we have at least 8 bytes of proto header. */
+	if (skb_in->len < skb_in->nh.iph->ihl*4 + 8)
+		return;
+
+	/* if UDP checksum is set, verify it's correct */
+	if (iph->protocol == IPPROTO_UDP
+	    && skb_in->tail-(u8*)iph >= sizeof(struct udphdr)) {
+		int datalen = skb_in->len - (iph->ihl<<2);
+		udph = (struct udphdr *)((char *)iph + (iph->ihl<<2));
+		if (udph->check
+		    && csum_tcpudp_magic(iph->saddr, iph->daddr,
+		                         datalen, IPPROTO_UDP,
+		                         csum_partial((char *)udph, datalen,
+		                                      0)) != 0)
+			return;
+	}
+
 	/* If we send an ICMP error to an ICMP error a mess would result.. */
 	if (iph->protocol == IPPROTO_ICMP
 	    && skb_in->tail-(u8*)iph >= sizeof(struct icmphdr)) {
 		icmph = (struct icmphdr *)((char *)iph + (iph->ihl<<2));
+
+		if (skb_copy_bits(skb_in, skb_in->nh.iph->ihl*4,
+				  icmph, sizeof(*icmph)) < 0)
+			return;
+
 		/* Between echo-reply (0) and timestamp (13),
 		   everything except echo-request (8) is an error.
 		   Also, anything greater than NR_ICMP_TYPES is
@@ -203,14 +280,19 @@ static void send_unreach(struct sk_buff *skb_in, int code)
 
 	tos = (iph->tos & IPTOS_TOS_MASK) | IPTOS_PREC_INTERNETCONTROL;
 
-	if (ip_route_output(&rt, iph->saddr, saddr, RT_TOS(tos), 0))
-		return;
-
+	{
+		struct flowi fl = { .nl_u = { .ip4_u =
+					      { .daddr = skb_in->nh.iph->saddr,
+						.saddr = saddr,
+						.tos = RT_TOS(tos) } } };
+		if (ip_route_output_key(&rt, &fl))
+			return;
+	}
 	/* RFC says return as much as we can without exceeding 576 bytes. */
 	length = skb_in->len + sizeof(struct iphdr) + sizeof(struct icmphdr);
 
-	if (length > rt->u.dst.pmtu)
-		length = rt->u.dst.pmtu;
+	if (length > dst_pmtu(&rt->u.dst))
+		length = dst_pmtu(&rt->u.dst);
 	if (length > 576)
 		length = 576;
 
@@ -234,11 +316,8 @@ static void send_unreach(struct sk_buff *skb_in, int code)
 	iph->tos=tos;
 	iph->tot_len = htons(length);
 
-	/* This abbreviates icmp->send->ip_build_xmit->ip_dont_fragment */
-	if (!ipv4_config.no_pmtu_disc
-	    && !(rt->u.dst.mxlock&(1<<RTAX_MTU)))
-		iph->frag_off = htons(IP_DF);
-	else iph->frag_off = 0;
+	/* PMTU discovery never applies to ICMP packets. */
+	iph->frag_off = 0;
 
 	iph->ttl = MAXTTL;
 	ip_select_ident(iph, &rt->u.dst, NULL);
@@ -259,9 +338,10 @@ static void send_unreach(struct sk_buff *skb_in, int code)
 	/* Copy as much of original packet as will fit */
 	data = skb_put(nskb,
 		       length - sizeof(struct iphdr) - sizeof(struct icmphdr));
-	/* FIXME: won't work with nonlinear skbs --RR */
-	memcpy(data, skb_in->nh.iph,
-	       length - sizeof(struct iphdr) - sizeof(struct icmphdr));
+
+	skb_copy_bits(skb_in, 0, data,
+		      length - sizeof(struct iphdr) - sizeof(struct icmphdr));
+
 	icmph->checksum = ip_compute_csum((unsigned char *)icmph,
 					  length - sizeof(struct iphdr));
 
@@ -272,9 +352,9 @@ static void send_unreach(struct sk_buff *skb_in, int code)
 }	
 
 static unsigned int reject(struct sk_buff **pskb,
-			   unsigned int hooknum,
 			   const struct net_device *in,
 			   const struct net_device *out,
+			   unsigned int hooknum,
 			   const void *targinfo,
 			   void *userinfo)
 {
@@ -307,8 +387,11 @@ static unsigned int reject(struct sk_buff **pskb,
 	case IPT_ICMP_HOST_PROHIBITED:
     		send_unreach(*pskb, ICMP_HOST_ANO);
     		break;
+    	case IPT_ICMP_ADMIN_PROHIBITED:
+		send_unreach(*pskb, ICMP_PKT_FILTERED);
+		break;
 	case IPT_TCP_RESET:
-		send_reset(*pskb, hooknum == NF_IP_LOCAL_IN);
+		send_reset(*pskb, hooknum);
 	case IPT_ICMP_ECHOREPLY:
 		/* Doesn't happen. */
 		break;
@@ -349,7 +432,7 @@ static int check(const char *tablename,
 		/* Must specify that it's a TCP packet */
 		if (e->ip.proto != IPPROTO_TCP
 		    || (e->ip.invflags & IPT_INV_PROTO)) {
-			DEBUGP("REJECT: TCP_RESET illegal for non-tcp\n");
+			DEBUGP("REJECT: TCP_RESET invalid for non-tcp\n");
 			return 0;
 		}
 	}
@@ -357,8 +440,12 @@ static int check(const char *tablename,
 	return 1;
 }
 
-static struct ipt_target ipt_reject_reg
-= { { NULL, NULL }, "REJECT", reject, check, NULL, THIS_MODULE };
+static struct ipt_target ipt_reject_reg = {
+	.name		= "REJECT",
+	.target		= reject,
+	.checkentry	= check,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {
@@ -374,4 +461,3 @@ static void __exit fini(void)
 
 module_init(init);
 module_exit(fini);
-MODULE_LICENSE("GPL");

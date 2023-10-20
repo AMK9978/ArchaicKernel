@@ -8,6 +8,8 @@
 #define PSCHED_CLOCK_SOURCE	PSCHED_JIFFIES
 
 #include <linux/config.h>
+#include <linux/netdevice.h>
+#include <linux/types.h>
 #include <linux/pkt_sched.h>
 #include <net/pkt_cls.h>
 
@@ -48,6 +50,8 @@ struct Qdisc_class_ops
 	int			(*dump)(struct Qdisc *, unsigned long, struct sk_buff *skb, struct tcmsg*);
 };
 
+struct module;
+
 struct Qdisc_ops
 {
 	struct Qdisc_ops	*next;
@@ -58,7 +62,7 @@ struct Qdisc_ops
 	int 			(*enqueue)(struct sk_buff *, struct Qdisc *);
 	struct sk_buff *	(*dequeue)(struct Qdisc *);
 	int 			(*requeue)(struct sk_buff *, struct Qdisc *);
-	int			(*drop)(struct Qdisc *);
+	unsigned int		(*drop)(struct Qdisc *);
 
 	int			(*init)(struct Qdisc *, struct rtattr *arg);
 	void			(*reset)(struct Qdisc *);
@@ -66,6 +70,8 @@ struct Qdisc_ops
 	int			(*change)(struct Qdisc *, struct rtattr *arg);
 
 	int			(*dump)(struct Qdisc *, struct sk_buff *);
+
+	struct module		*owner;
 };
 
 extern rwlock_t qdisc_tree_lock;
@@ -211,17 +217,21 @@ extern psched_time_t	psched_time_base;
 
 #if PSCHED_CLOCK_SOURCE == PSCHED_JIFFIES
 
-#if HZ == 100
+#if HZ < 96
+#define PSCHED_JSCALE 14
+#elif HZ >= 96 && HZ < 192
 #define PSCHED_JSCALE 13
-#elif HZ == 1024
+#elif HZ >= 192 && HZ < 384
+#define PSCHED_JSCALE 12
+#elif HZ >= 384 && HZ < 768
+#define PSCHED_JSCALE 11
+#elif HZ >= 768
 #define PSCHED_JSCALE 10
-#else
-#define PSCHED_JSCALE 0
 #endif
 
 #define PSCHED_EXPORTLIST_2
 
-#if ~0UL == 0xFFFFFFFF
+#if BITS_PER_LONG <= 32
 
 #define PSCHED_WATCHER unsigned long
 
@@ -358,8 +368,8 @@ extern int psched_tod_diff(int delta_sec, int bound);
 #define PSCHED_TDIFF(tv1, tv2) (long)((tv1) - (tv2))
 #define PSCHED_TDIFF_SAFE(tv1, tv2, bound, guard) \
 ({ \
-	   long __delta = (tv1) - (tv2); \
-	   if ( __delta > (bound)) {  __delta = (bound); guard; } \
+	   long long __delta = (tv1) - (tv2); \
+	   if ( __delta > (long long)(bound)) {  __delta = (bound); guard; } \
 	   __delta; \
 })
 

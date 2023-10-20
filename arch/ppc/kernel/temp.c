@@ -6,14 +6,14 @@
  * TODO:
  * dynamic power management to limit peak CPU temp (using ICTC)
  * calibration???
- * 
+ *
  * Silly, crazy ideas: use cpu load (from scheduler) and ICTC to extend battery
  * life in portables, and add a 'performance/watt' metric somewhere in /proc
  */
 
 #include <linux/config.h>
 #include <linux/errno.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/param.h>
 #include <linux/string.h>
@@ -23,7 +23,7 @@
 
 #include <asm/segment.h>
 #include <asm/io.h>
-#include <asm/processor.h>
+#include <asm/reg.h>
 #include <asm/nvram.h>
 #include <asm/cache.h>
 #include <asm/8xx_immap.h>
@@ -111,7 +111,7 @@ void TAUupdate(int cpu)
 #endif
 
 #ifndef CONFIG_TAU_INT /* tau_timeout will do this if not using interrupts */
-	set_thresholds(cpu);	
+	set_thresholds(cpu);
 #endif
 
 }
@@ -124,32 +124,32 @@ void TAUupdate(int cpu)
 
 void TAUException(struct pt_regs * regs)
 {
-	unsigned long cpu = smp_processor_id();
+	int cpu = smp_processor_id();
 
-	hardirq_enter(cpu);
+	irq_enter();
 	tau[cpu].interrupts++;
-	
+
 	TAUupdate(cpu);
 
-	hardirq_exit(cpu);
-	return;
+	irq_exit();
 }
 #endif /* CONFIG_TAU_INT */
 
 static void tau_timeout(void * info)
 {
-	unsigned long cpu = smp_processor_id();
+	int cpu;
 	unsigned long flags;
 	int size;
 	int shrink;
- 
+
 	/* disabling interrupts *should* be okay */
-	save_flags(flags); cli();
+	local_irq_save(flags);
+	cpu = smp_processor_id();
 
 #ifndef CONFIG_TAU_INT
 	TAUupdate(cpu);
 #endif
-	
+
 	size = tau[cpu].high - tau[cpu].low;
 	if (size > min_window && ! tau[cpu].grew) {
 		/* do an exponential shrink of half the amount currently over size */
@@ -168,25 +168,25 @@ static void tau_timeout(void * info)
 	}
 
 	tau[cpu].grew = 0;
-	
+
 	set_thresholds(cpu);
 
 	/*
 	 * Do the enable every time, since otherwise a bunch of (relatively)
 	 * complex sleep code needs to be added. One mtspr every time
 	 * tau_timeout is called is probably not a big deal.
-	 * 
+	 *
 	 * Enable thermal sensor and set up sample interval timer
 	 * need 20 us to do the compare.. until a nice 'cpu_speed' function
 	 * call is implemented, just assume a 500 mhz clock. It doesn't really
-	 * matter if we take too long for a compare since it's all interrupt 
-	 * driven anyway. 
+	 * matter if we take too long for a compare since it's all interrupt
+	 * driven anyway.
 	 *
 	 * use a extra long time.. (60 us @ 500 mhz)
 	 */
 	mtspr(SPRN_THRM3, THRM3_SITV(500*60) | THRM3_E);
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 static void tau_timeout_smp(unsigned long unused)
@@ -194,15 +194,12 @@ static void tau_timeout_smp(unsigned long unused)
 
 	/* schedule ourselves to be run again */
 	mod_timer(&tau_timer, jiffies + shrink_timer) ;
-#ifdef CONFIG_SMP
-	smp_call_function(tau_timeout, NULL, 1, 0);
-#endif
-	tau_timeout(NULL);
+	on_each_cpu(tau_timeout, NULL, 1, 0);
 }
 
 /*
  * setup the TAU
- * 
+ *
  * Set things up to use THRM1 as a temperature lower bound, and THRM2 as an upper bound.
  * Start off at zero
  */
@@ -212,7 +209,7 @@ int tau_initialized = 0;
 void __init TAU_init_smp(void * info)
 {
 	unsigned long cpu = smp_processor_id();
-	
+
 	/* set these to a reasonable value and let the timer shrink the
 	 * window */
 	tau[cpu].low = 5;
@@ -238,19 +235,16 @@ int __init TAU_init(void)
 	tau_timer.function = tau_timeout_smp;
 	tau_timer.expires = jiffies + shrink_timer;
 	add_timer(&tau_timer);
-	
-#ifdef CONFIG_SMP
-	smp_call_function(TAU_init_smp, NULL, 1, 0);
-#endif
-	TAU_init_smp(NULL);
-	
+
+	on_each_cpu(TAU_init_smp, NULL, 1, 0);
+
 	printk("Thermal assist unit ");
 #ifdef CONFIG_TAU_INT
 	printk("using interrupts, ");
 #else
 	printk("using timers, ");
 #endif
-	printk("shrink_timer: %d jiffies\n", shrink_timer); 
+	printk("shrink_timer: %d jiffies\n", shrink_timer);
 	tau_initialized = 1;
 
 	return 0;

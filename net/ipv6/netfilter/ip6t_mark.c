@@ -5,6 +5,10 @@
 #include <linux/netfilter_ipv6/ip6t_mark.h>
 #include <linux/netfilter_ipv6/ip6_tables.h>
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+MODULE_DESCRIPTION("ip6tables mark match");
+
 static int
 match(const struct sk_buff *skb,
       const struct net_device *in,
@@ -33,8 +37,12 @@ checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ip6t_match mark_match
-= { { NULL, NULL }, "mark", &match, &checkentry, NULL, THIS_MODULE };
+static struct ip6t_match mark_match = {
+	.name		= "mark",
+	.match		= &match,
+	.checkentry	= &checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {
@@ -48,4 +56,3 @@ static void __exit fini(void)
 
 module_init(init);
 module_exit(fini);
-MODULE_LICENSE("GPL");

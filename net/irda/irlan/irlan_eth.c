@@ -31,6 +31,7 @@
 #include <linux/inetdevice.h>
 #include <linux/if_arp.h>
 #include <linux/random.h>
+#include <linux/module.h>
 #include <net/arp.h>
 
 #include <net/irda/irda.h>
@@ -46,14 +47,12 @@
  *    The network device initialization function.
  *
  */
-int irlan_eth_init(struct net_device *dev)
+void irlan_eth_setup(struct net_device *dev)
 {
 	struct irlan_cb *self;
 
-	IRDA_DEBUG(2, __FUNCTION__"()\n");
+	IRDA_DEBUG(2, "%s()\n", __FUNCTION__ );
 
-	ASSERT(dev != NULL, return -1;);
-       
 	self = (struct irlan_cb *) dev->priv;
 
 	dev->open               = irlan_eth_open;
@@ -61,7 +60,9 @@ int irlan_eth_init(struct net_device *dev)
 	dev->hard_start_xmit    = irlan_eth_xmit; 
 	dev->get_stats	        = irlan_eth_get_stats;
 	dev->set_multicast_list = irlan_eth_set_multicast_list;
-	dev->features          |= NETIF_F_DYNALLOC;
+	dev->destructor		= (void (*)(struct net_device *)) kfree;
+
+	SET_MODULE_OWNER(dev);
 
 	ether_setup(dev);
 	
@@ -84,8 +85,6 @@ int irlan_eth_init(struct net_device *dev)
 		get_random_bytes(dev->dev_addr+4, 1);
 		get_random_bytes(dev->dev_addr+5, 1);
 	}
-
-	return 0;
 }
 
 /*
@@ -98,7 +97,7 @@ int irlan_eth_open(struct net_device *dev)
 {
 	struct irlan_cb *self;
 	
-	IRDA_DEBUG(2, __FUNCTION__ "()\n");
+	IRDA_DEBUG(2, "%s()\n", __FUNCTION__ );
 
 	ASSERT(dev != NULL, return -1;);
 
@@ -112,8 +111,6 @@ int irlan_eth_open(struct net_device *dev)
 	/* We are now open, so time to do some work */
 	self->disconnect_reason = 0;
 	irlan_client_wakeup(self, self->saddr, self->daddr);
-
-	irlan_mod_inc_use_count();
 
 	/* Make sure we have a hardware address before we return, so DHCP clients gets happy */
 	interruptible_sleep_on(&self->open_wait);
@@ -134,13 +131,11 @@ int irlan_eth_close(struct net_device *dev)
 	struct irlan_cb *self = (struct irlan_cb *) dev->priv;
 	struct sk_buff *skb;
 	
-	IRDA_DEBUG(2, __FUNCTION__ "()\n");
+	IRDA_DEBUG(2, "%s()\n", __FUNCTION__ );
 	
 	/* Stop device */
 	netif_stop_queue(dev);
 	
-	irlan_mod_dec_use_count();
-
 	irlan_close_data_channel(self);
 	irlan_close_tsaps(self);
 
@@ -207,7 +202,7 @@ int irlan_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 		 * confuse do_dev_queue_xmit() in dev.c! I have
 		 * tried :-) DB 
 		 */
-		dev_kfree_skb(skb);
+		/* irttp_data_request already free the packet */
 		self->stats.tx_dropped++;
 	} else {
 		self->stats.tx_packets++;
@@ -240,7 +235,7 @@ int irlan_eth_receive(void *instance, void *sap, struct sk_buff *skb)
 	 * might have been previously set by the low level IrDA network
 	 * device driver 
 	 */
-	skb->dev = &self->dev;
+	skb->dev = self->dev;
 	skb->protocol=eth_type_trans(skb, skb->dev); /* Remove eth header */
 	
 	self->stats.rx_packets++;
@@ -267,7 +262,7 @@ void irlan_eth_flow_indication(void *instance, void *sap, LOCAL_FLOW flow)
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == IRLAN_MAGIC, return;);
 	
-	dev = &self->dev;
+	dev = self->dev;
 
 	ASSERT(dev != NULL, return;);
 	
@@ -347,14 +342,14 @@ void irlan_eth_set_multicast_list(struct net_device *dev)
 
  	self = dev->priv; 
 
-	IRDA_DEBUG(2, __FUNCTION__ "()\n");
+	IRDA_DEBUG(2, "%s()\n", __FUNCTION__ );
 
  	ASSERT(self != NULL, return;); 
  	ASSERT(self->magic == IRLAN_MAGIC, return;);
 
 	/* Check if data channel has been connected yet */
 	if (self->client.state != IRLAN_DATA) {
-		IRDA_DEBUG(1, __FUNCTION__ "(), delaying!\n");
+		IRDA_DEBUG(1, "%s(), delaying!\n", __FUNCTION__ );
 		return;
 	}
 
@@ -364,20 +359,20 @@ void irlan_eth_set_multicast_list(struct net_device *dev)
 	} 
 	else if ((dev->flags & IFF_ALLMULTI) || dev->mc_count > HW_MAX_ADDRS) {
 		/* Disable promiscuous mode, use normal mode. */
-		IRDA_DEBUG(4, __FUNCTION__ "(), Setting multicast filter\n");
+		IRDA_DEBUG(4, "%s(), Setting multicast filter\n", __FUNCTION__ );
 		/* hardware_set_filter(NULL); */
 
 		irlan_set_multicast_filter(self, TRUE);
 	}
 	else if (dev->mc_count) {
-		IRDA_DEBUG(4, __FUNCTION__ "(), Setting multicast filter\n");
+		IRDA_DEBUG(4, "%s(), Setting multicast filter\n", __FUNCTION__ );
 		/* Walk the address list, and load the filter */
 		/* hardware_set_filter(dev->mc_list); */
 
 		irlan_set_multicast_filter(self, TRUE);
 	}
 	else {
-		IRDA_DEBUG(4, __FUNCTION__ "(), Clearing multicast filter\n");
+		IRDA_DEBUG(4, "%s(), Clearing multicast filter\n", __FUNCTION__ );
 		irlan_set_multicast_filter(self, FALSE);
 	}
 

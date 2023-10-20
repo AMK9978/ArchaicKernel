@@ -22,13 +22,14 @@ static int uni2char(const wchar_t uni,
 	if ((uni & 0xffaf) == 0x040e || (uni & 0xffce) == 0x254c) {
 		/* koi8-ru and koi8-u differ only on two characters */
 		if (uni == 0x040e)
-			return 0xbe;
+			out[0] = 0xbe;
 		else if (uni == 0x045e)
-			return 0xae;
+			out[0] = 0xae;
 		else if (uni == 0x255d || uni == 0x256c)
 			return 0;
 		else
 			return p_nls->uni2char(uni, out, boundlen);
+		return 1;
 	}
 	else
 		/* fast path */
@@ -51,12 +52,10 @@ static int char2uni(const unsigned char *rawstring, int boundlen,
 }
 
 static struct nls_table table = {
-	"koi8-ru",
-	uni2char,
-	char2uni,
-	NULL,
-	NULL,
-	THIS_MODULE,
+	.charset	= "koi8-ru",
+	.uni2char	= uni2char,
+	.char2uni	= char2uni,
+	.owner		= THIS_MODULE,
 };
 
 static int __init init_nls_koi8_ru(void)
@@ -81,19 +80,4 @@ static void __exit exit_nls_koi8_ru(void)
 module_init(init_nls_koi8_ru)
 module_exit(exit_nls_koi8_ru)
 
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-indent-level: 8
- * c-brace-imaginary-offset: 0
- * c-brace-offset: -8
- * c-argdecl-indent: 8
- * c-label-offset: -8
- * c-continued-statement-offset: 8
- * c-continued-brace-offset: 0
- * End:
- */
+MODULE_LICENSE("Dual BSD/GPL");

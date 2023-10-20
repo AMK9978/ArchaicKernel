@@ -11,7 +11,7 @@
 
     Copyright (C) 1999 David A. Hinds -- dahinds@users.sourceforge.net
 
-    pcnet_cs.c 1.144 2001/11/07 04:06:56
+    pcnet_cs.c 1.149 2002/06/29 06:27:37
     
     The network driver code is based on Donald Becker's NE2000 code:
 
@@ -31,16 +31,12 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/sched.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/delay.h>
-#include <asm/io.h>
-#include <asm/system.h>
-#include <asm/byteorder.h>
-
+#include <linux/ethtool.h>
 #include <linux/netdevice.h>
 #include <../drivers/net/8390.h>
 
@@ -51,6 +47,11 @@
 #include <pcmcia/ciscode.h>
 #include <pcmcia/ds.h>
 #include <pcmcia/cisreg.h>
+
+#include <asm/io.h>
+#include <asm/system.h>
+#include <asm/byteorder.h>
+#include <asm/uaccess.h>
 
 #define PCNET_CMD	0x00
 #define PCNET_DATAPORT	0x10	/* NatSemi-defined port window offset. */
@@ -64,7 +65,7 @@
 #define SOCKET_START_PG	0x01
 #define SOCKET_STOP_PG	0xff
 
-#define PCNET_RDC_TIMEOUT 0x02	/* Max wait in jiffies for Tx RDC */
+#define PCNET_RDC_TIMEOUT (2*HZ/100)	/* Max wait in jiffies for Tx RDC */
 
 static char *if_names[] = { "auto", "10baseT", "10base2"};
 
@@ -73,7 +74,7 @@ static int pc_debug = PCMCIA_DEBUG;
 MODULE_PARM(pc_debug, "i");
 #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
 static char *version =
-"pcnet_cs.c 1.144 2001/11/07 04:06:56 (David Hinds)";
+"pcnet_cs.c 1.149 2002/06/29 06:27:37 (David Hinds)";
 #else
 #define DEBUG(n, args...)
 #endif
@@ -109,13 +110,14 @@ MODULE_PARM(hw_addr, "6i");
 
 static void mii_phy_probe(struct net_device *dev);
 static void pcnet_config(dev_link_t *link);
-static void pcnet_release(u_long arg);
+static void pcnet_release(dev_link_t *link);
 static int pcnet_event(event_t event, int priority,
 		       event_callback_args_t *args);
 static int pcnet_open(struct net_device *dev);
 static int pcnet_close(struct net_device *dev);
 static int ei_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
-static void ei_irq_wrapper(int irq, void *dev_id, struct pt_regs *regs);
+static struct ethtool_ops netdev_ethtool_ops;
+static irqreturn_t ei_irq_wrapper(int irq, void *dev_id, struct pt_regs *regs);
 static void ei_watchdog(u_long arg);
 static void pcnet_reset_8390(struct net_device *dev);
 static int set_config(struct net_device *dev, struct ifmap *map);
@@ -237,32 +239,6 @@ typedef struct pcnet_dev_t {
 
 /*======================================================================
 
-    This bit of code is used to avoid unregistering network devices
-    at inappropriate times.  2.2 and later kernels are fairly picky
-    about when this can happen.
-    
-======================================================================*/
-
-static void flush_stale_links(void)
-{
-    dev_link_t *link, *next;
-    for (link = dev_list; link; link = next) {
-	next = link->next;
-	if (link->state & DEV_STALE_LINK)
-	    pcnet_detach(link);
-    }
-}
-
-/*====================================================================*/
-
-static void cs_error(client_handle_t handle, int func, int ret)
-{
-    error_info_t err = { func, ret };
-    CardServices(ReportError, handle, &err);
-}
-
-/*======================================================================
-
     We never need to do anything when a pcnet device is "initialized"
     by the net software, because we only register already-found cards.
 
@@ -290,7 +266,6 @@ static dev_link_t *pcnet_attach(void)
     int i, ret;
 
     DEBUG(0, "pcnet_attach()\n");
-    flush_stale_links();
 
     /* Create new ethernet device */
     info = kmalloc(sizeof(*info), GFP_KERNEL);
@@ -298,9 +273,7 @@ static dev_link_t *pcnet_attach(void)
     memset(info, 0, sizeof(*info));
     link = &info->link; dev = &info->dev;
     link->priv = info;
-    
-    link->release.function = &pcnet_release;
-    link->release.data = (u_long)link;
+
     link->irq.Attributes = IRQ_TYPE_EXCLUSIVE;
     link->irq.IRQInfo1 = IRQ_INFO2_VALID|IRQ_LEVEL_ID;
     if (irq_list[0] == -1)
@@ -312,6 +285,7 @@ static dev_link_t *pcnet_attach(void)
     link->conf.IntType = INT_MEMORY_AND_IO;
 
     ethdev_init(dev);
+    SET_MODULE_OWNER(dev);
     dev->init = &pcnet_init;
     dev->open = &pcnet_open;
     dev->stop = &pcnet_close;
@@ -361,13 +335,10 @@ static void pcnet_detach(dev_link_t *link)
     if (*linkp == NULL)
 	return;
 
-    del_timer(&link->release);
     if (link->state & DEV_CONFIG) {
-	pcnet_release((u_long)link);
-	if (link->state & DEV_STALE_CONFIG) {
-	    link->state |= DEV_STALE_LINK;
+	pcnet_release(link);
+	if (link->state & DEV_STALE_CONFIG)
 	    return;
-	}
     }
 
     if (link->handle)
@@ -375,9 +346,11 @@ static void pcnet_detach(dev_link_t *link)
 
     /* Unlink device structure, free bits */
     *linkp = link->next;
-    if (link->dev)
+    if (link->dev) {
 	unregister_netdev(&info->dev);
-    kfree(info);
+	free_netdev(&info->dev);
+    } else
+	 kfree(info);
 
 } /* pcnet_detach */
 
@@ -708,10 +681,6 @@ static void pcnet_config(dev_link_t *link)
     } else {
 	dev->if_port = 0;
     }
-    if (register_netdev(dev) != 0) {
-	printk(KERN_NOTICE "pcnet_cs: register_netdev() failed\n");
-	goto failed;
-    }
 
     hw_info = get_hwinfo(link);
     if (hw_info == NULL)
@@ -726,7 +695,6 @@ static void pcnet_config(dev_link_t *link)
     if (hw_info == NULL) {
 	printk(KERN_NOTICE "pcnet_cs: unable to read hardware net"
 	       " address for io base %#3lx\n", dev->base_addr);
-	unregister_netdev(dev);
 	goto failed;
     }
 
@@ -760,20 +728,36 @@ static void pcnet_config(dev_link_t *link)
     ei_status.word16 = 1;
     ei_status.reset_8390 = &pcnet_reset_8390;
 
-    strcpy(info->node.dev_name, dev->name);
-    link->dev = &info->node;
-    link->state &= ~DEV_CONFIG_PENDING;
+    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
 
     if (info->flags & (IS_DL10019|IS_DL10022)) {
 	u_char id = inb(dev->base_addr + 0x1a);
 	dev->do_ioctl = &ei_ioctl;
 	mii_phy_probe(dev);
+	if ((id == 0x30) && !info->pna_phy && (info->eth_phy == 4))
+	    info->eth_phy = 0;
+    }
+
+    link->dev = &info->node;
+    link->state &= ~DEV_CONFIG_PENDING;
+
+    if (register_netdev(dev) != 0) {
+	printk(KERN_NOTICE "pcnet_cs: register_netdev() failed\n");
+	link->dev = NULL;
+	goto failed;
+    }
+
+    strcpy(info->node.dev_name, dev->name);
+
+    if (info->flags & (IS_DL10019|IS_DL10022)) {
+	u_char id = inb(dev->base_addr + 0x1a);
 	printk(KERN_INFO "%s: NE2000 (DL100%d rev %02x): ",
 	       dev->name, ((info->flags & IS_DL10022) ? 22 : 19), id);
 	if (info->pna_phy)
 	    printk("PNA, ");
-    } else
+    } else {
 	printk(KERN_INFO "%s: NE2000 Compatible: ", dev->name);
+    }
     printk("io %#3lx, irq %d,", dev->base_addr, dev->irq);
     if (info->flags & USE_SHMEM)
 	printk (" mem %#5lx,", dev->mem_start);
@@ -787,7 +771,8 @@ static void pcnet_config(dev_link_t *link)
 cs_failed:
     cs_error(link->handle, last_fn, last_ret);
 failed:
-    pcnet_release((u_long)link);
+    pcnet_release(link);
+    link->state &= ~DEV_CONFIG_PENDING;
     return;
 } /* pcnet_config */
 
@@ -799,9 +784,8 @@ failed:
 
 ======================================================================*/
 
-static void pcnet_release(u_long arg)
+static void pcnet_release(dev_link_t *link)
 {
-    dev_link_t *link = (dev_link_t *)arg;
     pcnet_dev_t *info = link->priv;
 
     DEBUG(0, "pcnet_release(0x%p)\n", link);
@@ -823,7 +807,9 @@ static void pcnet_release(u_long arg)
 
     link->state &= ~DEV_CONFIG;
 
-} /* pcnet_release */
+    if (link->state & DEV_STALE_CONFIG)
+	    pcnet_detach(link);
+}
 
 /*======================================================================
 
@@ -847,11 +833,11 @@ static int pcnet_event(event_t event, int priority,
 	link->state &= ~DEV_PRESENT;
 	if (link->state & DEV_CONFIG) {
 	    netif_device_detach(&info->dev);
-	    mod_timer(&link->release, jiffies + HZ/20);
+	    pcnet_release(link);
 	}
 	break;
     case CS_EVENT_CARD_INSERTION:
-	link->state |= DEV_PRESENT;
+	link->state |= DEV_PRESENT | DEV_CONFIG_PENDING;
 	pcnet_config(link);
 	break;
     case CS_EVENT_PM_SUSPEND:
@@ -1022,13 +1008,13 @@ static int pcnet_open(struct net_device *dev)
 	return -ENODEV;
 
     link->open++;
-    MOD_INC_USE_COUNT;
 
     set_misc_reg(dev);
     request_irq(dev->irq, ei_irq_wrapper, SA_SHIRQ, dev_info, dev);
 
     info->phy_id = info->eth_phy;
     info->link_status = 0x00;
+    init_timer(&info->watchdog);
     info->watchdog.function = &ei_watchdog;
     info->watchdog.data = (u_long)info;
     info->watchdog.expires = jiffies + HZ;
@@ -1046,15 +1032,14 @@ static int pcnet_close(struct net_device *dev)
 
     DEBUG(2, "pcnet_close('%s')\n", dev->name);
 
+    ei_close(dev);
     free_irq(dev->irq, dev);
     
     link->open--;
     netif_stop_queue(dev);
-    del_timer(&info->watchdog);
+    del_timer_sync(&info->watchdog);
     if (link->state & DEV_STALE_CONFIG)
-	mod_timer(&link->release, jiffies + HZ/20);
-
-    MOD_DEC_USE_COUNT;
+	    pcnet_release(link);
 
     return 0;
 } /* pcnet_close */
@@ -1111,11 +1096,13 @@ static int set_config(struct net_device *dev, struct ifmap *map)
 
 /*====================================================================*/
 
-static void ei_irq_wrapper(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t ei_irq_wrapper(int irq, void *dev_id, struct pt_regs *regs)
 {
     pcnet_dev_t *info = dev_id;
     info->stale = 0;
     ei_interrupt(irq, dev_id, regs);
+    /* FIXME! Was it really ours? */
+    return IRQ_HANDLED;
 }
 
 static void ei_watchdog(u_long arg)
@@ -1183,7 +1170,7 @@ static void ei_watchdog(u_long arg)
 	}
 	info->link_status = link;
     }
-    if (info->pna_phy && (jiffies - info->mii_reset > 6*HZ)) {
+    if (info->pna_phy && time_after(jiffies, info->mii_reset + 6*HZ)) {
 	link = mdio_read(mii_addr, info->eth_phy, 1) & 0x0004;
 	if (((info->phy_id == info->pna_phy) && link) ||
 	    ((info->phy_id != info->pna_phy) && !link)) {
@@ -1206,18 +1193,31 @@ reschedule:
 
 /*====================================================================*/
 
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, "pcnet_cs");
+}
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+};
+
+/*====================================================================*/
+
+
 static int ei_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
     pcnet_dev_t *info = (pcnet_dev_t *)dev;
     u16 *data = (u16 *)&rq->ifr_data;
     ioaddr_t mii_addr = dev->base_addr + DLINK_GPIO;
     switch (cmd) {
-    case SIOCDEVPRIVATE:
+    case SIOCGMIIPHY:
 	data[0] = info->phy_id;
-    case SIOCDEVPRIVATE+1:
+    case SIOCGMIIREG:		/* Read MII PHY register. */
 	data[3] = mdio_read(mii_addr, data[0], data[1] & 0x1f);
 	return 0;
-    case SIOCDEVPRIVATE+2:
+    case SIOCSMIIREG:		/* Write MII PHY register. */
 	if (!capable(CAP_NET_ADMIN))
 	    return -EPERM;
 	mdio_write(mii_addr, data[0], data[1] & 0x1f, data[2]);
@@ -1385,7 +1385,7 @@ static void dma_block_output(struct net_device *dev, int count,
 #endif
 
     while ((inb_p(nic_base + EN0_ISR) & ENISR_RDC) == 0)
-	if (jiffies - dma_start > PCNET_RDC_TIMEOUT) {
+	if (time_after(jiffies, dma_start + PCNET_RDC_TIMEOUT)) {
 	    printk(KERN_NOTICE "%s: timeout waiting for Tx RDC.\n",
 		   dev->name);
 	    pcnet_reset_8390(dev);
@@ -1460,7 +1460,7 @@ static void shmem_get_8390_hdr(struct net_device *dev,
 			       struct e8390_pkt_hdr *hdr,
 			       int ring_page)
 {
-    void *xfer_start = (void *)(dev->rmem_start + (ring_page << 8)
+    void *xfer_start = (void *)(ei_status.rmem_start + (ring_page << 8)
 				- (ei_status.rx_start_page << 8));
     
     copyin((void *)hdr, xfer_start, sizeof(struct e8390_pkt_hdr));
@@ -1473,17 +1473,17 @@ static void shmem_get_8390_hdr(struct net_device *dev,
 static void shmem_block_input(struct net_device *dev, int count,
 			      struct sk_buff *skb, int ring_offset)
 {
-    void *xfer_start = (void *)(dev->rmem_start + ring_offset
+    void *xfer_start = (void *)(ei_status.rmem_start + ring_offset
 				- (ei_status.rx_start_page << 8));
     char *buf = skb->data;
     
-    if (xfer_start + count > (void *)dev->rmem_end) {
+    if (xfer_start + count > (void *)ei_status.rmem_end) {
 	/* We must wrap the input move. */
-	int semi_count = (void*)dev->rmem_end - xfer_start;
+	int semi_count = (void*)ei_status.rmem_end - xfer_start;
 	copyin(buf, xfer_start, semi_count);
 	buf += semi_count;
 	ring_offset = ei_status.rx_start_page << 8;
-	xfer_start = (void *)dev->rmem_start;
+	xfer_start = (void *)ei_status.rmem_start;
 	count -= semi_count;
     }
     copyin(buf, xfer_start, count);
@@ -1548,8 +1548,8 @@ static int setup_shmem_window(dev_link_t *link, int start_pg,
     }
     
     dev->mem_start = (u_long)info->base + offset;
-    dev->rmem_start = dev->mem_start + (TX_PAGES<<8);
-    dev->mem_end = dev->rmem_end = (u_long)info->base + req.Size;
+    ei_status.rmem_start = dev->mem_start + (TX_PAGES<<8);
+    dev->mem_end = ei_status.rmem_end = (u_long)info->base + req.Size;
 
     ei_status.tx_start_page = start_pg;
     ei_status.rx_start_page = start_pg + TX_PAGES;
@@ -1571,24 +1571,24 @@ failed:
 
 /*====================================================================*/
 
+static struct pcmcia_driver pcnet_driver = {
+	.drv		= {
+		.name	= "pcnet_cs",
+	},
+	.attach		= pcnet_attach,
+	.detach		= pcnet_detach,
+	.owner		= THIS_MODULE,
+};
+
 static int __init init_pcnet_cs(void)
 {
-    servinfo_t serv;
-    DEBUG(0, "%s\n", version);
-    CardServices(GetCardServicesInfo, &serv);
-    if (serv.Revision != CS_RELEASE_CODE) {
-	printk(KERN_NOTICE "pcnet_cs: Card Services release "
-	       "does not match!\n");
-	return -1;
-    }
-    register_pccard_driver(&dev_info, &pcnet_attach, &pcnet_detach);
-    return 0;
+    return pcmcia_register_driver(&pcnet_driver);
 }
 
 static void __exit exit_pcnet_cs(void)
 {
     DEBUG(0, "pcnet_cs: unloading\n");
-    unregister_pccard_driver(&dev_info);
+    pcmcia_unregister_driver(&pcnet_driver);
     while (dev_list != NULL)
 	pcnet_detach(dev_list);
 }

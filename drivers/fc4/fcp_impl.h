@@ -8,7 +8,6 @@
 #define _FCP_SCSI_H
 
 #include <linux/types.h>
-#include <linux/blk.h>
 #include "../scsi/scsi.h"
 
 #include "fc.h"
@@ -157,7 +156,6 @@ int fc_do_prli(fc_channel *, unsigned char);
 		if (fc->state == FC_STATE_ONLINE)
 
 int fcp_scsi_queuecommand(Scsi_Cmnd *, void (* done)(Scsi_Cmnd *));
-int fcp_old_abort(Scsi_Cmnd *);
 int fcp_scsi_abort(Scsi_Cmnd *);
 int fcp_scsi_dev_reset(Scsi_Cmnd *);
 int fcp_scsi_bus_reset(Scsi_Cmnd *);

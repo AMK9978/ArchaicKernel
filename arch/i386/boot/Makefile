@@ -8,80 +8,95 @@
 # Copyright (C) 1994 by Linus Torvalds
 #
 
-BOOT_INCL =	$(TOPDIR)/include/linux/config.h \
-		$(TOPDIR)/include/linux/autoconf.h \
-		$(TOPDIR)/include/asm/boot.h
+# ROOT_DEV specifies the default root-device when making the image.
+# This can be either FLOPPY, CURRENT, /dev/xxxx or empty, in which case
+# the default of FLOPPY is used by 'build'.
 
-zImage: $(CONFIGURE) bootsect setup compressed/vmlinux tools/build
-	$(OBJCOPY) compressed/vmlinux compressed/vmlinux.out
-	tools/build bootsect setup compressed/vmlinux.out $(ROOT_DEV) > zImage
+ROOT_DEV := CURRENT
 
-bzImage: $(CONFIGURE) bbootsect bsetup compressed/bvmlinux tools/build
-	$(OBJCOPY) compressed/bvmlinux compressed/bvmlinux.out
-	tools/build -b bbootsect bsetup compressed/bvmlinux.out $(ROOT_DEV) > bzImage
+# If you want to preset the SVGA mode, uncomment the next line and
+# set SVGA_MODE to whatever number you want.
+# Set it to -DSVGA_MODE=NORMAL_VGA if you just want the EGA/VGA mode.
+# The number is the same as you would ordinarily press at bootup.
 
-compressed/vmlinux: $(TOPDIR)/vmlinux
-	@$(MAKE) -C compressed vmlinux
+SVGA_MODE := -DSVGA_MODE=NORMAL_VGA
 
-compressed/bvmlinux: $(TOPDIR)/vmlinux
-	@$(MAKE) -C compressed bvmlinux
+# If you want the RAM disk device, define this to be the size in blocks.
 
-zdisk: $(BOOTIMAGE)
-	dd bs=8192 if=$(BOOTIMAGE) of=/dev/fd0
+#RAMDISK := -DRAMDISK=512
 
-zlilo: $(CONFIGURE) $(BOOTIMAGE)
+targets		:= vmlinux.bin bootsect bootsect.o setup setup.o \
+		   zImage bzImage
+subdir- 	:= compressed
+
+host-progs	:= tools/build
+
+# ---------------------------------------------------------------------------
+
+$(obj)/zImage:  IMAGE_OFFSET := 0x1000
+$(obj)/zImage:  EXTRA_AFLAGS := -traditional $(SVGA_MODE) $(RAMDISK)
+$(obj)/bzImage: IMAGE_OFFSET := 0x100000
+$(obj)/bzImage: EXTRA_AFLAGS := -traditional $(SVGA_MODE) $(RAMDISK) -D__BIG_KERNEL__
+$(obj)/bzImage: BUILDFLAGS   := -b
+
+quiet_cmd_image = BUILD   $@
+cmd_image = $(obj)/tools/build $(BUILDFLAGS) $(obj)/bootsect $(obj)/setup \
+	    $(obj)/vmlinux.bin $(ROOT_DEV) > $@
+
+$(obj)/zImage $(obj)/bzImage: $(obj)/bootsect $(obj)/setup \
+			      $(obj)/vmlinux.bin $(obj)/tools/build FORCE
+	$(call if_changed,image)
+	@echo 'Kernel: $@ is ready'
+
+$(obj)/vmlinux.bin: $(obj)/compressed/vmlinux FORCE
+	$(call if_changed,objcopy)
+
+LDFLAGS_bootsect := -Ttext 0x0 -s --oformat binary
+LDFLAGS_setup	 := -Ttext 0x0 -s --oformat binary -e begtext
+
+$(obj)/setup $(obj)/bootsect: %: %.o FORCE
+	$(call if_changed,ld)
+
+$(obj)/compressed/vmlinux: FORCE
+	$(Q)$(MAKE) $(build)=$(obj)/compressed IMAGE_OFFSET=$(IMAGE_OFFSET) $@
+
+# Set this if you want to pass append arguments to the zdisk/fdimage kernel
+FDARGS = 
+
+$(obj)/mtools.conf: $(src)/mtools.conf.in
+	sed -e 's|@OBJ@|$(obj)|g' < $< > $@
+
+# This requires write access to /dev/fd0
+zdisk: $(BOOTIMAGE) $(obj)/mtools.conf
+	MTOOLSRC=$(obj)/mtools.conf mformat a:			; sync
+	syslinux /dev/fd0					; sync
+	echo 'default linux $(FDARGS)' | \
+		MTOOLSRC=$(src)/mtools.conf mcopy - a:syslinux.cfg
+	MTOOLSRC=$(obj)/mtools.conf mcopy $(BOOTIMAGE) a:linux	; sync
+
+# These require being root or having syslinux 2.02 or higher installed
+fdimage fdimage144: $(BOOTIMAGE) $(obj)/mtools.conf
+	dd if=/dev/zero of=$(obj)/fdimage bs=1024 count=1440
+	MTOOLSRC=$(obj)/mtools.conf mformat v:			; sync
+	syslinux $(obj)/fdimage					; sync
+	echo 'default linux $(FDARGS)' | \
+		MTOOLSRC=$(obj)/mtools.conf mcopy - v:syslinux.cfg
+	MTOOLSRC=$(obj)/mtools.conf mcopy $(BOOTIMAGE) v:linux	; sync
+
+fdimage288: $(BOOTIMAGE) $(obj)/mtools.conf
+	dd if=/dev/zero of=$(obj)/fdimage bs=1024 count=2880
+	MTOOLSRC=$(obj)/mtools.conf mformat w:			; sync
+	syslinux $(obj)/fdimage					; sync
+	echo 'default linux $(FDARGS)' | \
+		MTOOLSRC=$(obj)/mtools.conf mcopy - w:syslinux.cfg
+	MTOOLSRC=$(obj)/mtools.conf mcopy $(BOOTIMAGE) w:linux	; sync
+
+zlilo: $(BOOTIMAGE)
 	if [ -f $(INSTALL_PATH)/vmlinuz ]; then mv $(INSTALL_PATH)/vmlinuz $(INSTALL_PATH)/vmlinuz.old; fi
 	if [ -f $(INSTALL_PATH)/System.map ]; then mv $(INSTALL_PATH)/System.map $(INSTALL_PATH)/System.old; fi
 	cat $(BOOTIMAGE) > $(INSTALL_PATH)/vmlinuz
-	cp $(TOPDIR)/System.map $(INSTALL_PATH)/
+	cp System.map $(INSTALL_PATH)/
 	if [ -x /sbin/lilo ]; then /sbin/lilo; else /etc/lilo/install; fi
 
-install: $(CONFIGURE) $(BOOTIMAGE)
-	sh -x ./install.sh $(KERNELRELEASE) $(BOOTIMAGE) $(TOPDIR)/System.map "$(INSTALL_PATH)"
-
-tools/build: tools/build.c
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ $< -I$(TOPDIR)/include
-
-bootsect: bootsect.o
-	$(LD) -Ttext 0x0 -s --oformat binary -o $@ $<
-
-bootsect.o: bootsect.s
-	$(AS) -o $@ $<
-
-bootsect.s: bootsect.S Makefile $(BOOT_INCL)
-	$(CPP) $(CPPFLAGS) -traditional $(SVGA_MODE) $(RAMDISK) $< -o $@
-
-bbootsect: bbootsect.o
-	$(LD) -Ttext 0x0 -s --oformat binary $< -o $@
-
-bbootsect.o: bbootsect.s
-	$(AS) -o $@ $<
-
-bbootsect.s: bootsect.S Makefile $(BOOT_INCL)
-	$(CPP) $(CPPFLAGS) -D__BIG_KERNEL__ -traditional $(SVGA_MODE) $(RAMDISK) $< -o $@
-
-setup: setup.o
-	$(LD) -Ttext 0x0 -s --oformat binary -e begtext -o $@ $<
-
-setup.o: setup.s
-	$(AS) -o $@ $<
-
-setup.s: setup.S video.S Makefile $(BOOT_INCL) $(TOPDIR)/include/linux/version.h $(TOPDIR)/include/linux/compile.h
-	$(CPP) $(CPPFLAGS) -D__ASSEMBLY__ -traditional $(SVGA_MODE) $(RAMDISK) $< -o $@
-
-bsetup: bsetup.o
-	$(LD) -Ttext 0x0 -s --oformat binary -e begtext -o $@ $<
-
-bsetup.o: bsetup.s
-	$(AS) -o $@ $<
-
-bsetup.s: setup.S video.S Makefile $(BOOT_INCL) $(TOPDIR)/include/linux/version.h $(TOPDIR)/include/linux/compile.h
-	$(CPP) $(CPPFLAGS) -D__BIG_KERNEL__ -D__ASSEMBLY__ -traditional $(SVGA_MODE) $(RAMDISK) $< -o $@
-
-dep:
-
-clean:
-	rm -f tools/build
-	rm -f setup bootsect zImage compressed/vmlinux.out
-	rm -f bsetup bbootsect bzImage compressed/bvmlinux.out
-	@$(MAKE) -C compressed clean
+install: $(BOOTIMAGE)
+	sh $(srctree)/$(src)/install.sh $(KERNELRELEASE) $< System.map "$(INSTALL_PATH)"

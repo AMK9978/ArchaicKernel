@@ -30,15 +30,11 @@
 
 #define FTAPE_VERSION "ftape v3.04d 25/11/97"
 
-/* this makes the Kernel version numbers readable */
-#define KERNEL_VER(major,minor,sublvl) (((major)<<16)+((minor)<<8)+(sublvl))
-
 #ifdef __KERNEL__
-#include <linux/sched.h>
+#include <linux/interrupt.h>
 #include <linux/mm.h>
 #endif
 #include <linux/types.h>
-#include <linux/version.h>
 #include <linux/config.h>
 #include <linux/mtio.h>
 
@@ -201,8 +197,6 @@ typedef union {
  */
 #define ABS(a)          ((a) < 0 ? -(a) : (a))
 #define NR_ITEMS(x)     (int)(sizeof(x)/ sizeof(*x))
-
-extern int ftape_init(void);
 
 #endif  /* __KERNEL__ */
 

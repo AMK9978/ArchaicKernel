@@ -23,10 +23,6 @@
  *
  * This version does not support shared irq's.
  *
- * This module exports the following rs232 io functions:
- *   int cy_init(void);
- *   int  cy_open(struct tty_struct *tty, struct file *filp);
- *
  * $Log: cyclades.c,v $
  * Revision 1.36.1.4  1995/03/29  06:14:14  bentson
  * disambiguate between Cyclom-16Y and Cyclom-32Ye;
@@ -62,10 +58,10 @@
 #include <linux/major.h>
 #include <linux/mm.h>
 #include <linux/console.h>
+#include <linux/module.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/segment.h>
 #include <asm/bitops.h>
 #include <asm/mvme16xhw.h>
 #include <asm/bootinfo.h>
@@ -74,7 +70,6 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 
-#include <linux/version.h>
 #include <asm/uaccess.h>
 #include <linux/init.h>
 
@@ -97,12 +92,10 @@
 #define STD_COM_FLAGS (0)
 
 #define SERIAL_TYPE_NORMAL  1
-#define SERIAL_TYPE_CALLOUT 2
-
 
 DECLARE_TASK_QUEUE(tq_cyclades);
 
-struct tty_driver cy_serial_driver, cy_callout_driver;
+static struct tty_driver *cy_serial_driver;
 extern int serial_console;
 static struct cyclades_port *serial_console_info = NULL;
 static unsigned int serial_console_cflag = 0;
@@ -128,13 +121,6 @@ struct cyclades_port cy_port[] = {
         {-1 },      /* ttyS3 */
 };
 #define NR_PORTS        (sizeof(cy_port)/sizeof(struct cyclades_port))
-
-static int serial_refcount;
-
-static struct tty_struct *serial_table[NR_PORTS];
-static struct termios *serial_termios[NR_PORTS];
-static struct termios *serial_termios_locked[NR_PORTS];
-
 
 /*
  * tmp_buf is used as a temporary buffer by serial_write.  We need to
@@ -237,30 +223,30 @@ void my_udelay (long us)
 }
 
 static inline int
-serial_paranoia_check(struct cyclades_port *info,
-			dev_t device, const char *routine)
+serial_paranoia_check(struct cyclades_port *info, char *name,
+		      const char *routine)
 {
 #ifdef SERIAL_PARANOIA_CHECK
     static const char *badmagic =
-	"Warning: bad magic number for serial struct (%d, %d) in %s\n";
+	"Warning: bad magic number for serial struct (%s) in %s\n";
     static const char *badinfo =
-	"Warning: null cyclades_port for (%d, %d) in %s\n";
+	"Warning: null cyclades_port for (%s) in %s\n";
     static const char *badrange =
-	"Warning: cyclades_port out of range for (%d, %d) in %s\n";
+	"Warning: cyclades_port out of range for (%s) in %s\n";
 
     if (!info) {
-	printk(badinfo, MAJOR(device), MINOR(device), routine);
+	printk(badinfo, name, routine);
 	return 1;
     }
 
     if( (long)info < (long)(&cy_port[0])
     || (long)(&cy_port[NR_PORTS]) < (long)info ){
-	printk(badrange, MAJOR(device), MINOR(device), routine);
+	printk(badrange, name, routine);
 	return 1;
     }
 
     if (info->magic != CYCLADES_MAGIC) {
-	printk(badmagic, MAJOR(device), MINOR(device), routine);
+	printk(badmagic, name, routine);
 	return 1;
     }
 #endif
@@ -274,18 +260,18 @@ serial_paranoia_check(struct cyclades_port *info,
 void
 SP(char *data){
   unsigned long flags;
-    save_flags(flags); cli();
+    local_irq_save(flags);
         console_print(data);
-    restore_flags(flags);
+    local_irq_restore(flags);
 }
 char scrn[2];
 void
 CP(char data){
   unsigned long flags;
-    save_flags(flags); cli();
+    local_irq_save(flags);
         scrn[0] = data;
         console_print(scrn);
-    restore_flags(flags);
+    local_irq_restore(flags);
 }/* CP */
 
 void CP1(int data) { (data<10)?  CP(data+'0'): CP(data+'A'-10); }/* CP1 */
@@ -305,7 +291,7 @@ write_cy_cmd(volatile u_char *base_addr, u_char cmd)
   unsigned long flags;
   volatile int  i;
 
-    save_flags(flags); cli();
+    local_irq_save(flags);
 	/* Check to see that the previous command has completed */
 	for(i = 0 ; i < 100 ; i++){
 	    if (base_addr[CyCCR] == 0){
@@ -316,13 +302,13 @@ write_cy_cmd(volatile u_char *base_addr, u_char cmd)
 	/* if the CCR never cleared, the previous command
 	    didn't finish within the "reasonable time" */
 	if ( i == 10 ) {
-	    restore_flags(flags);
+	    local_irq_restore(flags);
 	    return (-1);
 	}
 
 	/* Issue the new command */
 	base_addr[CyCCR] = cmd;
-    restore_flags(flags);
+    local_irq_restore(flags);
     return(0);
 } /* write_cy_cmd */
 
@@ -339,18 +325,18 @@ cy_stop(struct tty_struct *tty)
   unsigned long flags;
 
 #ifdef SERIAL_DEBUG_OTHER
-    printk("cy_stop ttyS%d\n", info->line); /* */
+    printk("cy_stop %s\n", tty->name); /* */
 #endif
 
-    if (serial_paranoia_check(info, tty->device, "cy_stop"))
+    if (serial_paranoia_check(info, tty->name, "cy_stop"))
 	return;
 	
     channel = info->line;
 
-    save_flags(flags); cli();
+    local_irq_save(flags);
         base_addr[CyCAR] = (u_char)(channel); /* index channel */
         base_addr[CyIER] &= ~(CyTxMpty|CyTxRdy);
-    restore_flags(flags);
+    local_irq_restore(flags);
 
     return;
 } /* cy_stop */
@@ -364,18 +350,18 @@ cy_start(struct tty_struct *tty)
   unsigned long flags;
 
 #ifdef SERIAL_DEBUG_OTHER
-    printk("cy_start ttyS%d\n", info->line); /* */
+    printk("cy_start %s\n", tty->name); /* */
 #endif
 
-    if (serial_paranoia_check(info, tty->device, "cy_start"))
+    if (serial_paranoia_check(info, tty->name, "cy_start"))
 	return;
 	
     channel = info->line;
 
-    save_flags(flags); cli();
+    local_irq_save(flags);
         base_addr[CyCAR] = (u_char)(channel);
         base_addr[CyIER] |= CyTxMpty;
-    restore_flags(flags);
+    local_irq_restore(flags);
 
     return;
 } /* cy_start */
@@ -400,7 +386,7 @@ cy_sched_event(struct cyclades_port *info, int event)
    whenever the card wants its hand held--chars
    received, out buffer empty, modem change, etc.
  */
-static void
+static irqreturn_t
 cd2401_rxerr_interrupt(int irq, void *dev_id, struct pt_regs *fp)
 {
     struct tty_struct *tty;
@@ -418,7 +404,7 @@ cd2401_rxerr_interrupt(int irq, void *dev_id, struct pt_regs *fp)
     if ((err = base_addr[CyRISR]) & CyTIMEOUT) {
 	/* This is a receive timeout interrupt, ignore it */
 	base_addr[CyREOIR] = CyNOTRANS;
-	return;
+	return IRQ_HANDLED;
     }
 
     /* Read a byte of data if there is any - assume the error
@@ -432,13 +418,13 @@ cd2401_rxerr_interrupt(int irq, void *dev_id, struct pt_regs *fp)
     /* if there is nowhere to put the data, discard it */
     if(info->tty == 0) {
 	base_addr[CyREOIR] = rfoc ? 0 : CyNOTRANS;
-	return;
+	return IRQ_HANDLED;
     }
     else { /* there is an open port for this data */
 	tty = info->tty;
 	if(err & info->ignore_status_mask){
 	    base_addr[CyREOIR] = rfoc ? 0 : CyNOTRANS;
-	    return;
+	    return IRQ_HANDLED;
 	}
 	if (tty->flip.count < TTY_FLIPBUF_SIZE){
 	    tty->flip.count++;
@@ -488,9 +474,10 @@ cd2401_rxerr_interrupt(int irq, void *dev_id, struct pt_regs *fp)
     queue_task(&tty->flip.tqueue, &tq_timer);
     /* end of service */
     base_addr[CyREOIR] = rfoc ? 0 : CyNOTRANS;
+    return IRQ_HANDLED;
 } /* cy_rxerr_interrupt */
 
-static void
+static irqreturn_t
 cd2401_modem_interrupt(int irq, void *dev_id, struct pt_regs *fp)
 {
     struct cyclades_port *info;
@@ -516,8 +503,7 @@ cd2401_modem_interrupt(int irq, void *dev_id, struct pt_regs *fp)
 	    if(mdm_status & CyDCD){
 /* CP('!'); */
 		cy_sched_event(info, Cy_EVENT_OPEN_WAKEUP);
-	    }else if(!((info->flags & ASYNC_CALLOUT_ACTIVE)
-		     &&(info->flags & ASYNC_CALLOUT_NOHUP))){
+	    } else {
 /* CP('@'); */
 		cy_sched_event(info, Cy_EVENT_HANGUP);
 	    }
@@ -543,9 +529,10 @@ cd2401_modem_interrupt(int irq, void *dev_id, struct pt_regs *fp)
 	}
     }
     base_addr[CyMEOIR] = 0;
+    return IRQ_HANDLED;
 } /* cy_modem_interrupt */
 
-static void
+static irqreturn_t
 cd2401_tx_interrupt(int irq, void *dev_id, struct pt_regs *fp)
 {
     struct cyclades_port *info;
@@ -569,7 +556,7 @@ cd2401_tx_interrupt(int irq, void *dev_id, struct pt_regs *fp)
     if( (channel < 0) || (NR_PORTS <= channel) ){
 	base_addr[CyIER] &= ~(CyTxMpty|CyTxRdy);
 	base_addr[CyTEOIR] = CyNOTRANS;
-	return;
+	return IRQ_HANDLED;
     }
     info->last_active = jiffies;
     if(info->tty == 0){
@@ -578,7 +565,7 @@ cd2401_tx_interrupt(int irq, void *dev_id, struct pt_regs *fp)
 	    cy_sched_event(info, Cy_EVENT_WRITE_WAKEUP);
         }
 	base_addr[CyTEOIR] = CyNOTRANS;
-	return;
+	return IRQ_HANDLED;
     }
 
     /* load the on-chip space available for outbound data */
@@ -662,9 +649,10 @@ cd2401_tx_interrupt(int irq, void *dev_id, struct pt_regs *fp)
 	cy_sched_event(info, Cy_EVENT_WRITE_WAKEUP);
     }
     base_addr[CyTEOIR] = (char_count != saved_cnt) ? 0 : CyNOTRANS;
+    return IRQ_HANDLED;
 } /* cy_tx_interrupt */
 
-static void
+static irqreturn_t
 cd2401_rx_interrupt(int irq, void *dev_id, struct pt_regs *fp)
 {
     struct tty_struct *tty;
@@ -722,6 +710,7 @@ cd2401_rx_interrupt(int irq, void *dev_id, struct pt_regs *fp)
     }
     /* end of service */
     base_addr[CyREOIR] = save_cnt ? 0 : CyNOTRANS;
+    return IRQ_HANDLED;
 } /* cy_rx_interrupt */
 
 /*
@@ -765,8 +754,7 @@ do_softint(void *private_)
     if (test_and_clear_bit(Cy_EVENT_HANGUP, &info->event)) {
 	tty_hangup(info->tty);
 	wake_up_interruptible(&info->open_wait);
-	info->flags &= ~(ASYNC_NORMAL_ACTIVE|
-			     ASYNC_CALLOUT_ACTIVE);
+	info->flags &= ~ASYNC_NORMAL_ACTIVE;
     }
     if (test_and_clear_bit(Cy_EVENT_OPEN_WAKEUP, &info->event)) {
 	wake_up_interruptible(&info->open_wait);
@@ -802,7 +790,7 @@ startup(struct cyclades_port * info)
 	return 0;
     }
     if (!info->xmit_buf){
-	info->xmit_buf = (unsigned char *) get_free_page (GFP_KERNEL);
+	info->xmit_buf = (unsigned char *) get_zeroed_page (GFP_KERNEL);
 	if (!info->xmit_buf){
 	    return -ENOMEM;
 	}
@@ -816,7 +804,7 @@ startup(struct cyclades_port * info)
     printk("startup channel %d\n", channel);
 #endif
 
-    save_flags(flags); cli();
+    local_irq_save(flags);
 	base_addr[CyCAR] = (u_char)channel;
 	write_cy_cmd(base_addr,CyENB_RCVR|CyENB_XMTR);
 
@@ -838,7 +826,7 @@ startup(struct cyclades_port * info)
 	}
 	info->xmit_cnt = info->xmit_head = info->xmit_tail = 0;
 
-    restore_flags(flags);
+    local_irq_restore(flags);
 
 #ifdef SERIAL_DEBUG_OPEN
     printk(" done\n");
@@ -854,10 +842,10 @@ start_xmit( struct cyclades_port *info )
   int channel;
 
     channel = info->line;
-    save_flags(flags); cli();
+    local_irq_save(flags);
 	base_addr[CyCAR] = channel;
 	base_addr[CyIER] |= CyTxMpty;
-    restore_flags(flags);
+    local_irq_restore(flags);
 } /* start_xmit */
 
 /*
@@ -888,7 +876,7 @@ shutdown(struct cyclades_port * info)
        Other choices are to delay some fixed interval
        or schedule some later processing.
      */
-    save_flags(flags); cli();
+    local_irq_save(flags);
 	if (info->xmit_buf){
 	    free_page((unsigned long) info->xmit_buf);
 	    info->xmit_buf = 0;
@@ -912,7 +900,7 @@ shutdown(struct cyclades_port * info)
 	    set_bit(TTY_IO_ERROR, &info->tty->flags);
 	}
 	info->flags &= ~ASYNC_INITIALIZED;
-    restore_flags(flags);
+    local_irq_restore(flags);
 
 #ifdef SERIAL_DEBUG_OPEN
     printk(" done\n");
@@ -1079,7 +1067,7 @@ config_setup(struct cyclades_port * info)
 
     channel = info->line;
 
-    save_flags(flags); cli();
+    local_irq_save(flags);
 	base_addr[CyCAR] = (u_char)channel;
 
 	/* CyCMR set once only in mvme167_init_serial() */
@@ -1159,7 +1147,7 @@ config_setup(struct cyclades_port * info)
 	    clear_bit(TTY_IO_ERROR, &info->tty->flags);
 	}
 
-    restore_flags(flags);
+    local_irq_restore(flags);
 
 } /* config_setup */
 
@@ -1171,25 +1159,25 @@ cy_put_char(struct tty_struct *tty, unsigned char ch)
   unsigned long flags;
 
 #ifdef SERIAL_DEBUG_IO
-    printk("cy_put_char ttyS%d(0x%02x)\n", info->line, ch);
+    printk("cy_put_char %s(0x%02x)\n", tty->name, ch);
 #endif
 
-    if (serial_paranoia_check(info, tty->device, "cy_put_char"))
+    if (serial_paranoia_check(info, tty->name, "cy_put_char"))
 	return;
 
     if (!tty || !info->xmit_buf)
 	return;
 
-    save_flags(flags); cli();
+    local_irq_save(flags);
 	if (info->xmit_cnt >= PAGE_SIZE - 1) {
-	    restore_flags(flags);
+	    local_irq_restore(flags);
 	    return;
 	}
 
 	info->xmit_buf[info->xmit_head++] = ch;
 	info->xmit_head &= PAGE_SIZE - 1;
 	info->xmit_cnt++;
-    restore_flags(flags);
+    local_irq_restore(flags);
 } /* cy_put_char */
 
 
@@ -1202,10 +1190,10 @@ cy_flush_chars(struct tty_struct *tty)
   int channel;
 				
 #ifdef SERIAL_DEBUG_IO
-    printk("cy_flush_chars ttyS%d\n", info->line); /* */
+    printk("cy_flush_chars %s\n", tty->name); /* */
 #endif
 
-    if (serial_paranoia_check(info, tty->device, "cy_flush_chars"))
+    if (serial_paranoia_check(info, tty->name, "cy_flush_chars"))
 	return;
 
     if (info->xmit_cnt <= 0 || tty->stopped
@@ -1214,10 +1202,10 @@ cy_flush_chars(struct tty_struct *tty)
 
     channel = info->line;
 
-    save_flags(flags); cli();
+    local_irq_save(flags);
 	base_addr[CyCAR] = channel;
 	base_addr[CyIER] |= CyTxMpty;
-    restore_flags(flags);
+    local_irq_restore(flags);
 } /* cy_flush_chars */
 
 
@@ -1236,10 +1224,10 @@ cy_write(struct tty_struct * tty, int from_user,
   int c, total = 0;
 
 #ifdef SERIAL_DEBUG_IO
-    printk("cy_write ttyS%d\n", info->line); /* */
+    printk("cy_write %s\n", tty->name); /* */
 #endif
 
-    if (serial_paranoia_check(info, tty->device, "cy_write")){
+    if (serial_paranoia_check(info, tty->name, "cy_write")){
 	return 0;
     }
 	
@@ -1262,13 +1250,13 @@ cy_write(struct tty_struct * tty, int from_user,
 			    break;
 		    }
 
-		    cli();
+		    local_irq_save(flags);
 		    c = MIN(c, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
 				   SERIAL_XMIT_SIZE - info->xmit_head));
 		    memcpy(info->xmit_buf + info->xmit_head, tmp_buf, c);
 		    info->xmit_head = (info->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
 		    info->xmit_cnt += c;
-		    restore_flags(flags);
+		    local_irq_restore(flags);
 
 		    buf += c;
 		    count -= c;
@@ -1277,18 +1265,18 @@ cy_write(struct tty_struct * tty, int from_user,
 	    up(&tmp_buf_sem);
     } else {
 	    while (1) {
-		    cli();
+		    local_irq_save(flags);
 		    c = MIN(count, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
 				       SERIAL_XMIT_SIZE - info->xmit_head));
 		    if (c <= 0) {
-			    restore_flags(flags);
+			    local_irq_restore(flags);
 			    break;
 		    }
 
 		    memcpy(info->xmit_buf + info->xmit_head, buf, c);
 		    info->xmit_head = (info->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
 		    info->xmit_cnt += c;
-		    restore_flags(flags);
+		    local_irq_restore(flags);
 
 		    buf += c;
 		    count -= c;
@@ -1312,10 +1300,10 @@ cy_write_room(struct tty_struct *tty)
   int	ret;
 				
 #ifdef SERIAL_DEBUG_IO
-    printk("cy_write_room ttyS%d\n", info->line); /* */
+    printk("cy_write_room %s\n", tty->name); /* */
 #endif
 
-    if (serial_paranoia_check(info, tty->device, "cy_write_room"))
+    if (serial_paranoia_check(info, tty->name, "cy_write_room"))
 	return 0;
     ret = PAGE_SIZE - info->xmit_cnt - 1;
     if (ret < 0)
@@ -1330,10 +1318,10 @@ cy_chars_in_buffer(struct tty_struct *tty)
   struct cyclades_port *info = (struct cyclades_port *)tty->driver_data;
 				
 #ifdef SERIAL_DEBUG_IO
-    printk("cy_chars_in_buffer ttyS%d %d\n", info->line, info->xmit_cnt); /* */
+    printk("cy_chars_in_buffer %s %d\n", tty->name, info->xmit_cnt); /* */
 #endif
 
-    if (serial_paranoia_check(info, tty->device, "cy_chars_in_buffer"))
+    if (serial_paranoia_check(info, tty->name, "cy_chars_in_buffer"))
 	return 0;
 
     return info->xmit_cnt;
@@ -1347,14 +1335,14 @@ cy_flush_buffer(struct tty_struct *tty)
   unsigned long flags;
 				
 #ifdef SERIAL_DEBUG_IO
-    printk("cy_flush_buffer ttyS%d\n", info->line); /* */
+    printk("cy_flush_buffer %s\n", tty->name); /* */
 #endif
 
-    if (serial_paranoia_check(info, tty->device, "cy_flush_buffer"))
+    if (serial_paranoia_check(info, tty->name, "cy_flush_buffer"))
 	return;
-    save_flags(flags); cli();
+    local_irq_save(flags);
 	info->xmit_cnt = info->xmit_head = info->xmit_tail = 0;
-    restore_flags(flags);
+    local_irq_restore(flags);
     wake_up_interruptible(&tty->write_wait);
     if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP))
     && tty->ldisc.write_wakeup)
@@ -1377,12 +1365,12 @@ cy_throttle(struct tty_struct * tty)
 #ifdef SERIAL_DEBUG_THROTTLE
   char buf[64];
 	
-    printk("throttle %s: %d....\n", _tty_name(tty, buf),
+    printk("throttle %s: %d....\n", tty_name(tty, buf),
 	   tty->ldisc.chars_in_buffer(tty));
-    printk("cy_throttle ttyS%d\n", info->line);
+    printk("cy_throttle %s\n", tty->name);
 #endif
 
-    if (serial_paranoia_check(info, tty->device, "cy_nthrottle")){
+    if (serial_paranoia_check(info, tty->name, "cy_nthrottle")){
 	    return;
     }
 
@@ -1393,10 +1381,10 @@ cy_throttle(struct tty_struct * tty)
 
     channel = info->line;
 
-    save_flags(flags); cli();
+    local_irq_save(flags);
 	base_addr[CyCAR] = (u_char)channel;
 	base_addr[CyMSVR1] = 0;
-    restore_flags(flags);
+    local_irq_restore(flags);
 
     return;
 } /* cy_throttle */
@@ -1413,12 +1401,12 @@ cy_unthrottle(struct tty_struct * tty)
 #ifdef SERIAL_DEBUG_THROTTLE
   char buf[64];
 	
-    printk("throttle %s: %d....\n", _tty_name(tty, buf),
+    printk("throttle %s: %d....\n", tty_name(tty, buf),
 	   tty->ldisc.chars_in_buffer(tty));
-    printk("cy_unthrottle ttyS%d\n", info->line);
+    printk("cy_unthrottle %s\n", tty->name);
 #endif
 
-    if (serial_paranoia_check(info, tty->device, "cy_nthrottle")){
+    if (serial_paranoia_check(info, tty->name, "cy_nthrottle")){
 	    return;
     }
 
@@ -1429,10 +1417,10 @@ cy_unthrottle(struct tty_struct * tty)
 
     channel = info->line;
 
-    save_flags(flags); cli();
+    local_irq_save(flags);
 	base_addr[CyCAR] = (u_char)channel;
 	base_addr[CyMSVR1] = CyRTS;
-    restore_flags(flags);
+    local_irq_restore(flags);
 
     return;
 } /* cy_unthrottle */
@@ -1473,7 +1461,7 @@ set_serial_info(struct cyclades_port * info,
 	    return -EFAULT;
     old_info = *info;
 
-    if (!suser()) {
+    if (!capable(CAP_SYS_ADMIN)) {
 	    if ((new_serial.close_delay != info->close_delay) ||
 		((new_serial.flags & ASYNC_FLAGS & ~ASYNC_USR_MASK) !=
 		 (info->flags & ASYNC_FLAGS & ~ASYNC_USR_MASK)))
@@ -1514,10 +1502,10 @@ get_modem_info(struct cyclades_port * info, unsigned int *value)
 
     channel = info->line;
 
-    save_flags(flags); cli();
+    local_irq_save(flags);
         base_addr[CyCAR] = (u_char)channel;
         status = base_addr[CyMSVR1] | base_addr[CyMSVR2];
-    restore_flags(flags);
+    local_irq_restore(flags);
 
     result =  ((status  & CyRTS) ? TIOCM_RTS : 0)
             | ((status  & CyDTR) ? TIOCM_DTR : 0)
@@ -1543,13 +1531,13 @@ set_modem_info(struct cyclades_port * info, unsigned int cmd,
     switch (cmd) {
     case TIOCMBIS:
 	if (arg & TIOCM_RTS){
-	    save_flags(flags); cli();
+	    local_irq_save(flags);
 		base_addr[CyCAR] = (u_char)channel;
 		base_addr[CyMSVR1] = CyRTS;
-	    restore_flags(flags);
+	    local_irq_restore(flags);
 	}
 	if (arg & TIOCM_DTR){
-	    save_flags(flags); cli();
+	    local_irq_save(flags);
 	    base_addr[CyCAR] = (u_char)channel;
 /* CP('S');CP('2'); */
 	    base_addr[CyMSVR2] = CyDTR;
@@ -1557,18 +1545,18 @@ set_modem_info(struct cyclades_port * info, unsigned int cmd,
             printk("cyc: %d: raising DTR\n", __LINE__);
             printk("     status: 0x%x, 0x%x\n", base_addr[CyMSVR1], base_addr[CyMSVR2]);
 #endif
-	    restore_flags(flags);
+	    local_irq_restore(flags);
 	}
 	break;
     case TIOCMBIC:
 	if (arg & TIOCM_RTS){
-	    save_flags(flags); cli();
+	    local_irq_save(flags);
 		base_addr[CyCAR] = (u_char)channel;
 		base_addr[CyMSVR1] = 0;
-	    restore_flags(flags);
+	    local_irq_restore(flags);
 	}
 	if (arg & TIOCM_DTR){
-	    save_flags(flags); cli();
+	    local_irq_save(flags);
 	    base_addr[CyCAR] = (u_char)channel;
 /* CP('C');CP('2'); */
 	    base_addr[CyMSVR2] = 0;
@@ -1576,23 +1564,23 @@ set_modem_info(struct cyclades_port * info, unsigned int cmd,
             printk("cyc: %d: dropping DTR\n", __LINE__);
             printk("     status: 0x%x, 0x%x\n", base_addr[CyMSVR1], base_addr[CyMSVR2]);
 #endif
-	    restore_flags(flags);
+	    local_irq_restore(flags);
 	}
 	break;
     case TIOCMSET:
 	if (arg & TIOCM_RTS){
-	    save_flags(flags); cli();
+	    local_irq_save(flags);
 		base_addr[CyCAR] = (u_char)channel;
 		base_addr[CyMSVR1] = CyRTS;
-	    restore_flags(flags);
+	    local_irq_restore(flags);
 	}else{
-	    save_flags(flags); cli();
+	    local_irq_save(flags);
 		base_addr[CyCAR] = (u_char)channel;
 		base_addr[CyMSVR1] = 0;
-	    restore_flags(flags);
+	    local_irq_restore(flags);
 	}
 	if (arg & TIOCM_DTR){
-	    save_flags(flags); cli();
+	    local_irq_save(flags);
 	    base_addr[CyCAR] = (u_char)channel;
 /* CP('S');CP('3'); */
 	    base_addr[CyMSVR2] = CyDTR;
@@ -1600,9 +1588,9 @@ set_modem_info(struct cyclades_port * info, unsigned int cmd,
             printk("cyc: %d: raising DTR\n", __LINE__);
             printk("     status: 0x%x, 0x%x\n", base_addr[CyMSVR1], base_addr[CyMSVR2]);
 #endif
-	    restore_flags(flags);
+	    local_irq_restore(flags);
 	}else{
-	    save_flags(flags); cli();
+	    local_irq_save(flags);
 	    base_addr[CyCAR] = (u_char)channel;
 /* CP('C');CP('3'); */
 	    base_addr[CyMSVR2] = 0;
@@ -1610,7 +1598,7 @@ set_modem_info(struct cyclades_port * info, unsigned int cmd,
             printk("cyc: %d: dropping DTR\n", __LINE__);
             printk("     status: 0x%x, 0x%x\n", base_addr[CyMSVR1], base_addr[CyMSVR2]);
 #endif
-	    restore_flags(flags);
+	    local_irq_restore(flags);
 	}
 	break;
     default:
@@ -1743,7 +1731,7 @@ cy_ioctl(struct tty_struct *tty, struct file * file,
   int ret_val = 0;
 
 #ifdef SERIAL_DEBUG_OTHER
-    printk("cy_ioctl ttyS%d, cmd = %x arg = %lx\n", info->line, cmd, arg); /* */
+    printk("cy_ioctl %s, cmd = %x arg = %lx\n", tty->name, cmd, arg); /* */
 #endif
 
     switch (cmd) {
@@ -1836,7 +1824,7 @@ cy_set_termios(struct tty_struct *tty, struct termios * old_termios)
   struct cyclades_port *info = (struct cyclades_port *)tty->driver_data;
 
 #ifdef SERIAL_DEBUG_OTHER
-    printk("cy_set_termios ttyS%d\n", info->line);
+    printk("cy_set_termios %s\n", tty->name);
 #endif
 
     if (tty->termios->c_cflag == old_termios->c_cflag)
@@ -1865,15 +1853,15 @@ cy_close(struct tty_struct * tty, struct file * filp)
 
 /* CP('C'); */
 #ifdef SERIAL_DEBUG_OTHER
-    printk("cy_close ttyS%d\n", info->line);
+    printk("cy_close %s\n", tty->name);
 #endif
 
     if (!info
-    || serial_paranoia_check(info, tty->device, "cy_close")){
+    || serial_paranoia_check(info, tty->name, "cy_close")){
         return;
     }
 #ifdef SERIAL_DEBUG_OPEN
-    printk("cy_close ttyS%d, count = %d\n", info->line, info->count);
+    printk("cy_close %s, count = %d\n", tty->name, info->count);
 #endif
 
     if ((tty->count == 1) && (info->count != 1)) {
@@ -1902,19 +1890,11 @@ cy_close(struct tty_struct * tty, struct file * filp)
     if (info->count)
 	return;
     info->flags |= ASYNC_CLOSING;
-    /*
-     * Save the termios structure, since this port may have
-     * separate termios for callout and dialin.
-     */
-    if (info->flags & ASYNC_NORMAL_ACTIVE)
-	info->normal_termios = *tty->termios;
-    if (info->flags & ASYNC_CALLOUT_ACTIVE)
-	info->callout_termios = *tty->termios;
     if (info->flags & ASYNC_INITIALIZED)
 	tty_wait_until_sent(tty, 3000); /* 30 seconds timeout */
     shutdown(info);
-    if (tty->driver.flush_buffer)
-	tty->driver.flush_buffer(tty);
+    if (tty->driver->flush_buffer)
+	tty->driver->flush_buffer(tty);
     if (tty->ldisc.flush_buffer)
 	tty->ldisc.flush_buffer(tty);
     info->event = 0;
@@ -1934,8 +1914,7 @@ cy_close(struct tty_struct * tty, struct file * filp)
 	}
 	wake_up_interruptible(&info->open_wait);
     }
-    info->flags &= ~(ASYNC_NORMAL_ACTIVE|ASYNC_CALLOUT_ACTIVE|
-		     ASYNC_CLOSING);
+    info->flags &= ~(ASYNC_NORMAL_ACTIVE|ASYNC_CLOSING);
     wake_up_interruptible(&info->close_wait);
 
 #ifdef SERIAL_DEBUG_OTHER
@@ -1954,10 +1933,10 @@ cy_hangup(struct tty_struct *tty)
   struct cyclades_port * info = (struct cyclades_port *)tty->driver_data;
 	
 #ifdef SERIAL_DEBUG_OTHER
-    printk("cy_hangup ttyS%d\n", info->line); /* */
+    printk("cy_hangup %s\n", tty->name); /* */
 #endif
 
-    if (serial_paranoia_check(info, tty->device, "cy_hangup"))
+    if (serial_paranoia_check(info, tty->name, "cy_hangup"))
 	return;
     
     shutdown(info);
@@ -1969,7 +1948,7 @@ cy_hangup(struct tty_struct *tty)
 #endif
     info->tty = 0;
 #endif
-    info->flags &= ~(ASYNC_NORMAL_ACTIVE|ASYNC_CALLOUT_ACTIVE);
+    info->flags &= ~ASYNC_NORMAL_ACTIVE;
     wake_up_interruptible(&info->open_wait);
 } /* cy_hangup */
 
@@ -2005,35 +1984,10 @@ block_til_ready(struct tty_struct *tty, struct file * filp,
     }
 
     /*
-     * If this is a callout device, then just make sure the normal
-     * device isn't being used.
-     */
-    if (tty->driver.subtype == SERIAL_TYPE_CALLOUT) {
-	if (info->flags & ASYNC_NORMAL_ACTIVE){
-	    return -EBUSY;
-	}
-	if ((info->flags & ASYNC_CALLOUT_ACTIVE) &&
-	    (info->flags & ASYNC_SESSION_LOCKOUT) &&
-	    (info->session != current->session)){
-	    return -EBUSY;
-	}
-	if ((info->flags & ASYNC_CALLOUT_ACTIVE) &&
-	    (info->flags & ASYNC_PGRP_LOCKOUT) &&
-	    (info->pgrp != current->pgrp)){
-	    return -EBUSY;
-	}
-	info->flags |= ASYNC_CALLOUT_ACTIVE;
-	return 0;
-    }
-
-    /*
      * If non-blocking mode is set, then make the check up front
      * and then exit.
      */
     if (filp->f_flags & O_NONBLOCK) {
-	if (info->flags & ASYNC_CALLOUT_ACTIVE){
-	    return -EBUSY;
-	}
 	info->flags |= ASYNC_NORMAL_ACTIVE;
 	return 0;
     }
@@ -2048,8 +2002,8 @@ block_til_ready(struct tty_struct *tty, struct file * filp,
     retval = 0;
     add_wait_queue(&info->open_wait, &wait);
 #ifdef SERIAL_DEBUG_OPEN
-    printk("block_til_ready before block: ttyS%d, count = %d\n",
-	   info->line, info->count);/**/
+    printk("block_til_ready before block: %s, count = %d\n",
+	   tty->name, info->count);/**/
 #endif
     info->count--;
 #ifdef SERIAL_DEBUG_COUNT
@@ -2060,18 +2014,16 @@ block_til_ready(struct tty_struct *tty, struct file * filp,
     channel = info->line;
 
     while (1) {
-	save_flags(flags); cli();
-	    if (!(info->flags & ASYNC_CALLOUT_ACTIVE)){
-		base_addr[CyCAR] = (u_char)channel;
-		base_addr[CyMSVR1] = CyRTS;
+	local_irq_save(flags);
+	base_addr[CyCAR] = (u_char)channel;
+	base_addr[CyMSVR1] = CyRTS;
 /* CP('S');CP('4'); */
-		base_addr[CyMSVR2] = CyDTR;
+	base_addr[CyMSVR2] = CyDTR;
 #ifdef SERIAL_DEBUG_DTR
-                printk("cyc: %d: raising DTR\n", __LINE__);
-                printk("     status: 0x%x, 0x%x\n", base_addr[CyMSVR1], base_addr[CyMSVR2]);
+	printk("cyc: %d: raising DTR\n", __LINE__);
+	printk("     status: 0x%x, 0x%x\n", base_addr[CyMSVR1], base_addr[CyMSVR2]);
 #endif
-	    }
-	restore_flags(flags);
+	local_irq_restore(flags);
 	set_current_state(TASK_INTERRUPTIBLE);
 	if (tty_hung_up_p(filp)
 	|| !(info->flags & ASYNC_INITIALIZED) ){
@@ -2082,24 +2034,23 @@ block_til_ready(struct tty_struct *tty, struct file * filp,
 	    }
 	    break;
 	}
-	save_flags(flags); cli();
+	local_irq_save(flags);
 	    base_addr[CyCAR] = (u_char)channel;
 /* CP('L');CP1(1 && C_CLOCAL(tty)); CP1(1 && (base_addr[CyMSVR1] & CyDCD) ); */
-	    if (!(info->flags & ASYNC_CALLOUT_ACTIVE)
-	    && !(info->flags & ASYNC_CLOSING)
+	    if (!(info->flags & ASYNC_CLOSING)
 	    && (C_CLOCAL(tty)
 	        || (base_addr[CyMSVR1] & CyDCD))) {
-		    restore_flags(flags);
+		    local_irq_restore(flags);
 		    break;
 	    }
-	restore_flags(flags);
+	local_irq_restore(flags);
 	if (signal_pending(current)) {
 	    retval = -ERESTARTSYS;
 	    break;
 	}
 #ifdef SERIAL_DEBUG_OPEN
-	printk("block_til_ready blocking: ttyS%d, count = %d\n",
-	       info->line, info->count);/**/
+	printk("block_til_ready blocking: %s, count = %d\n",
+	       tty->name, info->count);/**/
 #endif
 	schedule();
     }
@@ -2113,8 +2064,8 @@ block_til_ready(struct tty_struct *tty, struct file * filp,
     }
     info->blocked_open--;
 #ifdef SERIAL_DEBUG_OPEN
-    printk("block_til_ready after blocking: ttyS%d, count = %d\n",
-	   info->line, info->count);/**/
+    printk("block_til_ready after blocking: %s, count = %d\n",
+	   tty->name, info->count);/**/
 #endif
     if (retval)
 	    return retval;
@@ -2133,7 +2084,7 @@ cy_open(struct tty_struct *tty, struct file * filp)
   int retval, line;
 
 /* CP('O'); */
-    line = MINOR(tty->device) - tty->driver.minor_start;
+    line = tty->index;
     if ((line < 0) || (NR_PORTS <= line)){
         return -ENODEV;
     }
@@ -2142,13 +2093,13 @@ cy_open(struct tty_struct *tty, struct file * filp)
         return -ENODEV;
     }
 #ifdef SERIAL_DEBUG_OTHER
-    printk("cy_open ttyS%d\n", info->line); /* */
+    printk("cy_open %s\n", tty->name); /* */
 #endif
-    if (serial_paranoia_check(info, tty->device, "cy_open")){
+    if (serial_paranoia_check(info, tty->name, "cy_open")){
         return -ENODEV;
     }
 #ifdef SERIAL_DEBUG_OPEN
-    printk("cy_open ttyS%d, count = %d\n", info->line, info->count);/**/
+    printk("cy_open %s, count = %d\n", tty->name, info->count);/**/
 #endif
     info->count++;
 #ifdef SERIAL_DEBUG_COUNT
@@ -2158,18 +2109,12 @@ cy_open(struct tty_struct *tty, struct file * filp)
     info->tty = tty;
 
     if (!tmp_buf) {
-	tmp_buf = (unsigned char *) get_free_page(GFP_KERNEL);
+	tmp_buf = (unsigned char *) get_zeroed_page(GFP_KERNEL);
 	if (!tmp_buf){
 	    return -ENOMEM;
         }
     }
 
-    if ((info->count == 1) && (info->flags & ASYNC_SPLIT_TERMIOS)) {
-	if (tty->driver.subtype == SERIAL_TYPE_NORMAL)
-	    *tty->termios = info->normal_termios;
-	else 
-	    *tty->termios = info->callout_termios;
-    }
     /*
      * Start up serial port
      */
@@ -2186,9 +2131,6 @@ cy_open(struct tty_struct *tty, struct file * filp)
 #endif
 	return retval;
     }
-
-    info->session = current->session;
-    info->pgrp = current->pgrp;
 
 #ifdef SERIAL_DEBUG_OPEN
     printk("cy_open done\n");/**/
@@ -2238,7 +2180,7 @@ mvme167_serial_console_setup(int cflag)
 	u_char rcor, rbpr, badspeed = 0;
 	unsigned long flags;
 
-	save_flags(flags); cli();
+	local_irq_save(flags);
 
 	/*
 	 * First probe channel zero of the chip, to see what speed has
@@ -2263,7 +2205,7 @@ mvme167_serial_console_setup(int cflag)
 
         my_udelay(20000L);	/* Allow time for any active o/p to complete */
         if(base_addr[CyCCR] != 0x00){
-            restore_flags(flags);
+            local_irq_restore(flags);
             /* printk(" chip is never idle (CCR != 0)\n"); */
             return;
         }
@@ -2272,7 +2214,7 @@ mvme167_serial_console_setup(int cflag)
         my_udelay(1000L);
 
         if(base_addr[CyGFRCR] == 0x00){
-            restore_flags(flags);
+            local_irq_restore(flags);
             /* printk(" chip is not responding (GFRCR stayed 0)\n"); */
             return;
         }
@@ -2331,7 +2273,7 @@ mvme167_serial_console_setup(int cflag)
 	base_addr[CyIER] = CyRxData;
 	write_cy_cmd(base_addr,CyENB_RCVR|CyENB_XMTR);
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 
 	my_udelay(20000L);	/* Let it all settle down */
 
@@ -2341,6 +2283,23 @@ mvme167_serial_console_setup(int cflag)
 					rcor >> 5, rbpr);
 } /* serial_console_init */
 
+static struct tty_operations cy_ops = {
+	.open = cy_open,
+	.close = cy_close,
+	.write = cy_write,
+	.put_char = cy_put_char,
+	.flush_chars = cy_flush_chars,
+	.write_room = cy_write_room,
+	.chars_in_buffer = cy_chars_in_buffer,
+	.flush_buffer = cy_flush_buffer,
+	.ioctl = cy_ioctl,
+	.throttle = cy_throttle,
+	.unthrottle = cy_unthrottle,
+	.set_termios = cy_set_termios,
+	.stop = cy_stop,
+	.start = cy_start,
+	.hangup = cy_hangup,
+};
 /* The serial driver boot-time initialization code!
     Hardware I/O ports are mapped to character special devices on a
     first found, first allocated manner.  That is, this code searches
@@ -2357,7 +2316,7 @@ mvme167_serial_console_setup(int cflag)
     If there are more cards with more ports than have been statically
     allocated above, a warning is printed and the extra ports are ignored.
  */
-int
+static int __init
 serial167_init(void)
 {
   struct cyclades_port *info;
@@ -2372,6 +2331,10 @@ serial167_init(void)
 
     if (!(mvme16x_config &MVME16x_CONFIG_GOT_CD2401))
 	return 0;
+
+    cy_serial_driver = alloc_tty_driver(NR_PORTS);
+    if (!cy_serial_driver)
+	return -ENOMEM;
 
 #if 0
 scrn[1] = '\0';
@@ -2393,56 +2356,24 @@ scrn[1] = '\0';
 
     /* Initialize the tty_driver structure */
     
-    memset(&cy_serial_driver, 0, sizeof(struct tty_driver));
-    cy_serial_driver.magic = TTY_DRIVER_MAGIC;
-    cy_serial_driver.name = "ttyS";
-    cy_serial_driver.major = TTY_MAJOR;
-    cy_serial_driver.minor_start = 64;
-    cy_serial_driver.num = NR_PORTS;
-    cy_serial_driver.type = TTY_DRIVER_TYPE_SERIAL;
-    cy_serial_driver.subtype = SERIAL_TYPE_NORMAL;
-    cy_serial_driver.init_termios = tty_std_termios;
-    cy_serial_driver.init_termios.c_cflag =
+    cy_serial_driver->owner = THIS_MODULE;
+    cy_serial_driver->devfs_name = "tts/";
+    cy_serial_driver->name = "ttyS";
+    cy_serial_driver->major = TTY_MAJOR;
+    cy_serial_driver->minor_start = 64;
+    cy_serial_driver->type = TTY_DRIVER_TYPE_SERIAL;
+    cy_serial_driver->subtype = SERIAL_TYPE_NORMAL;
+    cy_serial_driver->init_termios = tty_std_termios;
+    cy_serial_driver->init_termios.c_cflag =
 	    B9600 | CS8 | CREAD | HUPCL | CLOCAL;
-    cy_serial_driver.flags = TTY_DRIVER_REAL_RAW;
-    cy_serial_driver.refcount = &serial_refcount;
-    cy_serial_driver.table = serial_table;
-    cy_serial_driver.termios = serial_termios;
-    cy_serial_driver.termios_locked = serial_termios_locked;
-    cy_serial_driver.open = cy_open;
-    cy_serial_driver.close = cy_close;
-    cy_serial_driver.write = cy_write;
-    cy_serial_driver.put_char = cy_put_char;
-    cy_serial_driver.flush_chars = cy_flush_chars;
-    cy_serial_driver.write_room = cy_write_room;
-    cy_serial_driver.chars_in_buffer = cy_chars_in_buffer;
-    cy_serial_driver.flush_buffer = cy_flush_buffer;
-    cy_serial_driver.ioctl = cy_ioctl;
-    cy_serial_driver.throttle = cy_throttle;
-    cy_serial_driver.unthrottle = cy_unthrottle;
-    cy_serial_driver.set_termios = cy_set_termios;
-    cy_serial_driver.stop = cy_stop;
-    cy_serial_driver.start = cy_start;
-    cy_serial_driver.hangup = cy_hangup;
+    cy_serial_driver->flags = TTY_DRIVER_REAL_RAW;
+    tty_set_operations(cy_serial_driver, &cy_ops);
 
-    /*
-     * The callout device is just like normal device except for
-     * major number and the subtype code.
-     */
-    cy_callout_driver = cy_serial_driver;
-    cy_callout_driver.name = "cua";
-    cy_callout_driver.major = TTYAUX_MAJOR;
-    cy_callout_driver.subtype = SERIAL_TYPE_CALLOUT;
-
-    ret = tty_register_driver(&cy_serial_driver);
+    ret = tty_register_driver(cy_serial_driver);
     if (ret) {
 	    printk(KERN_ERR "Couldn't register MVME166/7 serial driver\n");
+	    put_tty_driver(cy_serial_driver);
 	    return ret;
-    }
-    ret = tty_register_driver(&cy_callout_driver);
-    if (ret) {
-	    printk(KERN_ERR "Couldn't register MVME166/7 callout driver\n");
-	    goto cleanup_serial_driver;
     }
 
     init_bh(CYCLADES_BH, do_cyclades_bh);
@@ -2486,8 +2417,6 @@ scrn[1] = '\0';
 		info->default_timeout = 0;
 		info->tqueue.routine = do_softint;
 		info->tqueue.data = info;
-		info->callout_termios =cy_callout_driver.init_termios;
-		info->normal_termios = cy_serial_driver.init_termios;
 		init_waitqueue_head(&info->open_wait);
 		init_waitqueue_head(&info->close_wait);
 		/* info->session */
@@ -2517,7 +2446,7 @@ scrn[1] = '\0';
 				"cd2401_errors", cd2401_rxerr_interrupt);
     if (ret) {
 	    printk(KERN_ERR "Could't get cd2401_errors IRQ");
-	    goto cleanup_callout_driver;
+	    goto cleanup_serial_driver;
     }
 
     ret = request_irq(MVME167_IRQ_SER_MODEM, cd2401_modem_interrupt, 0,
@@ -2556,14 +2485,14 @@ cleanup_irq_cd2401_modem:
     free_irq(MVME167_IRQ_SER_MODEM, cd2401_modem_interrupt);
 cleanup_irq_cd2401_errors:
     free_irq(MVME167_IRQ_SER_ERR, cd2401_rxerr_interrupt);
-cleanup_callout_driver:
-    if (tty_unregister_driver(&cy_callout_driver))
-	    printk(KERN_ERR "Couldn't unregister MVME166/7 callout driver\n");
 cleanup_serial_driver:
-    if (tty_unregister_driver(&cy_serial_driver))
+    if (tty_unregister_driver(cy_serial_driver))
 	    printk(KERN_ERR "Couldn't unregister MVME166/7 serial driver\n");
+    put_tty_driver(cy_serial_driver);
     return ret;
 } /* serial167_init */
+
+module_init(serial167_init);
 
 
 #ifdef CYCLOM_SHOW_STATUS
@@ -2594,11 +2523,11 @@ show_status(int line_num)
              info->close_delay, info->event, info->count);
     printk("  x_char blocked_open = %x %x\n",
              info->x_char, info->blocked_open);
-    printk("  session pgrp open_wait = %lx %lx %lx\n",
-             info->session, info->pgrp, (long)info->open_wait);
+    printk("  open_wait = %lx %lx %lx\n",
+             (long)info->open_wait);
 
 
-    save_flags(flags); cli();
+    local_irq_save(flags);
 
 /* Global Registers */
 
@@ -2656,7 +2585,7 @@ show_status(int line_num)
 	printk(" CyTBPR %x\n", base_addr[CyTBPR]);
 	printk(" CyTCOR %x\n", base_addr[CyTCOR]);
 
-    restore_flags(flags);
+    local_irq_restore(flags);
 } /* show_status */
 #endif
 
@@ -2756,7 +2685,7 @@ void serial167_console_write(struct console *co, const char *str, unsigned count
 	u_char do_lf = 0;
 	int i = 0;
 
-	save_flags(flags); cli();
+	local_irq_save(flags);
 
 	/* Ensure transmitter is enabled! */
 
@@ -2803,64 +2732,13 @@ void serial167_console_write(struct console *co, const char *str, unsigned count
 
 	base_addr[CyIER] = ier;
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
-/* This is a hack; if there are multiple chars waiting in the chip we
- * discard all but the last one, and return that.  The cd2401 is not really
- * designed to be driven in polled mode.
- */
-
-int serial167_console_wait_key(struct console *co)
+static struct tty_driver *serial167_console_device(struct console *c, int *index)
 {
-	volatile unsigned char *base_addr = (u_char *)BASE_ADDR;
-	unsigned long flags;
-	volatile u_char sink;
-	u_char ier;
-	int port;
-	int keypress = 0;
-
-	save_flags(flags); cli();
-
-	/* Ensure receiver is enabled! */
-
-	port = 0;
-	base_addr[CyCAR] = (u_char)port;
-	while (base_addr[CyCCR])
-		;
-	base_addr[CyCCR] = CyENB_RCVR;
-	ier = base_addr[CyIER];
-	base_addr[CyIER] = CyRxData;
-
-	while (!keypress) {
-		if (pcc2chip[PccSCCRICR] & 0x20)
-		{
-			/* We have an Rx int. Acknowledge it */
-			sink = pcc2chip[PccRPIACKR];
-			if ((base_addr[CyLICR] >> 2) == port) {
-				int cnt = base_addr[CyRFOC];
-				while (cnt-- > 0)
-				{
-					keypress = base_addr[CyRDR];
-				}
-				base_addr[CyREOIR] = 0;
-			}
-			else
-				base_addr[CyREOIR] = CyNOTRANS;
-		}
-	}
-
-	base_addr[CyIER] = ier;
-
-	restore_flags(flags);
-
-	return keypress;
-}
-
-
-static kdev_t serial167_console_device(struct console *c)
-{
-	return MKDEV(TTY_MAJOR, 64 + c->index);
+	*index = c->index;
+	return cy_serial_driver;
 }
 
 
@@ -2871,17 +2749,16 @@ static int __init serial167_console_setup(struct console *co, char *options)
 
 
 static struct console sercons = {
-	name:		"ttyS",
-	write:		serial167_console_write,
-	device:		serial167_console_device,
-	wait_key:	serial167_console_wait_key,
-	setup:		serial167_console_setup,
-	flags:		CON_PRINTBUFFER,
-	index:		-1,
+	.name		= "ttyS",
+	.write		= serial167_console_write,
+	.device		= serial167_console_device,
+	.setup		= serial167_console_setup,
+	.flags		= CON_PRINTBUFFER,
+	.index		= -1,
 };
 
 
-void __init serial167_console_init(void)
+static int __init serial167_console_init(void)
 {
 	if (vme_brdtype == VME_TYPE_MVME166 ||
 			vme_brdtype == VME_TYPE_MVME167 ||
@@ -2889,7 +2766,9 @@ void __init serial167_console_init(void)
 		mvme167_serial_console_setup(0);
 		register_console(&sercons);
 	}
+	return 0;
 }
+console_initcall(serial167_console_init);
 
 #ifdef CONFIG_REMOTE_DEBUG
 void putDebugChar (int c)
@@ -2900,7 +2779,7 @@ void putDebugChar (int c)
 	u_char ier;
 	int port;
 
-	save_flags(flags); cli();
+	local_irq_save(flags);
 
 	/* Ensure transmitter is enabled! */
 
@@ -2930,7 +2809,7 @@ void putDebugChar (int c)
 
 	base_addr[CyIER] = ier;
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 int getDebugChar()
@@ -2952,7 +2831,7 @@ int getDebugChar()
 	}
 	/* OK, nothing in queue, wait in poll loop */
 
-	save_flags(flags); cli();
+	local_irq_save(flags);
 
 	/* Ensure receiver is enabled! */
 
@@ -2998,7 +2877,7 @@ int getDebugChar()
 
 	base_addr[CyIER] = ier;
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 
 	return (c);
 }
@@ -3024,7 +2903,7 @@ debug_setup()
 
     cflag = B19200;
 
-    save_flags(flags); cli();
+    local_irq_save(flags);
 
     for (i = 0; i < 4; i++)
     {
@@ -3079,7 +2958,7 @@ debug_setup()
 
     base_addr[CyIER] = CyRxData;
 
-    restore_flags(flags);
+    local_irq_restore(flags);
 
 } /* debug_setup */
 

@@ -28,7 +28,7 @@
 static int rtc_busy = 0;
 
 /* Retrieve the current date and time from the real time clock. */
-void get_rtc_time(struct rtc_time *t)
+static void get_rtc_time(struct rtc_time *t)
 {
 	unsigned long regs = mstk48t02_regs;
 	u8 tmp;
@@ -137,16 +137,14 @@ static int rtc_release(struct inode *inode, struct file *file)
 }
 
 static struct file_operations rtc_fops = {
-	owner:		THIS_MODULE,
-	llseek:		no_llseek,
-	ioctl:		rtc_ioctl,
-	open:		rtc_open,
-	release:	rtc_release,
+	.owner =	THIS_MODULE,
+	.llseek =	no_llseek,
+	.ioctl =	rtc_ioctl,
+	.open =		rtc_open,
+	.release =	rtc_release,
 };
 
 static struct miscdevice rtc_dev = { RTC_MINOR, "rtc", &rtc_fops };
-
-EXPORT_NO_SYMBOLS;
 
 static int __init rtc_sun_init(void)
 {

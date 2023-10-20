@@ -6,11 +6,11 @@
 
 #define CODA_SUPER_MAGIC	0x73757245
 
+struct kstatfs;
+
 struct coda_sb_info
 {
-	struct venus_comm * sbi_vcomm;
-	struct super_block *sbi_sb;
-	struct list_head    sbi_cihead;
+	struct venus_comm *sbi_vcomm;
 };
 
 /* communication pending/processing queues */
@@ -26,52 +26,51 @@ struct venus_comm {
 
 static inline struct coda_sb_info *coda_sbp(struct super_block *sb)
 {
-    return ((struct coda_sb_info *)((sb)->u.generic_sbp));
+    return ((struct coda_sb_info *)((sb)->s_fs_info));
 }
 
 
 /* upcalls */
-int venus_rootfid(struct super_block *sb, ViceFid *fidp);
-int venus_getattr(struct super_block *sb, struct ViceFid *fid, 
-		     struct coda_vattr *attr);
-int venus_setattr(struct super_block *, struct ViceFid *, 
-		     struct coda_vattr *);
-int venus_lookup(struct super_block *sb, struct ViceFid *fid, 
-		    const char *name, int length, int *type, 
-		    struct ViceFid *resfid);
-int venus_store(struct super_block *sb, struct ViceFid *fid, int flags,
-		struct coda_cred *);
-int venus_release(struct super_block *sb, struct ViceFid *fid, int flags);
-int venus_close(struct super_block *sb, struct ViceFid *fid, int flags,
-		struct coda_cred *);
-int venus_open(struct super_block *sb, struct ViceFid *fid,
-		int flags, struct file **f);
-int venus_mkdir(struct super_block *sb, struct ViceFid *dirfid, 
-			  const char *name, int length, 
-			  struct ViceFid *newfid, struct coda_vattr *attrs);
-int venus_create(struct super_block *sb, struct ViceFid *dirfid, 
-		    const char *name, int length, int excl, int mode, int rdev,
-		    struct ViceFid *newfid, struct coda_vattr *attrs) ;
-int venus_rmdir(struct super_block *sb, struct ViceFid *dirfid, 
-		    const char *name, int length);
-int venus_remove(struct super_block *sb, struct ViceFid *dirfid, 
+int venus_rootfid(struct super_block *sb, struct CodaFid *fidp);
+int venus_getattr(struct super_block *sb, struct CodaFid *fid,
+		  struct coda_vattr *attr);
+int venus_setattr(struct super_block *, struct CodaFid *, struct coda_vattr *);
+int venus_lookup(struct super_block *sb, struct CodaFid *fid, 
+		 const char *name, int length, int *type, 
+		 struct CodaFid *resfid);
+int venus_store(struct super_block *sb, struct CodaFid *fid, int flags,
+		vuid_t uid);
+int venus_release(struct super_block *sb, struct CodaFid *fid, int flags);
+int venus_close(struct super_block *sb, struct CodaFid *fid, int flags,
+		vuid_t uid);
+int venus_open(struct super_block *sb, struct CodaFid *fid, int flags,
+	       struct file **f);
+int venus_mkdir(struct super_block *sb, struct CodaFid *dirfid, 
+		const char *name, int length, 
+		struct CodaFid *newfid, struct coda_vattr *attrs);
+int venus_create(struct super_block *sb, struct CodaFid *dirfid, 
+		 const char *name, int length, int excl, int mode, dev_t rdev,
+		 struct CodaFid *newfid, struct coda_vattr *attrs) ;
+int venus_rmdir(struct super_block *sb, struct CodaFid *dirfid, 
+		const char *name, int length);
+int venus_remove(struct super_block *sb, struct CodaFid *dirfid, 
 		 const char *name, int length);
-int venus_readlink(struct super_block *sb, struct ViceFid *fid, 
+int venus_readlink(struct super_block *sb, struct CodaFid *fid, 
 		   char *buffer, int *length);
-int venus_rename(struct super_block *, struct ViceFid *new_fid, 
-		 struct ViceFid *old_fid, size_t old_length, 
+int venus_rename(struct super_block *, struct CodaFid *new_fid, 
+		 struct CodaFid *old_fid, size_t old_length, 
 		 size_t new_length, const char *old_name, 
 		 const char *new_name);
-int venus_link(struct super_block *sb, struct ViceFid *fid, 
-		  struct ViceFid *dirfid, const char *name, int len );
-int venus_symlink(struct super_block *sb, struct ViceFid *fid,
+int venus_link(struct super_block *sb, struct CodaFid *fid, 
+		  struct CodaFid *dirfid, const char *name, int len );
+int venus_symlink(struct super_block *sb, struct CodaFid *fid,
 		  const char *name, int len, const char *symname, int symlen);
-int venus_access(struct super_block *sb, struct ViceFid *fid, int mask);
-int venus_pioctl(struct super_block *sb, struct ViceFid *fid,
+int venus_access(struct super_block *sb, struct CodaFid *fid, int mask);
+int venus_pioctl(struct super_block *sb, struct CodaFid *fid,
 		 unsigned int cmd, struct PioctlData *data);
 int coda_downcall(int opcode, union outputArgs *out, struct super_block *sb);
-int venus_fsync(struct super_block *sb, struct ViceFid *fid);
-int venus_statfs(struct super_block *sb, struct statfs *sfs);
+int venus_fsync(struct super_block *sb, struct CodaFid *fid);
+int venus_statfs(struct super_block *sb, struct kstatfs *sfs);
 
 
 /* messages between coda filesystem in kernel and Venus */
@@ -98,27 +97,7 @@ struct upc_req {
 /*
  * Statistics
  */
-struct coda_upcallstats {
-	int	ncalls;			/* client requests */
-	int	nbadcalls;		/* upcall failures */
-	int	reqs[CODA_NCALLS];	/* count of each request */
-} ;
 
-extern struct coda_upcallstats coda_callstats;
 extern struct venus_comm coda_comms[];
-
-static inline void clstats(int opcode)
-{
-    coda_callstats.ncalls++;
-    if ( (0 <= opcode) && (opcode <= CODA_NCALLS) )
-	coda_callstats.reqs[opcode]++;
-    else
-	printk("clstats called with bad opcode %d\n", opcode); 
-}
-
-static inline void badclstats(void)
-{
-    coda_callstats.nbadcalls++;
-}
 
 #endif

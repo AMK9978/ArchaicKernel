@@ -99,11 +99,11 @@
  */
 
 static int
-mk_conf_addr(struct pci_dev *dev, int where, unsigned long *pci_addr)
+mk_conf_addr(struct pci_bus *pbus, unsigned int device_fn, int where,
+	     unsigned long *pci_addr)
 {
 	unsigned long addr;
-	u8 bus = dev->bus->number;
-	u8 device_fn = dev->devfn;
+	u8 bus = pbus->number;
 
 	if (bus == 0) {
 		int device = device_fn >> 3;
@@ -132,7 +132,7 @@ conf_read(unsigned long addr)
 	unsigned long flags, code, stat0;
 	unsigned int value;
 
-	__save_and_cli(flags);
+	local_irq_save(flags);
 
 	/* Reset status register to avoid loosing errors.  */
 	stat0 = *(vulp)LCA_IOC_STAT0;
@@ -160,7 +160,7 @@ conf_read(unsigned long addr)
 
 		value = 0xffffffff;
 	}
-	__restore_flags(flags);
+	local_irq_restore(flags);
 	return value;
 }
 
@@ -169,7 +169,7 @@ conf_write(unsigned long addr, unsigned int value)
 {
 	unsigned long flags, code, stat0;
 
-	__save_and_cli(flags);	/* avoid getting hit by machine check */
+	local_irq_save(flags);	/* avoid getting hit by machine check */
 
 	/* Reset status register to avoid loosing errors.  */
 	stat0 = *(vulp)LCA_IOC_STAT0;
@@ -195,94 +195,54 @@ conf_write(unsigned long addr, unsigned int value)
 		/* Reset machine check. */
 		wrmces(0x7);
 	}
-	__restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 static int
-lca_read_config_byte(struct pci_dev *dev, int where, u8 *value)
+lca_read_config(struct pci_bus *bus, unsigned int devfn, int where,
+		int size, u32 *value)
 {
 	unsigned long addr, pci_addr;
+	long mask;
+	int shift;
 
-	if (mk_conf_addr(dev, where, &pci_addr))
+	if (mk_conf_addr(bus, devfn, where, &pci_addr))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	addr = (pci_addr << 5) + 0x00 + LCA_CONF;
-	*value = conf_read(addr) >> ((where & 3) * 8);
+	shift = (where & 3) * 8;
+	mask = (size - 1) * 8;
+	addr = (pci_addr << 5) + mask + LCA_CONF;
+	*value = conf_read(addr) >> (shift);
 	return PCIBIOS_SUCCESSFUL;
 }
 
 static int 
-lca_read_config_word(struct pci_dev *dev, int where, u16 *value)
+lca_write_config(struct pci_bus *bus, unsigned int devfn, int where, int size,
+		 u32 value)
 {
 	unsigned long addr, pci_addr;
+	long mask;
 
-	if (mk_conf_addr(dev, where, &pci_addr))
+	if (mk_conf_addr(bus, devfn, where, &pci_addr))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	addr = (pci_addr << 5) + 0x08 + LCA_CONF;
-	*value = conf_read(addr) >> ((where & 3) * 8);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int
-lca_read_config_dword(struct pci_dev *dev, int where, u32 *value)
-{
-	unsigned long addr, pci_addr;
-
-	if (mk_conf_addr(dev, where, &pci_addr))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	addr = (pci_addr << 5) + 0x18 + LCA_CONF;
-	*value = conf_read(addr);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int 
-lca_write_config(struct pci_dev *dev, int where, u32 value, long mask)
-{
-	unsigned long addr, pci_addr;
-
-	if (mk_conf_addr(dev, where, &pci_addr))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
+	mask = (size - 1) * 8;
 	addr = (pci_addr << 5) + mask + LCA_CONF;
 	conf_write(addr, value << ((where & 3) * 8));
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static int
-lca_write_config_byte(struct pci_dev *dev, int where, u8 value)
-{
-	return lca_write_config(dev, where, value, 0x00);
-}
-
-static int
-lca_write_config_word(struct pci_dev *dev, int where, u16 value)
-{
-	return lca_write_config(dev, where, value, 0x08);
-}
-
-static int
-lca_write_config_dword(struct pci_dev *dev, int where, u32 value)
-{
-	return lca_write_config(dev, where, value, 0x18);
-}
-
 struct pci_ops lca_pci_ops = 
 {
-	read_byte:	lca_read_config_byte,
-	read_word:	lca_read_config_word,
-	read_dword:	lca_read_config_dword,
-	write_byte:	lca_write_config_byte,
-	write_word:	lca_write_config_word,
-	write_dword:	lca_write_config_dword
+	.read =		lca_read_config,
+	.write =	lca_write_config,
 };
 
 void
 lca_pci_tbi(struct pci_controller *hose, dma_addr_t start, dma_addr_t end)
 {
 	wmb();
-	*(vip)LCA_IOC_TBIA = 0;
+	*(vulp)LCA_IOC_TBIA = 0;
 	mb();
 }
 
@@ -308,21 +268,25 @@ lca_init_arch(void)
 	/*
 	 * Set up the PCI to main memory translation windows.
 	 *
-	 * Window 0 is direct access 1GB at 1GB
-	 * Window 1 is scatter-gather 8MB at 8MB (for isa)
+	 * Mimic the SRM settings for the direct-map window.
+	 *   Window 0 is scatter-gather 8MB at 8MB (for isa).
+	 *   Window 1 is direct access 1GB at 1GB.
+	 *
+	 * Note that we do not try to save any of the DMA window CSRs
+	 * before setting them, since we cannot read those CSRs on LCA.
 	 */
 	hose->sg_isa = iommu_arena_new(hose, 0x00800000, 0x00800000, 0);
 	hose->sg_pci = NULL;
 	__direct_map_base = 0x40000000;
 	__direct_map_size = 0x40000000;
 
-	*(vulp)LCA_IOC_W_BASE0 = __direct_map_base | (2UL << 32);
-	*(vulp)LCA_IOC_W_MASK0 = (__direct_map_size - 1) & 0xfff00000;
-	*(vulp)LCA_IOC_T_BASE0 = 0;
+	*(vulp)LCA_IOC_W_BASE0 = hose->sg_isa->dma_base | (3UL << 32);
+	*(vulp)LCA_IOC_W_MASK0 = (hose->sg_isa->size - 1) & 0xfff00000;
+	*(vulp)LCA_IOC_T_BASE0 = virt_to_phys(hose->sg_isa->ptes);
 
-	*(vulp)LCA_IOC_W_BASE1 = hose->sg_isa->dma_base | (3UL << 32);
-	*(vulp)LCA_IOC_W_MASK1 = (hose->sg_isa->size - 1) & 0xfff00000;
-	*(vulp)LCA_IOC_T_BASE1 = virt_to_phys(hose->sg_isa->ptes);
+	*(vulp)LCA_IOC_W_BASE1 = __direct_map_base | (2UL << 32);
+	*(vulp)LCA_IOC_W_MASK1 = (__direct_map_size - 1) & 0xfff00000;
+	*(vulp)LCA_IOC_T_BASE1 = 0;
 
 	*(vulp)LCA_IOC_TB_ENA = 0x80;
 
@@ -334,6 +298,15 @@ lca_init_arch(void)
 	 * data parity errors.
 	 */
 	*(vulp)LCA_IOC_PAR_DIS = 1UL<<5;
+
+	/*
+	 * Finally, set up for restoring the correct HAE if using SRM.
+	 * Again, since we cannot read many of the CSRs on the LCA,
+	 * one of which happens to be the HAE, we save the value that
+	 * the SRM will expect...
+	 */
+	if (alpha_using_srm)
+		srm_hae = 0x80000000UL;
 }
 
 /*
@@ -487,8 +460,8 @@ lca_machine_check(unsigned long vector, unsigned long la_ptr,
 	}
 
 	/* Dump the logout area to give all info.  */
-#if DEBUG_MCHECK > 1
-	{
+#ifdef CONFIG_VERBOSE_MCHECK
+	if (alpha_verbose_mcheck > 1) {
 		unsigned long * ptr = (unsigned long *) la_ptr;
 		long i;
 		for (i = 0; i < el.c->size / sizeof(long); i += 2) {
@@ -496,7 +469,7 @@ lca_machine_check(unsigned long vector, unsigned long la_ptr,
 			       i*sizeof(long), ptr[i], ptr[i+1]);
 		}
 	}
-#endif
+#endif /* CONFIG_VERBOSE_MCHECK */
 }
 
 /*

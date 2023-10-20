@@ -2,47 +2,48 @@
 # Makefile for ia64-specific library routines..
 #
 
-.S.o:
-	$(CC) $(AFLAGS) $(AFLAGS_KERNEL) -c $< -o $@
+lib-y := __divsi3.o __udivsi3.o __modsi3.o __umodsi3.o			\
+	__divdi3.o __udivdi3.o __moddi3.o __umoddi3.o			\
+	checksum.o clear_page.o csum_partial_copy.o copy_page.o		\
+	clear_user.o strncpy_from_user.o strlen_user.o strnlen_user.o	\
+	flush.o io.o ip_fast_csum.o do_csum.o				\
+	memset.o strlen.o swiotlb.o
 
-L_TARGET = lib.a
+lib-$(CONFIG_ITANIUM)	+= copy_page.o copy_user.o memcpy.o
+lib-$(CONFIG_MCKINLEY)	+= copy_page_mck.o memcpy_mck.o
+lib-$(CONFIG_PERFMON)	+= carta_random.o
+lib-$(CONFIG_MD_RAID5)	+= xor.o
 
-export-objs := io.o swiotlb.o
+AFLAGS___divdi3.o	=
+AFLAGS___udivdi3.o	= -DUNSIGNED
+AFLAGS___moddi3.o	= 	     -DMODULO
+AFLAGS___umoddi3.o	= -DUNSIGNED -DMODULO
 
-obj-y := __divsi3.o __udivsi3.o __modsi3.o __umodsi3.o					\
-	__divdi3.o __udivdi3.o __moddi3.o __umoddi3.o					\
-	checksum.o clear_page.o csum_partial_copy.o copy_page.o				\
-	copy_user.o clear_user.o strncpy_from_user.o strlen_user.o strnlen_user.o	\
-	flush.o io.o do_csum.o								\
-	memcpy.o memset.o strlen.o swiotlb.o
+AFLAGS___divsi3.o	=
+AFLAGS___udivsi3.o	= -DUNSIGNED
+AFLAGS___modsi3.o	=	     -DMODULO
+AFLAGS___umodsi3.o	= -DUNSIGNED -DMODULO
 
-IGNORE_FLAGS_OBJS =	__divsi3.o __udivsi3.o __modsi3.o __umodsi3.o \
-			__divdi3.o __udivdi3.o __moddi3.o __umoddi3.o
+$(obj)/__divdi3.o: $(src)/idiv64.S FORCE
+	$(call if_changed_dep,as_o_S)
 
-$(L_TARGET): $(obj-y) $(export-objs)
+$(obj)/__udivdi3.o: $(src)/idiv64.S FORCE
+	$(call if_changed_dep,as_o_S)
 
-__divdi3.o: idiv64.S
-	$(CC) $(AFLAGS) $(AFLAGS_KERNEL) -c -o $@ $<
+$(obj)/__moddi3.o: $(src)/idiv64.S FORCE
+	$(call if_changed_dep,as_o_S)
 
-__udivdi3.o: idiv64.S
-	$(CC) $(AFLAGS) $(AFLAGS_KERNEL) -c -DUNSIGNED -c -o $@ $<
+$(obj)/__umoddi3.o: $(src)/idiv64.S FORCE
+	$(call if_changed_dep,as_o_S)
 
-__moddi3.o: idiv64.S
-	$(CC) $(AFLAGS) $(AFLAGS_KERNEL) -c -DMODULO -c -o $@ $<
+$(obj)/__divsi3.o: $(src)/idiv32.S FORCE
+	$(call if_changed_dep,as_o_S)
 
-__umoddi3.o: idiv64.S
-	$(CC) $(AFLAGS) $(AFLAGS_KERNEL) -c -DMODULO -DUNSIGNED -c -o $@ $<
+$(obj)/__udivsi3.o: $(src)/idiv32.S FORCE
+	$(call if_changed_dep,as_o_S)
 
-__divsi3.o: idiv32.S
-	$(CC) $(AFLAGS) $(AFLAGS_KERNEL) -c -o $@ $<
+$(obj)/__modsi3.o: $(src)/idiv32.S FORCE
+	$(call if_changed_dep,as_o_S)
 
-__udivsi3.o: idiv32.S
-	$(CC) $(AFLAGS) $(AFLAGS_KERNEL) -c -DUNSIGNED -c -o $@ $<
-
-__modsi3.o: idiv32.S
-	$(CC) $(AFLAGS) $(AFLAGS_KERNEL) -c -DMODULO -c -o $@ $<
-
-__umodsi3.o: idiv32.S
-	$(CC) $(AFLAGS) $(AFLAGS_KERNEL) -c -DMODULO -DUNSIGNED -c -o $@ $<
-
-include $(TOPDIR)/Rules.make
+$(obj)/__umodsi3.o: $(src)/idiv32.S FORCE
+	$(call if_changed_dep,as_o_S)

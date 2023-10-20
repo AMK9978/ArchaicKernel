@@ -99,31 +99,27 @@
   
 #include <linux/config.h>
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/string.h>
 #include <linux/in.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/irq.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/init.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/slab.h>
-#include <linux/mca.h>
-
+#include <linux/mca-legacy.h>
 #include <linux/spinlock.h>
+
+#include <asm/system.h>
+#include <asm/bitops.h>
+#include <asm/io.h>
+#include <asm/irq.h>
 
 #ifndef NET_DEBUG
 #define NET_DEBUG 4
@@ -255,7 +251,7 @@ static void eexp_timeout(struct net_device *dev);
 static struct net_device_stats *eexp_stats(struct net_device *dev);
 static int eexp_xmit(struct sk_buff *buf, struct net_device *dev);
 
-static void eexp_irq(int irq, void *dev_addr, struct pt_regs *regs);
+static irqreturn_t eexp_irq(int irq, void *dev_addr, struct pt_regs *regs);
 static void eexp_set_multicast(struct net_device *dev);
 
 /*
@@ -341,7 +337,7 @@ static inline unsigned short int SHADOW(short int addr)
 int __init express_probe(struct net_device *dev)
 {
 	unsigned short *port;
-	static unsigned short ports[] = { 0x300,0x310,0x270,0x320,0x340,0 };
+	static unsigned short ports[] = { 0x240,0x300,0x310,0x270,0x320,0x340,0 };
 	unsigned short ioaddr = dev->base_addr;
 
 	SET_MODULE_OWNER(dev);
@@ -436,10 +432,26 @@ static int eexp_open(struct net_device *dev)
 	ret = request_irq(dev->irq,&eexp_irq,0,dev->name,dev);
 	if (ret) return ret;
 
-	request_region(ioaddr, EEXP_IO_EXTENT, "EtherExpress");
-	request_region(ioaddr+0x4000, 16, "EtherExpress shadow");
-	request_region(ioaddr+0x8000, 16, "EtherExpress shadow");
-	request_region(ioaddr+0xc000, 16, "EtherExpress shadow");
+	if (!request_region(ioaddr, EEXP_IO_EXTENT, "EtherExpress")) {
+		printk(KERN_WARNING "EtherExpress io port %x, is busy.\n"
+			, ioaddr);
+		goto err_out1;
+	}
+	if (!request_region(ioaddr+0x4000, EEXP_IO_EXTENT, "EtherExpress shadow")) {
+		printk(KERN_WARNING "EtherExpress io port %x, is busy.\n"
+			, ioaddr+0x4000);
+		goto err_out2;
+	}
+	if (!request_region(ioaddr+0x8000, EEXP_IO_EXTENT, "EtherExpress shadow")) {
+		printk(KERN_WARNING "EtherExpress io port %x, is busy.\n"
+			, ioaddr+0x8000);
+		goto err_out3;
+	}
+	if (!request_region(ioaddr+0xc000, EEXP_IO_EXTENT, "EtherExpress shadow")) {
+		printk(KERN_WARNING "EtherExpress io port %x, is busy.\n"
+			, ioaddr+0xc000);
+		goto err_out4;
+	}
 	
 	if (lp->width) {
 		printk("%s: forcing ASIC to 8-bit mode\n", dev->name);
@@ -452,6 +464,16 @@ static int eexp_open(struct net_device *dev)
 	printk(KERN_DEBUG "%s: leaving eexp_open()\n", dev->name);
 #endif
 	return 0;
+
+	err_out4:
+		release_region(ioaddr+0x8000, EEXP_IO_EXTENT);
+	err_out3:
+		release_region(ioaddr+0x4000, EEXP_IO_EXTENT);
+	err_out2:
+		release_region(ioaddr, EEXP_IO_EXTENT);
+	err_out1:
+		free_irq(dev->irq, dev);
+		return -EBUSY;
 }
 
 /*
@@ -614,6 +636,7 @@ static void eexp_timeout(struct net_device *dev)
 static int eexp_xmit(struct sk_buff *buf, struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
+	short length = buf->len;
 #ifdef CONFIG_SMP
 	unsigned long flags;
 #endif
@@ -621,6 +644,13 @@ static int eexp_xmit(struct sk_buff *buf, struct net_device *dev)
 #if NET_DEBUG > 6
 	printk(KERN_DEBUG "%s: eexp_xmit()\n", dev->name);
 #endif
+
+	if (buf->len < ETH_ZLEN) {
+		buf = skb_padto(buf, ETH_ZLEN);
+		if (buf == NULL)
+			return 0;
+		length = ETH_ZLEN;
+	}
 
 	disable_irq(dev->irq);
 
@@ -634,8 +664,6 @@ static int eexp_xmit(struct sk_buff *buf, struct net_device *dev)
 #endif
   
 	{
-		unsigned short length = (ETH_ZLEN < buf->len) ? buf->len :
-			ETH_ZLEN;
 		unsigned short *data = (unsigned short *)buf->data;
 
 		lp->stats.tx_bytes += length;
@@ -732,7 +760,7 @@ static void eexp_cmd_clear(struct net_device *dev)
 	}
 }
 	
-static void eexp_irq(int irq, void *dev_info, struct pt_regs *regs)
+static irqreturn_t eexp_irq(int irq, void *dev_info, struct pt_regs *regs)
 {
 	struct net_device *dev = dev_info;
 	struct net_local *lp;
@@ -743,7 +771,7 @@ static void eexp_irq(int irq, void *dev_info, struct pt_regs *regs)
 	{
 		printk(KERN_WARNING "eexpress: irq %d for unknown device\n",
 		       irq);
-		return;
+		return IRQ_NONE;
 	}
 
 	lp = (struct net_local *)dev->priv;
@@ -831,7 +859,7 @@ static void eexp_irq(int irq, void *dev_info, struct pt_regs *regs)
 	outw(old_write_ptr, ioaddr+WRITE_PTR);
 	
 	spin_unlock(&lp->lock);
-	return;
+	return IRQ_HANDLED;
 }
 
 /*
@@ -1674,7 +1702,6 @@ void cleanup_module(void)
 			unregister_netdev(dev);
 			kfree(dev->priv);
 			dev->priv = NULL;
-			release_region(dev->base_addr, EEXP_IO_EXTENT);
 		}
 	}
 }

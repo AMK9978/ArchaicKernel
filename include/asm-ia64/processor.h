@@ -2,9 +2,9 @@
 #define _ASM_IA64_PROCESSOR_H
 
 /*
- * Copyright (C) 1998-2001 Hewlett-Packard Co
- * Copyright (C) 1998-2001 David Mosberger-Tang <davidm@hpl.hp.com>
- * Copyright (C) 1998-2001 Stephane Eranian <eranian@hpl.hp.com>
+ * Copyright (C) 1998-2003 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
+ *	Stephane Eranian <eranian@hpl.hp.com>
  * Copyright (C) 1999 Asit Mallick <asit.k.mallick@intel.com>
  * Copyright (C) 1999 Don Dugger <don.dugger@intel.com>
  *
@@ -15,10 +15,10 @@
 
 #include <linux/config.h>
 
-#include <asm/ptrace.h>
+#include <asm/intrinsics.h>
 #include <asm/kregs.h>
-#include <asm/system.h>
-#include <asm/types.h>
+#include <asm/ptrace.h>
+#include <asm/ustack.h>
 
 #define IA64_NUM_DBG_REGS	8
 /*
@@ -27,7 +27,6 @@
  */
 #define IA64_NUM_PMC_REGS	32
 #define IA64_NUM_PMD_REGS	32
-#define IA64_NUM_PMD_COUNTERS	4
 
 #define DEFAULT_MAP_BASE	0x2000000000000000
 #define DEFAULT_TASK_SIZE	0xa000000000000000
@@ -41,6 +40,14 @@
 #define TASK_SIZE		(current->thread.task_size)
 
 /*
+ * MM_VM_SIZE(mm) gives the maximum address (plus 1) which may contain a mapping for
+ * address-space MM.  Note that with 32-bit tasks, this is still DEFAULT_TASK_SIZE,
+ * because the kernel may have installed helper-mappings above TASK_SIZE.  For example,
+ * for x86 emulation, the LDT and GDT are mapped above TASK_SIZE.
+ */
+#define MM_VM_SIZE(mm)		DEFAULT_TASK_SIZE
+
+/*
  * This decides where the kernel will search for a free chunk of vm
  * space during mmap's.
  */
@@ -49,118 +56,8 @@
 /*
  * Bus types
  */
-#define EISA_bus 0
-#define EISA_bus__is_a_macro /* for versions in ksyms.c */
 #define MCA_bus 0
 #define MCA_bus__is_a_macro /* for versions in ksyms.c */
-
-/* Processor status register bits: */
-#define IA64_PSR_BE_BIT		1
-#define IA64_PSR_UP_BIT		2
-#define IA64_PSR_AC_BIT		3
-#define IA64_PSR_MFL_BIT	4
-#define IA64_PSR_MFH_BIT	5
-#define IA64_PSR_IC_BIT		13
-#define IA64_PSR_I_BIT		14
-#define IA64_PSR_PK_BIT		15
-#define IA64_PSR_DT_BIT		17
-#define IA64_PSR_DFL_BIT	18
-#define IA64_PSR_DFH_BIT	19
-#define IA64_PSR_SP_BIT		20
-#define IA64_PSR_PP_BIT		21
-#define IA64_PSR_DI_BIT		22
-#define IA64_PSR_SI_BIT		23
-#define IA64_PSR_DB_BIT		24
-#define IA64_PSR_LP_BIT		25
-#define IA64_PSR_TB_BIT		26
-#define IA64_PSR_RT_BIT		27
-/* The following are not affected by save_flags()/restore_flags(): */
-#define IA64_PSR_CPL0_BIT	32
-#define IA64_PSR_CPL1_BIT	33
-#define IA64_PSR_IS_BIT		34
-#define IA64_PSR_MC_BIT		35
-#define IA64_PSR_IT_BIT		36
-#define IA64_PSR_ID_BIT		37
-#define IA64_PSR_DA_BIT		38
-#define IA64_PSR_DD_BIT		39
-#define IA64_PSR_SS_BIT		40
-#define IA64_PSR_RI_BIT		41
-#define IA64_PSR_ED_BIT		43
-#define IA64_PSR_BN_BIT		44
-
-#define IA64_PSR_BE	(__IA64_UL(1) << IA64_PSR_BE_BIT)
-#define IA64_PSR_UP	(__IA64_UL(1) << IA64_PSR_UP_BIT)
-#define IA64_PSR_AC	(__IA64_UL(1) << IA64_PSR_AC_BIT)
-#define IA64_PSR_MFL	(__IA64_UL(1) << IA64_PSR_MFL_BIT)
-#define IA64_PSR_MFH	(__IA64_UL(1) << IA64_PSR_MFH_BIT)
-#define IA64_PSR_IC	(__IA64_UL(1) << IA64_PSR_IC_BIT)
-#define IA64_PSR_I	(__IA64_UL(1) << IA64_PSR_I_BIT)
-#define IA64_PSR_PK	(__IA64_UL(1) << IA64_PSR_PK_BIT)
-#define IA64_PSR_DT	(__IA64_UL(1) << IA64_PSR_DT_BIT)
-#define IA64_PSR_DFL	(__IA64_UL(1) << IA64_PSR_DFL_BIT)
-#define IA64_PSR_DFH	(__IA64_UL(1) << IA64_PSR_DFH_BIT)
-#define IA64_PSR_SP	(__IA64_UL(1) << IA64_PSR_SP_BIT)
-#define IA64_PSR_PP	(__IA64_UL(1) << IA64_PSR_PP_BIT)
-#define IA64_PSR_DI	(__IA64_UL(1) << IA64_PSR_DI_BIT)
-#define IA64_PSR_SI	(__IA64_UL(1) << IA64_PSR_SI_BIT)
-#define IA64_PSR_DB	(__IA64_UL(1) << IA64_PSR_DB_BIT)
-#define IA64_PSR_LP	(__IA64_UL(1) << IA64_PSR_LP_BIT)
-#define IA64_PSR_TB	(__IA64_UL(1) << IA64_PSR_TB_BIT)
-#define IA64_PSR_RT	(__IA64_UL(1) << IA64_PSR_RT_BIT)
-/* The following are not affected by save_flags()/restore_flags(): */
-#define IA64_PSR_IS	(__IA64_UL(1) << IA64_PSR_IS_BIT)
-#define IA64_PSR_MC	(__IA64_UL(1) << IA64_PSR_MC_BIT)
-#define IA64_PSR_IT	(__IA64_UL(1) << IA64_PSR_IT_BIT)
-#define IA64_PSR_ID	(__IA64_UL(1) << IA64_PSR_ID_BIT)
-#define IA64_PSR_DA	(__IA64_UL(1) << IA64_PSR_DA_BIT)
-#define IA64_PSR_DD	(__IA64_UL(1) << IA64_PSR_DD_BIT)
-#define IA64_PSR_SS	(__IA64_UL(1) << IA64_PSR_SS_BIT)
-#define IA64_PSR_RI	(__IA64_UL(3) << IA64_PSR_RI_BIT)
-#define IA64_PSR_ED	(__IA64_UL(1) << IA64_PSR_ED_BIT)
-#define IA64_PSR_BN	(__IA64_UL(1) << IA64_PSR_BN_BIT)
-
-/* User mask bits: */
-#define IA64_PSR_UM	(IA64_PSR_BE | IA64_PSR_UP | IA64_PSR_AC | IA64_PSR_MFL | IA64_PSR_MFH)
-
-/* Default Control Register */
-#define IA64_DCR_PP_BIT		 0	/* privileged performance monitor default */
-#define IA64_DCR_BE_BIT		 1	/* big-endian default */
-#define IA64_DCR_LC_BIT		 2	/* ia32 lock-check enable */
-#define IA64_DCR_DM_BIT		 8	/* defer TLB miss faults */
-#define IA64_DCR_DP_BIT		 9	/* defer page-not-present faults */
-#define IA64_DCR_DK_BIT		10	/* defer key miss faults */
-#define IA64_DCR_DX_BIT		11	/* defer key permission faults */
-#define IA64_DCR_DR_BIT		12	/* defer access right faults */
-#define IA64_DCR_DA_BIT		13	/* defer access bit faults */
-#define IA64_DCR_DD_BIT		14	/* defer debug faults */
-
-#define IA64_DCR_PP	(__IA64_UL(1) << IA64_DCR_PP_BIT)
-#define IA64_DCR_BE	(__IA64_UL(1) << IA64_DCR_BE_BIT)
-#define IA64_DCR_LC	(__IA64_UL(1) << IA64_DCR_LC_BIT)
-#define IA64_DCR_DM	(__IA64_UL(1) << IA64_DCR_DM_BIT)
-#define IA64_DCR_DP	(__IA64_UL(1) << IA64_DCR_DP_BIT)
-#define IA64_DCR_DK	(__IA64_UL(1) << IA64_DCR_DK_BIT)
-#define IA64_DCR_DX	(__IA64_UL(1) << IA64_DCR_DX_BIT)
-#define IA64_DCR_DR	(__IA64_UL(1) << IA64_DCR_DR_BIT)
-#define IA64_DCR_DA	(__IA64_UL(1) << IA64_DCR_DA_BIT)
-#define IA64_DCR_DD	(__IA64_UL(1) << IA64_DCR_DD_BIT)
-
-/* Interrupt Status Register */
-#define IA64_ISR_X_BIT		32	/* execute access */
-#define IA64_ISR_W_BIT		33	/* write access */
-#define IA64_ISR_R_BIT		34	/* read access */
-#define IA64_ISR_NA_BIT		35	/* non-access */
-#define IA64_ISR_SP_BIT		36	/* speculative load exception */
-#define IA64_ISR_RS_BIT		37	/* mandatory register-stack exception */
-#define IA64_ISR_IR_BIT		38	/* invalid register frame exception */
-
-#define IA64_ISR_X	(__IA64_UL(1) << IA64_ISR_X_BIT)
-#define IA64_ISR_W	(__IA64_UL(1) << IA64_ISR_W_BIT)
-#define IA64_ISR_R	(__IA64_UL(1) << IA64_ISR_R_BIT)
-#define IA64_ISR_NA	(__IA64_UL(1) << IA64_ISR_NA_BIT)
-#define IA64_ISR_SP	(__IA64_UL(1) << IA64_ISR_SP_BIT)
-#define IA64_ISR_RS	(__IA64_UL(1) << IA64_ISR_RS_BIT)
-#define IA64_ISR_IR	(__IA64_UL(1) << IA64_ISR_IR_BIT)
 
 #define IA64_THREAD_FPH_VALID	(__IA64_UL(1) << 0)	/* floating-point high state valid? */
 #define IA64_THREAD_DBG_VALID	(__IA64_UL(1) << 1)	/* debug registers valid? */
@@ -170,6 +67,7 @@
 #define IA64_THREAD_KRBS_SYNCED	(__IA64_UL(1) << 5)	/* krbs synced with process vm? */
 #define IA64_THREAD_FPEMU_NOPRINT (__IA64_UL(1) << 6)	/* don't log any fpswa faults */
 #define IA64_THREAD_FPEMU_SIGFPE  (__IA64_UL(1) << 7)	/* send a SIGFPE for fpswa faults */
+#define IA64_THREAD_XSTACK	(__IA64_UL(1) << 8)	/* stack executable by default? */
 
 #define IA64_THREAD_UAC_SHIFT	3
 #define IA64_THREAD_UAC_MASK	(IA64_THREAD_UAC_NOPRINT | IA64_THREAD_UAC_SIGBUS)
@@ -178,22 +76,28 @@
 
 
 /*
- * This shift should be large enough to be able to represent
- * 1000000/itc_freq with good accuracy while being small enough to fit
- * 1000000<<IA64_USEC_PER_CYC_SHIFT in 64 bits.
+ * This shift should be large enough to be able to represent 1000000000/itc_freq with good
+ * accuracy while being small enough to fit 10*1000000000<<IA64_NSEC_PER_CYC_SHIFT in 64 bits
+ * (this will give enough slack to represent 10 seconds worth of time as a scaled number).
  */
-#define IA64_USEC_PER_CYC_SHIFT	41
+#define IA64_NSEC_PER_CYC_SHIFT	30
 
 #ifndef __ASSEMBLY__
 
+#include <linux/cache.h>
+#include <linux/compiler.h>
 #include <linux/threads.h>
+#include <linux/types.h>
 
 #include <asm/fpu.h>
-#include <asm/offsets.h>
 #include <asm/page.h>
+#include <asm/percpu.h>
 #include <asm/rse.h>
 #include <asm/unwind.h>
 #include <asm/atomic.h>
+#ifdef CONFIG_NUMA
+#include <asm/nodedata.h>
+#endif
 
 /* like above but expressed as bitfields for more efficient access: */
 struct ia64_psr {
@@ -248,12 +152,10 @@ struct cpuinfo_ia64 {
 		__u64 irq_and_bh_counts;
 	} irq_stat;
 	__u32 softirq_pending;
-	__u32 phys_stacked_size_p8;	/* size of physical stacked registers + 8 */
 	__u64 itm_delta;	/* # of clock cycles between clock ticks */
 	__u64 itm_next;		/* interval timer mask value to use for next clock tick */
 	__u64 *pgd_quick;
 	__u64 *pmd_quick;
-	__u64 *pte_quick;
 	__u64 pgtable_cache_sz;
 	/* CPUID-derived information: */
 	__u64 ppn;
@@ -267,7 +169,7 @@ struct cpuinfo_ia64 {
 	__u64 itc_freq;		/* frequency of ITC counter */
 	__u64 proc_freq;	/* frequency of processor */
 	__u64 cyc_per_usec;	/* itc_freq/1000000 */
-	__u64 usec_per_cyc;	/* 2^IA64_USEC_PER_CYC_SHIFT*1000000/itc_freq */
+	__u64 nsec_per_cyc;	/* (1000000000<<IA64_NSEC_PER_CYC_SHIFT)/itc_freq */
 	__u64 unimpl_va_mask;	/* mask of unimplemented virtual address bits (from PAL) */
 	__u64 unimpl_pa_mask;	/* mask of unimplemented physical address bits (from PAL) */
 	__u64 ptce_base;
@@ -275,39 +177,27 @@ struct cpuinfo_ia64 {
 	__u32 ptce_stride[2];
 	struct task_struct *ksoftirqd;	/* kernel softirq daemon for this CPU */
 #ifdef CONFIG_SMP
+	int cpu;
 	__u64 loops_per_jiffy;
 	__u64 ipi_count;
 	__u64 prof_counter;
 	__u64 prof_multiplier;
-	__u64 ipi_operation;
 #endif
 #ifdef CONFIG_NUMA
-	struct cpuinfo_ia64 *cpu_data[NR_CPUS];
+	struct ia64_node_data *node_data;
 #endif
-} __attribute__ ((aligned (PAGE_SIZE))) ;
+};
+
+DECLARE_PER_CPU(struct cpuinfo_ia64, cpu_info);
 
 /*
- * The "local" data pointer.  It points to the per-CPU data of the currently executing
+ * The "local" data variable.  It refers to the per-CPU data of the currently executing
  * CPU, much like "current" points to the per-task data of the currently executing task.
+ * Do not use the address of local_cpu_data, since it will be different from
+ * cpu_data(smp_processor_id())!
  */
-#define local_cpu_data		((struct cpuinfo_ia64 *) PERCPU_ADDR)
-
-/*
- * On NUMA systems, cpu_data for each cpu is allocated during cpu_init() & is allocated on
- * the node that contains the cpu. This minimizes off-node memory references.  cpu_data
- * for each cpu contains an array of pointers to the cpu_data structures of each of the
- * other cpus.
- *
- * On non-NUMA systems, cpu_data is a static array allocated at compile time.  References
- * to the cpu_data of another cpu is done by direct references to the appropriate entry of
- * the array.
- */
-#ifdef CONFIG_NUMA
-# define cpu_data(cpu)		local_cpu_data->cpu_data_ptrs[cpu]
-#else
-  extern struct cpuinfo_ia64 _cpu_data[NR_CPUS];
-# define cpu_data(cpu)		(&_cpu_data[cpu])
-#endif
+#define local_cpu_data		(&__ia64_per_cpu_var(cpu_info))
+#define cpu_data(cpu)		(&per_cpu(cpu_info, cpu))
 
 extern void identify_cpu (struct cpuinfo_ia64 *);
 extern void print_cpu_info (struct cpuinfo_ia64 *);
@@ -340,14 +230,32 @@ typedef struct {
 		 (int *) (addr));								\
 })
 
-struct siginfo;
+#ifdef CONFIG_IA32_SUPPORT
+struct desc_struct {
+	unsigned int a, b;
+};
+
+#define desc_empty(desc)		(!((desc)->a + (desc)->b))
+#define desc_equal(desc1, desc2)	(((desc1)->a == (desc2)->a) && ((desc1)->b == (desc2)->b))
+
+#define GDT_ENTRY_TLS_ENTRIES	3
+#define GDT_ENTRY_TLS_MIN	6
+#define GDT_ENTRY_TLS_MAX 	(GDT_ENTRY_TLS_MIN + GDT_ENTRY_TLS_ENTRIES - 1)
+
+#define TLS_SIZE (GDT_ENTRY_TLS_ENTRIES * 8)
+
+#endif
 
 struct thread_struct {
+	__u32 flags;			/* various thread flags (see IA64_THREAD_*) */
+	/* writing on_ustack is performance-critical, so it's worth spending 8 bits on it... */
+	__u8 on_ustack;			/* executing on user-stacks? */
+	__u8 pad[3];
 	__u64 ksp;			/* kernel stack pointer */
-	unsigned long flags;		/* various flags */
 	__u64 map_base;			/* base address for get_unmapped_area() */
 	__u64 task_size;		/* limit for task size */
-	struct siginfo *siginfo;	/* current siginfo struct for ptrace() */
+	__u64 rbs_bot;			/* the base address for the RBS */
+	int last_fph_cpu;		/* CPU that may hold the contents of f32-f127 */
 
 #ifdef CONFIG_IA32_SUPPORT
 	__u64 eflag;			/* IA32 EFLAGS reg */
@@ -355,21 +263,30 @@ struct thread_struct {
 	__u64 fcr;			/* IA32 floating pt control reg */
 	__u64 fir;			/* IA32 fp except. instr. reg */
 	__u64 fdr;			/* IA32 fp except. data reg */
-	__u64 csd;			/* IA32 code selector descriptor */
-	__u64 ssd;			/* IA32 stack selector descriptor */
 	__u64 old_k1;			/* old value of ar.k1 */
 	__u64 old_iob;			/* old IOBase value */
-# define INIT_THREAD_IA32	0, 0, 0x17800000037fULL, 0, 0, 0, 0, 0, 0,
+        /* cached TLS descriptors. */
+	struct desc_struct tls_array[GDT_ENTRY_TLS_ENTRIES];
+
+# define INIT_THREAD_IA32	.eflag =	0,			\
+				.fsr =		0,			\
+				.fcr =		0x17800000037fULL,	\
+				.fir =		0,			\
+				.fdr =		0,			\
+				.old_k1 =	0,			\
+				.old_iob =	0,
 #else
 # define INIT_THREAD_IA32
 #endif /* CONFIG_IA32_SUPPORT */
 #ifdef CONFIG_PERFMON
-	__u64 pmc[IA64_NUM_PMC_REGS];
-	__u64 pmd[IA64_NUM_PMD_REGS];
-	unsigned long pfm_must_block;	/* non-zero if we need to block on overflow */
-	void *pfm_context;		/* pointer to detailed PMU context */
-	atomic_t pfm_notifiers_check;	/* indicate if release_thread much check tasklist */
-# define INIT_THREAD_PM		{0, }, {0, }, 0, 0, {0},
+	__u64 pmcs[IA64_NUM_PMC_REGS];
+	__u64 pmds[IA64_NUM_PMD_REGS];
+	void *pfm_context;		     /* pointer to detailed PMU context */
+	unsigned long pfm_needs_checking;    /* when >0, pending perfmon work on kernel exit */
+# define INIT_THREAD_PM		.pmcs =			{0UL, },  \
+				.pmds =			{0UL, },  \
+				.pfm_context =		NULL,     \
+				.pfm_needs_checking =	0UL,
 #else
 # define INIT_THREAD_PM
 #endif
@@ -378,59 +295,40 @@ struct thread_struct {
 	struct ia64_fpreg fph[96];	/* saved/loaded on demand */
 };
 
-#define INIT_THREAD {					\
-	0,				/* ksp */	\
-	0,				/* flags */	\
-	DEFAULT_MAP_BASE,		/* map_base */	\
-	DEFAULT_TASK_SIZE,		/* task_size */	\
-	0,				/* siginfo */	\
-	INIT_THREAD_IA32				\
-	INIT_THREAD_PM					\
-	{0, },				/* dbr */	\
-	{0, },				/* ibr */	\
-	{{{{0}}}, }			/* fph */	\
+#define INIT_THREAD {				\
+	.flags =	0,			\
+	.on_ustack =	0,			\
+	.ksp =		0,			\
+	.map_base =	DEFAULT_MAP_BASE,	\
+	.rbs_bot =	DEFAULT_USER_STACK_SIZE,	\
+	.task_size =	DEFAULT_TASK_SIZE,	\
+	.last_fph_cpu =  -1,			\
+	INIT_THREAD_IA32			\
+	INIT_THREAD_PM				\
+	.dbr =		{0, },			\
+	.ibr =		{0, },			\
+	.fph =		{{{{0}}}, }		\
 }
 
 #define start_thread(regs,new_ip,new_sp) do {							\
 	set_fs(USER_DS);									\
-	ia64_psr(regs)->dfh = 1;	/* disable fph */					\
-	ia64_psr(regs)->mfh = 0;	/* clear mfh */						\
-	ia64_psr(regs)->cpl = 3;	/* set user mode */					\
-	ia64_psr(regs)->ri = 0;		/* clear return slot number */				\
-	ia64_psr(regs)->is = 0;		/* IA-64 instruction set */				\
+	regs->cr_ipsr = ((regs->cr_ipsr | (IA64_PSR_BITS_TO_SET | IA64_PSR_CPL))		\
+			 & ~(IA64_PSR_BITS_TO_CLEAR | IA64_PSR_RI | IA64_PSR_IS));		\
 	regs->cr_iip = new_ip;									\
 	regs->ar_rsc = 0xf;		/* eager mode, privilege level 3 */			\
 	regs->ar_rnat = 0;									\
-	regs->ar_bspstore = IA64_RBS_BOT;							\
+	regs->ar_bspstore = current->thread.rbs_bot;						\
 	regs->ar_fpsr = FPSR_DEFAULT;								\
 	regs->loadrs = 0;									\
 	regs->r8 = current->mm->dumpable;	/* set "don't zap registers" flag */		\
 	regs->r12 = new_sp - 16;	/* allocate 16 byte scratch area */			\
-	if (!__builtin_expect (current->mm->dumpable, 1)) {					\
+	if (unlikely(!current->mm->dumpable)) {							\
 		/*										\
 		 * Zap scratch regs to avoid leaking bits between processes with different	\
 		 * uid/privileges.								\
 		 */										\
-		regs->ar_pfs = 0;								\
-		regs->pr = 0;									\
-		/*										\
-		 * XXX fix me: everything below can go away once we stop preserving scratch	\
-		 * regs on a system call.							\
-		 */										\
-		regs->b6 = 0;									\
-		regs->r1 = 0; regs->r2 = 0; regs->r3 = 0;					\
-		regs->r13 = 0; regs->r14 = 0; regs->r15 = 0;					\
-		regs->r9  = 0; regs->r11 = 0;							\
-		regs->r16 = 0; regs->r17 = 0; regs->r18 = 0; regs->r19 = 0;			\
-		regs->r20 = 0; regs->r21 = 0; regs->r22 = 0; regs->r23 = 0;			\
-		regs->r24 = 0; regs->r25 = 0; regs->r26 = 0; regs->r27 = 0;			\
-		regs->r28 = 0; regs->r29 = 0; regs->r30 = 0; regs->r31 = 0;			\
-		regs->ar_ccv = 0;								\
-		regs->b0 = 0; regs->b7 = 0;							\
-		regs->f6.u.bits[0] = 0; regs->f6.u.bits[1] = 0;					\
-		regs->f7.u.bits[0] = 0; regs->f7.u.bits[1] = 0;					\
-		regs->f8.u.bits[0] = 0; regs->f8.u.bits[1] = 0;					\
-		regs->f9.u.bits[0] = 0; regs->f9.u.bits[1] = 0;					\
+		regs->ar_pfs = 0; regs->b0 = 0; regs->pr = 0;					\
+		regs->r1 = 0; regs->r9  = 0; regs->r11 = 0; regs->r13 = 0; regs->r15 = 0;	\
 	}											\
 } while (0)
 
@@ -440,14 +338,13 @@ struct task_struct;
 
 /*
  * Free all resources held by a thread. This is called after the
- * parent of DEAD_TASK has collected the exist status of the task via
+ * parent of DEAD_TASK has collected the exit status of the task via
  * wait().
  */
-#ifdef CONFIG_PERFMON
-  extern void release_thread (struct task_struct *task);
-#else
-# define release_thread(dead_task)
-#endif
+#define release_thread(dead_task)
+
+/* Prepare to copy thread state - unlazy all lazy status */
+#define prepare_to_copy(tsk)	do { } while (0)
 
 /*
  * This is the mechanism for creating a new kernel thread.
@@ -463,11 +360,7 @@ struct task_struct;
  * do_basic_setup() and the timing is such that free_initmem() has
  * been called already.
  */
-extern int kernel_thread (int (*fn)(void *), void *arg, unsigned long flags);
-
-/* Copy and release all segment info associated with a VM */
-#define copy_segments(tsk, mm)			do { } while (0)
-#define release_segments(mm)			do { } while (0)
+extern pid_t kernel_thread (int (*fn)(void *), void *arg, unsigned long flags);
 
 /* Get wait channel for task P.  */
 extern unsigned long get_wchan (struct task_struct *p);
@@ -482,54 +375,64 @@ extern unsigned long get_wchan (struct task_struct *p);
 /* Return stack pointer of blocked task TSK.  */
 #define KSTK_ESP(tsk)  ((tsk)->thread.ksp)
 
-static inline unsigned long
-ia64_get_kr (unsigned long regnum)
-{
-	unsigned long r;
+extern void ia64_getreg_unknown_kr (void);
+extern void ia64_setreg_unknown_kr (void);
 
-	switch (regnum) {
-	      case 0: asm volatile ("mov %0=ar.k0" : "=r"(r)); break;
-	      case 1: asm volatile ("mov %0=ar.k1" : "=r"(r)); break;
-	      case 2: asm volatile ("mov %0=ar.k2" : "=r"(r)); break;
-	      case 3: asm volatile ("mov %0=ar.k3" : "=r"(r)); break;
-	      case 4: asm volatile ("mov %0=ar.k4" : "=r"(r)); break;
-	      case 5: asm volatile ("mov %0=ar.k5" : "=r"(r)); break;
-	      case 6: asm volatile ("mov %0=ar.k6" : "=r"(r)); break;
-	      case 7: asm volatile ("mov %0=ar.k7" : "=r"(r)); break;
-	}
-	return r;
-}
+#define ia64_get_kr(regnum)					\
+({								\
+	unsigned long r = 0;					\
+								\
+	switch (regnum) {					\
+	    case 0: r = ia64_getreg(_IA64_REG_AR_KR0); break;	\
+	    case 1: r = ia64_getreg(_IA64_REG_AR_KR1); break;	\
+	    case 2: r = ia64_getreg(_IA64_REG_AR_KR2); break;	\
+	    case 3: r = ia64_getreg(_IA64_REG_AR_KR3); break;	\
+	    case 4: r = ia64_getreg(_IA64_REG_AR_KR4); break;	\
+	    case 5: r = ia64_getreg(_IA64_REG_AR_KR5); break;	\
+	    case 6: r = ia64_getreg(_IA64_REG_AR_KR6); break;	\
+	    case 7: r = ia64_getreg(_IA64_REG_AR_KR7); break;	\
+	    default: ia64_getreg_unknown_kr(); break;		\
+	}							\
+	r;							\
+})
 
-static inline void
-ia64_set_kr (unsigned long regnum, unsigned long r)
-{
-	switch (regnum) {
-	      case 0: asm volatile ("mov ar.k0=%0" :: "r"(r)); break;
-	      case 1: asm volatile ("mov ar.k1=%0" :: "r"(r)); break;
-	      case 2: asm volatile ("mov ar.k2=%0" :: "r"(r)); break;
-	      case 3: asm volatile ("mov ar.k3=%0" :: "r"(r)); break;
-	      case 4: asm volatile ("mov ar.k4=%0" :: "r"(r)); break;
-	      case 5: asm volatile ("mov ar.k5=%0" :: "r"(r)); break;
-	      case 6: asm volatile ("mov ar.k6=%0" :: "r"(r)); break;
-	      case 7: asm volatile ("mov ar.k7=%0" :: "r"(r)); break;
-	}
-}
+#define ia64_set_kr(regnum, r) 					\
+({								\
+	switch (regnum) {					\
+	    case 0: ia64_setreg(_IA64_REG_AR_KR0, r); break;	\
+	    case 1: ia64_setreg(_IA64_REG_AR_KR1, r); break;	\
+	    case 2: ia64_setreg(_IA64_REG_AR_KR2, r); break;	\
+	    case 3: ia64_setreg(_IA64_REG_AR_KR3, r); break;	\
+	    case 4: ia64_setreg(_IA64_REG_AR_KR4, r); break;	\
+	    case 5: ia64_setreg(_IA64_REG_AR_KR5, r); break;	\
+	    case 6: ia64_setreg(_IA64_REG_AR_KR6, r); break;	\
+	    case 7: ia64_setreg(_IA64_REG_AR_KR7, r); break;	\
+	    default: ia64_setreg_unknown_kr(); break;		\
+	}							\
+})
 
-#ifndef CONFIG_SMP
+/*
+ * The following three macros can't be inline functions because we don't have struct
+ * task_struct at this point.
+ */
 
-static inline struct task_struct *
-ia64_get_fpu_owner (void)
-{
-	return (struct task_struct *) ia64_get_kr(IA64_KR_FPU_OWNER);
-}
+/* Return TRUE if task T owns the fph partition of the CPU we're running on. */
+#define ia64_is_local_fpu_owner(t)								\
+({												\
+	struct task_struct *__ia64_islfo_task = (t);						\
+	(__ia64_islfo_task->thread.last_fph_cpu == smp_processor_id()				\
+	 && __ia64_islfo_task == (struct task_struct *) ia64_get_kr(IA64_KR_FPU_OWNER));	\
+})
 
-static inline void
-ia64_set_fpu_owner (struct task_struct *t)
-{
-	ia64_set_kr(IA64_KR_FPU_OWNER, (unsigned long) t);
-}
+/* Mark task T as owning the fph partition of the CPU we're running on. */
+#define ia64_set_local_fpu_owner(t) do {						\
+	struct task_struct *__ia64_slfo_task = (t);					\
+	__ia64_slfo_task->thread.last_fph_cpu = smp_processor_id();			\
+	ia64_set_kr(IA64_KR_FPU_OWNER, (unsigned long) __ia64_slfo_task);		\
+} while (0)
 
-#endif /* !CONFIG_SMP */
+/* Mark the fph partition of task T as being invalid on all CPUs.  */
+#define ia64_drop_fpu(t)	((t)->thread.last_fph_cpu = -1)
 
 extern void __ia64_init_fpu (void);
 extern void __ia64_save_fpu (struct ia64_fpreg *fph);
@@ -542,13 +445,8 @@ extern void ia32_save_state (struct task_struct *task);
 extern void ia32_load_state (struct task_struct *task);
 #endif
 
-#ifdef CONFIG_PERFMON
-extern void ia64_save_pm_regs (struct task_struct *task);
-extern void ia64_load_pm_regs (struct task_struct *task);
-#endif
-
-#define ia64_fph_enable()	asm volatile (";; rsm psr.dfh;; srlz.d;;" ::: "memory");
-#define ia64_fph_disable()	asm volatile (";; ssm psr.dfh;; srlz.d;;" ::: "memory");
+#define ia64_fph_enable()	do { ia64_rsm(IA64_PSR_DFH); ia64_srlz_d(); } while (0)
+#define ia64_fph_disable()	do { ia64_ssm(IA64_PSR_DFH); ia64_srlz_d(); } while (0)
 
 /* load fp 0.0 into fph */
 static inline void
@@ -574,81 +472,27 @@ ia64_load_fpu (struct ia64_fpreg *fph) {
 	ia64_fph_disable();
 }
 
-static inline void
-ia64_fc (void *addr)
-{
-	asm volatile ("fc %0" :: "r"(addr) : "memory");
-}
-
-static inline void
-ia64_sync_i (void)
-{
-	asm volatile (";; sync.i" ::: "memory");
-}
-
-static inline void
-ia64_srlz_i (void)
-{
-	asm volatile (";; srlz.i ;;" ::: "memory");
-}
-
-static inline void
-ia64_srlz_d (void)
-{
-	asm volatile (";; srlz.d" ::: "memory");
-}
-
 static inline __u64
-ia64_get_rr (__u64 reg_bits)
+ia64_clear_ic (void)
 {
-	__u64 r;
-	asm volatile ("mov %0=rr[%1]" : "=r"(r) : "r"(reg_bits) : "memory");
-	return r;
-}
-
-static inline void
-ia64_set_rr (__u64 reg_bits, __u64 rr_val)
-{
-	asm volatile ("mov rr[%0]=%1" :: "r"(reg_bits), "r"(rr_val) : "memory");
-}
-
-static inline __u64
-ia64_get_dcr (void)
-{
-	__u64 r;
-	asm volatile ("mov %0=cr.dcr" : "=r"(r));
-	return r;
-}
-
-static inline void
-ia64_set_dcr (__u64 val)
-{
-	asm volatile ("mov cr.dcr=%0;;" :: "r"(val) : "memory");
-	ia64_srlz_d();
-}
-
-static inline __u64
-ia64_get_lid (void)
-{
-	__u64 r;
-	asm volatile ("mov %0=cr.lid" : "=r"(r));
-	return r;
-}
-
-static inline void
-ia64_invala (void)
-{
-	asm volatile ("invala" ::: "memory");
+	__u64 psr;
+	psr = ia64_getreg(_IA64_REG_PSR);
+	ia64_stop();
+	ia64_rsm(IA64_PSR_I | IA64_PSR_IC);
+	ia64_srlz_i();
+	return psr;
 }
 
 /*
- * Save the processor status flags in FLAGS and then clear the interrupt collection and
- * interrupt enable bits.  Don't trigger any mandatory RSE references while this bit is
- * off!
+ * Restore the psr.
  */
-#define ia64_clear_ic(flags)						\
-	asm volatile ("mov %0=psr;; rsm psr.i | psr.ic;; srlz.i;;"	\
-			      : "=r"(flags) :: "memory");
+static inline void
+ia64_set_psr (__u64 psr)
+{
+	ia64_stop();
+	ia64_setreg(_IA64_REG_PSR_L, psr);
+	ia64_srlz_d();
+}
 
 /*
  * Insert a translation into an instruction and/or data translation
@@ -659,14 +503,13 @@ ia64_itr (__u64 target_mask, __u64 tr_num,
 	  __u64 vmaddr, __u64 pte,
 	  __u64 log_page_size)
 {
-	asm volatile ("mov cr.itir=%0" :: "r"(log_page_size << 2) : "memory");
-	asm volatile ("mov cr.ifa=%0;;" :: "r"(vmaddr) : "memory");
+	ia64_setreg(_IA64_REG_CR_ITIR, (log_page_size << 2));
+	ia64_setreg(_IA64_REG_CR_IFA, vmaddr);
+	ia64_stop();
 	if (target_mask & 0x1)
-		asm volatile ("itr.i itr[%0]=%1"
-				      :: "r"(tr_num), "r"(pte) : "memory");
+		ia64_itri(tr_num, pte);
 	if (target_mask & 0x2)
-		asm volatile (";;itr.d dtr[%0]=%1"
-				      :: "r"(tr_num), "r"(pte) : "memory");
+		ia64_itrd(tr_num, pte);
 }
 
 /*
@@ -677,13 +520,14 @@ static inline void
 ia64_itc (__u64 target_mask, __u64 vmaddr, __u64 pte,
 	  __u64 log_page_size)
 {
-	asm volatile ("mov cr.itir=%0" :: "r"(log_page_size << 2) : "memory");
-	asm volatile ("mov cr.ifa=%0;;" :: "r"(vmaddr) : "memory");
+	ia64_setreg(_IA64_REG_CR_ITIR, (log_page_size << 2));
+	ia64_setreg(_IA64_REG_CR_IFA, vmaddr);
+	ia64_stop();
 	/* as per EAS2.6, itc must be the last instruction in an instruction group */
 	if (target_mask & 0x1)
-		asm volatile ("itc.i %0;;" :: "r"(pte) : "memory");
+		ia64_itci(pte);
 	if (target_mask & 0x2)
-		asm volatile (";;itc.d %0;;" :: "r"(pte) : "memory");
+		ia64_itcd(pte);
 }
 
 /*
@@ -694,16 +538,17 @@ static inline void
 ia64_ptr (__u64 target_mask, __u64 vmaddr, __u64 log_size)
 {
 	if (target_mask & 0x1)
-		asm volatile ("ptr.i %0,%1" :: "r"(vmaddr), "r"(log_size << 2));
+		ia64_ptri(vmaddr, (log_size << 2));
 	if (target_mask & 0x2)
-		asm volatile ("ptr.d %0,%1" :: "r"(vmaddr), "r"(log_size << 2));
+		ia64_ptrd(vmaddr, (log_size << 2));
 }
 
 /* Set the interrupt vector address.  The address must be suitably aligned (32KB).  */
 static inline void
 ia64_set_iva (void *ivt_addr)
 {
-	asm volatile ("mov cr.iva=%0;; srlz.i;;" :: "r"(ivt_addr) : "memory");
+	ia64_setreg(_IA64_REG_CR_IVA, (__u64) ivt_addr);
+	ia64_srlz_i();
 }
 
 /* Set the page table address and control bits.  */
@@ -711,74 +556,33 @@ static inline void
 ia64_set_pta (__u64 pta)
 {
 	/* Note: srlz.i implies srlz.d */
-	asm volatile ("mov cr.pta=%0;; srlz.i;;" :: "r"(pta) : "memory");
-}
-
-static inline __u64
-ia64_get_cpuid (__u64 regnum)
-{
-	__u64 r;
-
-	asm ("mov %0=cpuid[%r1]" : "=r"(r) : "rO"(regnum));
-	return r;
+	ia64_setreg(_IA64_REG_CR_PTA, pta);
+	ia64_srlz_i();
 }
 
 static inline void
 ia64_eoi (void)
 {
-	asm ("mov cr.eoi=r0;; srlz.d;;" ::: "memory");
+	ia64_setreg(_IA64_REG_CR_EOI, 0);
+	ia64_srlz_d();
 }
+
+#define cpu_relax()	ia64_hint(ia64_hint_pause)
 
 static inline void
 ia64_set_lrr0 (unsigned long val)
 {
-	asm volatile ("mov cr.lrr0=%0;; srlz.d" :: "r"(val) : "memory");
+	ia64_setreg(_IA64_REG_CR_LRR0, val);
+	ia64_srlz_d();
 }
-
-#define cpu_relax()	do { } while (0)
-
 
 static inline void
 ia64_set_lrr1 (unsigned long val)
 {
-	asm volatile ("mov cr.lrr1=%0;; srlz.d" :: "r"(val) : "memory");
+	ia64_setreg(_IA64_REG_CR_LRR1, val);
+	ia64_srlz_d();
 }
 
-static inline void
-ia64_set_pmv (__u64 val)
-{
-	asm volatile ("mov cr.pmv=%0" :: "r"(val) : "memory");
-}
-
-static inline __u64
-ia64_get_pmc (__u64 regnum)
-{
-	__u64 retval;
-
-	asm volatile ("mov %0=pmc[%1]" : "=r"(retval) : "r"(regnum));
-	return retval;
-}
-
-static inline void
-ia64_set_pmc (__u64 regnum, __u64 value)
-{
-	asm volatile ("mov pmc[%0]=%1" :: "r"(regnum), "r"(value));
-}
-
-static inline __u64
-ia64_get_pmd (__u64 regnum)
-{
-	__u64 retval;
-
-	asm volatile ("mov %0=pmd[%1]" : "=r"(retval) : "r"(regnum));
-	return retval;
-}
-
-static inline void
-ia64_set_pmd (__u64 regnum, __u64 value)
-{
-	asm volatile ("mov pmd[%0]=%1" :: "r"(regnum), "r"(value));
-}
 
 /*
  * Given the address to which a spill occurred, return the unat bit
@@ -808,15 +612,12 @@ ia64_set_unat (__u64 *unat, void *spill_addr, unsigned long nat)
  * Note that the only way T can block is through a call to schedule() -> switch_to().
  */
 static inline unsigned long
-thread_saved_pc (struct thread_struct *t)
+thread_saved_pc (struct task_struct *t)
 {
 	struct unw_frame_info info;
 	unsigned long ip;
 
-	/* XXX ouch: Linus, please pass the task pointer to thread_saved_pc() instead! */
-	struct task_struct *p = (void *) ((unsigned long) t - IA64_TASK_THREAD_OFFSET);
-
-	unw_init_from_blocked_task(&info, p);
+	unw_init_from_blocked_task(&info, t);
 	if (unw_unwind(&info) < 0)
 		return 0;
 	unw_get_ip(&info, &ip);
@@ -827,160 +628,25 @@ thread_saved_pc (struct thread_struct *t)
  * Get the current instruction/program counter value.
  */
 #define current_text_addr() \
-	({ void *_pc; asm volatile ("mov %0=ip" : "=r" (_pc)); _pc; })
-
-#define THREAD_SIZE	IA64_STK_OFFSET
-/* NOTE: The task struct and the stacks are allocated together.  */
-#define alloc_task_struct() \
-        ((struct task_struct *) __get_free_pages(GFP_KERNEL, IA64_TASK_STRUCT_LOG_NUM_PAGES))
-#define free_task_struct(p)	free_pages((unsigned long)(p), IA64_TASK_STRUCT_LOG_NUM_PAGES)
-#define get_task_struct(tsk)	atomic_inc(&virt_to_page(tsk)->count)
-
-#define init_task	(init_task_union.task)
-#define init_stack	(init_task_union.stack)
-
-/*
- * Set the correctable machine check vector register
- */
-static inline void
-ia64_set_cmcv (__u64 val)
-{
-	asm volatile ("mov cr.cmcv=%0" :: "r"(val) : "memory");
-}
-
-/*
- * Read the correctable machine check vector register
- */
-static inline __u64
-ia64_get_cmcv (void)
-{
-	__u64 val;
-
-	asm volatile ("mov %0=cr.cmcv" : "=r"(val) :: "memory");
-	return val;
-}
+	({ void *_pc; _pc = (void *)ia64_getreg(_IA64_REG_IP); _pc; })
 
 static inline __u64
 ia64_get_ivr (void)
 {
 	__u64 r;
-	asm volatile ("srlz.d;; mov %0=cr.ivr;; srlz.d;;" : "=r"(r));
+	ia64_srlz_d();
+	r = ia64_getreg(_IA64_REG_CR_IVR);
+	ia64_srlz_d();
 	return r;
-}
-
-static inline void
-ia64_set_tpr (__u64 val)
-{
-	asm volatile ("mov cr.tpr=%0" :: "r"(val));
-}
-
-static inline __u64
-ia64_get_tpr (void)
-{
-	__u64 r;
-	asm volatile ("mov %0=cr.tpr" : "=r"(r));
-	return r;
-}
-
-static inline void
-ia64_set_irr0 (__u64 val)
-{
-	asm volatile("mov cr.irr0=%0;;" :: "r"(val) : "memory");
-	ia64_srlz_d();
-}
-
-static inline __u64
-ia64_get_irr0 (void)
-{
-	__u64 val;
-
-	/* this is volatile because irr may change unbeknownst to gcc... */
-	asm volatile("mov %0=cr.irr0" : "=r"(val));
-	return val;
-}
-
-static inline void
-ia64_set_irr1 (__u64 val)
-{
-	asm volatile("mov cr.irr1=%0;;" :: "r"(val) : "memory");
-	ia64_srlz_d();
-}
-
-static inline __u64
-ia64_get_irr1 (void)
-{
-	__u64 val;
-
-	/* this is volatile because irr may change unbeknownst to gcc... */
-	asm volatile("mov %0=cr.irr1" : "=r"(val));
-	return val;
-}
-
-static inline void
-ia64_set_irr2 (__u64 val)
-{
-	asm volatile("mov cr.irr2=%0;;" :: "r"(val) : "memory");
-	ia64_srlz_d();
-}
-
-static inline __u64
-ia64_get_irr2 (void)
-{
-	__u64 val;
-
-	/* this is volatile because irr may change unbeknownst to gcc... */
-	asm volatile("mov %0=cr.irr2" : "=r"(val));
-	return val;
-}
-
-static inline void
-ia64_set_irr3 (__u64 val)
-{
-	asm volatile("mov cr.irr3=%0;;" :: "r"(val) : "memory");
-	ia64_srlz_d();
-}
-
-static inline __u64
-ia64_get_irr3 (void)
-{
-	__u64 val;
-
-	/* this is volatile because irr may change unbeknownst to gcc... */
-	asm volatile ("mov %0=cr.irr3" : "=r"(val));
-	return val;
-}
-
-static inline __u64
-ia64_get_gp(void)
-{
-	__u64 val;
-
-	asm ("mov %0=gp" : "=r"(val));
-	return val;
-}
-
-static inline void
-ia64_set_ibr (__u64 regnum, __u64 value)
-{
-	asm volatile ("mov ibr[%0]=%1" :: "r"(regnum), "r"(value));
 }
 
 static inline void
 ia64_set_dbr (__u64 regnum, __u64 value)
 {
-	asm volatile ("mov dbr[%0]=%1" :: "r"(regnum), "r"(value));
+	__ia64_set_dbr(regnum, value);
 #ifdef CONFIG_ITANIUM
-	asm volatile (";; srlz.d");
+	ia64_srlz_d();
 #endif
-}
-
-static inline __u64
-ia64_get_ibr (__u64 regnum)
-{
-	__u64 retval;
-
-	asm volatile ("mov %0=ibr[%1]" : "=r"(retval) : "r"(regnum));
-	return retval;
 }
 
 static inline __u64
@@ -988,46 +654,42 @@ ia64_get_dbr (__u64 regnum)
 {
 	__u64 retval;
 
-	asm volatile ("mov %0=dbr[%1]" : "=r"(retval) : "r"(regnum));
+	retval = __ia64_get_dbr(regnum);
 #ifdef CONFIG_ITANIUM
-	asm volatile (";; srlz.d");
+	ia64_srlz_d();
 #endif
 	return retval;
 }
 
 /* XXX remove the handcoded version once we have a sufficiently clever compiler... */
 #ifdef SMART_COMPILER
-# define ia64_rotr(w,n)				\
-  ({						\
-	__u64 _w = (w), _n = (n);		\
-						\
-	(_w >> _n) | (_w << (64 - _n));		\
+# define ia64_rotr(w,n)						\
+  ({								\
+	__u64 __ia64_rotr_w = (w), _n = (n);			\
+								\
+	(__ia64_rotr_w >> _n) | (__ia64_rotr_w << (64 - _n));	\
   })
 #else
-# define ia64_rotr(w,n)							\
-  ({									\
-	__u64 result;							\
-	asm ("shrp %0=%1,%1,%2" : "=r"(result) : "r"(w), "i"(n));	\
-	result;								\
+# define ia64_rotr(w,n)					\
+  ({							\
+	__u64 __ia64_rotr_w;				\
+	__ia64_rotr_w = ia64_shrp((w), (w), (n));	\
+	__ia64_rotr_w;					\
   })
 #endif
 
 #define ia64_rotl(w,n)	ia64_rotr((w),(64)-(n))
 
-static inline __u64
-ia64_thash (__u64 addr)
+/*
+ * Take a mapped kernel address and return the equivalent address
+ * in the region 7 identity mapped virtual area.
+ */
+static inline void *
+ia64_imva (void *addr)
 {
-	__u64 result;
-	asm ("thash %0=%1" : "=r"(result) : "r" (addr));
-	return result;
-}
-
-static inline __u64
-ia64_tpa (__u64 addr)
-{
-	__u64 result;
-	asm ("tpa %0=%1" : "=r"(result) : "r"(addr));
-	return result;
+	void *result;
+	result = (void *) ia64_tpa(addr);
+	return __va(result);
 }
 
 #define ARCH_HAS_PREFETCH
@@ -1035,16 +697,16 @@ ia64_tpa (__u64 addr)
 #define ARCH_HAS_SPINLOCK_PREFETCH
 #define PREFETCH_STRIDE 256
 
-extern inline void
+static inline void
 prefetch (const void *x)
 {
-         __asm__ __volatile__ ("lfetch [%0]" : : "r"(x));
+	 ia64_lfetch(ia64_lfhint_none, x);
 }
 
-extern inline void
+static inline void
 prefetchw (const void *x)
 {
-	__asm__ __volatile__ ("lfetch.excl [%0]" : : "r"(x));
+	ia64_lfetch_excl(ia64_lfhint_none, x);
 }
 
 #define spin_lock_prefetch(x)	prefetchw(x)

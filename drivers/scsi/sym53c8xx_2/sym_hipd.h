@@ -129,12 +129,6 @@
 /*
  *  These ones should have been already defined.
  */
-#ifndef offsetof
-#define offsetof(t, m)	((size_t) (&((t *)0)->m))
-#endif
-#ifndef MIN
-#define MIN(a, b) (((a) < (b)) ? (a) : (b))
-#endif
 #ifndef assert
 #define	assert(expression) { \
 	if (!(expression)) { \
@@ -1068,7 +1062,8 @@ struct sym_hcb {
 	/*
 	 *  CCB lists and queue.
 	 */
-	ccb_p ccbh[CCB_HASH_SIZE];	/* CCB hashed by DSA value	*/
+	ccb_p *ccbh;			/* CCBs hashed by DSA value	*/
+					/* CCB_HASH_SIZE lists of CCBs	*/
 	SYM_QUEHEAD	free_ccbq;	/* Queue of available CCBs	*/
 	SYM_QUEHEAD	busy_ccbq;	/* Queue of busy CCBs		*/
 

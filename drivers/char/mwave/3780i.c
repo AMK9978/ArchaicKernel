@@ -46,7 +46,6 @@
 *	First release to the public
 */
 
-#include <linux/version.h>
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/unistd.h>
@@ -68,11 +67,9 @@ static unsigned long flags;
 
 static void PaceMsaAccess(unsigned short usDspBaseIO)
 {
-	if(current->need_resched)
-		schedule();
+	cond_resched();
 	udelay(100);
-	if(current->need_resched)
-		schedule();
+	cond_resched();
 }
 
 unsigned short dsp3780I_ReadMsaCfg(unsigned short usDspBaseIO,
@@ -700,7 +697,7 @@ int dsp3780I_GetIPCSource(unsigned short usDspBaseIO,
 		usDspBaseIO, pusIPCSource);
 
 	/*
-	* Disable DSP to PC interrupts, read the interupt register,
+	* Disable DSP to PC interrupts, read the interrupt register,
 	* clear the pending IPC bits, and reenable DSP to PC interrupts
 	*/
 	spin_lock_irqsave(&dsp_lock, flags);

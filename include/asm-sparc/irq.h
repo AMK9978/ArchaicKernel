@@ -10,6 +10,7 @@
 #include <linux/config.h>
 #include <linux/linkage.h>
 #include <linux/threads.h>     /* For NR_CPUS */
+#include <linux/interrupt.h>
 
 #include <asm/system.h>     /* For SUN4M_NCPUS */
 #include <asm/btfixup.h>
@@ -19,7 +20,9 @@
 BTFIXUPDEF_CALL(char *, __irq_itoa, unsigned int)
 #define __irq_itoa(irq) BTFIXUP_CALL(__irq_itoa)(irq)
 
-#define NR_IRQS    15
+#define NR_IRQS    16
+
+#define irq_canonicalize(irq)	(irq)
 
 /* Dave Redman (djhr@tadpole.co.uk)
  * changed these to function pointers.. it saves cycles and will allow
@@ -36,17 +39,48 @@ BTFIXUPDEF_CALL(void, clear_clock_irq, void)
 BTFIXUPDEF_CALL(void, clear_profile_irq, int)
 BTFIXUPDEF_CALL(void, load_profile_irq, int, unsigned int)
 
-#define disable_irq_nosync disable_irq
-#define disable_irq(irq) BTFIXUP_CALL(disable_irq)(irq)
-#define enable_irq(irq) BTFIXUP_CALL(enable_irq)(irq)
-#define disable_pil_irq(irq) BTFIXUP_CALL(disable_pil_irq)(irq)
-#define enable_pil_irq(irq) BTFIXUP_CALL(enable_pil_irq)(irq)
-#define clear_clock_irq() BTFIXUP_CALL(clear_clock_irq)()
-#define clear_profile_irq(cpu) BTFIXUP_CALL(clear_profile_irq)(cpu)
-#define load_profile_irq(cpu,limit) BTFIXUP_CALL(load_profile_irq)(cpu,limit)
+static inline void disable_irq_nosync(unsigned int irq)
+{
+	BTFIXUP_CALL(disable_irq)(irq);
+}
 
-extern void (*init_timers)(void (*lvl10_irq)(int, void *, struct pt_regs *));
-extern void claim_ticker14(void (*irq_handler)(int, void *, struct pt_regs *),
+static inline void disable_irq(unsigned int irq)
+{
+	BTFIXUP_CALL(disable_irq)(irq);
+}
+
+static inline void enable_irq(unsigned int irq)
+{
+	BTFIXUP_CALL(enable_irq)(irq);
+}
+
+static inline void disable_pil_irq(unsigned int irq)
+{
+	BTFIXUP_CALL(disable_pil_irq)(irq);
+}
+
+static inline void enable_pil_irq(unsigned int irq)
+{
+	BTFIXUP_CALL(enable_pil_irq)(irq);
+}
+
+static inline void clear_clock_irq(void)
+{
+	BTFIXUP_CALL(clear_clock_irq)();
+}
+
+static inline void clear_profile_irq(int irq)
+{
+	BTFIXUP_CALL(clear_profile_irq)(irq);
+}
+
+static inline void load_profile_irq(int cpu, int limit)
+{
+	BTFIXUP_CALL(load_profile_irq)(cpu, limit);
+}
+
+extern void (*sparc_init_timers)(irqreturn_t (*lvl10_irq)(int, void *, struct pt_regs *));
+extern void claim_ticker14(irqreturn_t (*irq_handler)(int, void *, struct pt_regs *),
 			   int irq,
 			   unsigned int timeout);
 
@@ -60,7 +94,7 @@ BTFIXUPDEF_CALL(void, set_irq_udt, int)
 #define set_irq_udt(cpu) BTFIXUP_CALL(set_irq_udt)(cpu)
 #endif
 
-extern int request_fast_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *), unsigned long flags, __const__ char *devname);
+extern int request_fast_irq(unsigned int irq, irqreturn_t (*handler)(int, void *, struct pt_regs *), unsigned long flags, __const__ char *devname);
 
 /* On the sun4m, just like the timers, we have both per-cpu and master
  * interrupt registers.

@@ -8,13 +8,11 @@
  */
 
 #include <linux/config.h>
-#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/linkage.h>
 #include <linux/ctype.h>
 #include <linux/fs.h>
 #include <linux/sysctl.h>
-#define __NO_VERSION__
 #include <linux/module.h>
 
 #include <asm/uaccess.h>
@@ -103,7 +101,7 @@ proc_dodebug(ctl_table *table, int write, struct file *file,
 		len = sprintf(tmpbuf, "%d", *(unsigned int *) table->data);
 		if (len > left)
 			len = left;
-		copy_to_user(buffer, tmpbuf, len);
+		__copy_to_user(buffer, tmpbuf, len);
 		if ((left -= len) > 0) {
 			put_user('\n', (char *)buffer + len);
 			left--;
@@ -116,23 +114,50 @@ done:
 	return 0;
 }
 
-#define DIRENTRY(nam1, nam2, child)	\
-	{CTL_##nam1, #nam2, NULL, 0, 0555, child }
-#define DBGENTRY(nam1, nam2)	\
-	{CTL_##nam1##DEBUG, #nam2 "_debug", &nam2##_debug, sizeof(int),\
-	 0644, NULL, &proc_dodebug}
-
-static ctl_table		debug_table[] = {
-	DBGENTRY(RPC,  rpc),
-	DBGENTRY(NFS,  nfs),
-	DBGENTRY(NFSD, nfsd),
-	DBGENTRY(NLM,  nlm),
-	{0}
+static ctl_table debug_table[] = {
+	{
+		.ctl_name	= CTL_RPCDEBUG,
+		.procname	= "rpc_debug",
+		.data		= &rpc_debug,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dodebug
+	}, 
+	{
+		.ctl_name	= CTL_NFSDEBUG,
+		.procname	= "nfs_debug",
+		.data		= &nfs_debug,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dodebug
+	}, 
+	{
+		.ctl_name	= CTL_NFSDDEBUG,
+		.procname	= "nfsd_debug",
+		.data		= &nfsd_debug,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dodebug
+	}, 
+	{
+		.ctl_name	= CTL_NLMDEBUG,
+		.procname	= "nlm_debug",
+		.data		= &nlm_debug,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dodebug
+	}, 
+	{ .ctl_name = 0 }
 };
 
-static ctl_table		sunrpc_table[] = {
-	DIRENTRY(SUNRPC, sunrpc, debug_table),
-	{0}
+static ctl_table sunrpc_table[] = {
+	{
+		.ctl_name	= CTL_SUNRPC,
+		.procname	= "sunrpc",
+		.mode		= 0555,
+		.child		= debug_table
+	},
+	{ .ctl_name = 0 }
 };
 
 #endif

@@ -21,15 +21,14 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 
 struct notifier_block br_device_notifier =
 {
-	br_device_event,
-	NULL,
-	0
+	.notifier_call = br_device_event
 };
 
 static int br_device_event(struct notifier_block *unused, unsigned long event, void *ptr)
 {
 	struct net_device *dev;
 	struct net_bridge_port *p;
+	struct net_bridge *br;
 
 	dev = ptr;
 	p = dev->br_port;
@@ -37,39 +36,32 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 	if (p == NULL)
 		return NOTIFY_DONE;
 
-	switch (event)
+	br = p->br;
+
+	spin_lock_bh(&br->lock);
+	switch (event) 
 	{
 	case NETDEV_CHANGEADDR:
-		read_lock(&p->br->lock);
 		br_fdb_changeaddr(p, dev->dev_addr);
-		br_stp_recalculate_bridge_id(p->br);
-		read_unlock(&p->br->lock);
-		break;
-
-	case NETDEV_GOING_DOWN:
-		/* extend the protocol to send some kind of notification? */
+		if (br->dev->flags & IFF_UP)
+			br_stp_recalculate_bridge_id(br);
 		break;
 
 	case NETDEV_DOWN:
-		if (p->br->dev.flags & IFF_UP) {
-			read_lock(&p->br->lock);
-			br_stp_disable_port(dev->br_port);
-			read_unlock(&p->br->lock);
-		}
+		if (br->dev->flags & IFF_UP)
+			br_stp_disable_port(p);
 		break;
 
 	case NETDEV_UP:
-		if (p->br->dev.flags & IFF_UP) {
-			read_lock(&p->br->lock);
-			br_stp_enable_port(dev->br_port);
-			read_unlock(&p->br->lock);
-		}
+		if (br->dev->flags & IFF_UP)
+			br_stp_enable_port(p);
 		break;
 
 	case NETDEV_UNREGISTER:
-		br_del_if(dev->br_port->br, dev);
+		br_del_if(br, dev);
 		break;
 	}
+	spin_unlock_bh(&br->lock);
 
 	return NOTIFY_DONE;
 }

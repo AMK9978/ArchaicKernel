@@ -90,43 +90,9 @@
 #include <linux/fcntl.h>
 #include <linux/major.h>
 #include <linux/delay.h>
-#include <linux/tqueue.h>
 #include <linux/version.h>
 #include <linux/pci.h>
-
-
-/* ************************************************************** */
-/* * This section can be removed when 2.0 becomes outdated....  * */
-/* ************************************************************** */
-
-#if LINUX_VERSION_CODE < 131328    /* Less than 2.1.0 */
-#define TWO_ZERO
-#else
-#if LINUX_VERSION_CODE < 131371   /* less than 2.1.43 */
-/* This has not been extensively tested yet. Sorry. */
-#warning "You're on your own between 2.1.0 and 2.1.43.... "
-#warning "Please use a recent kernel."
-#endif
-#endif
-
-
-#ifdef TWO_ZERO
-#define Get_user(a,b)         a = get_user(b)
-#define copy_from_user(a,b,c) memcpy_fromfs(a,b,c)
-#define copy_to_user(a,b,c)   memcpy_tofs(a,b,c)
-#define queue_task            queue_task_irq_off
-#else
-#define Get_user(a,b)         get_user(a,b)
-#endif
-
-/* ************************************************************** */
-/* *                End of compatibility section..              * */
-/* ************************************************************** */
-
-
-#ifndef TWO_ZERO
 #include <asm/uaccess.h>
-#endif
 
 #include "specialix_io8.h"
 #include "cd1865.h"
@@ -172,19 +138,10 @@
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 #endif
 
-DECLARE_TASK_QUEUE(tq_specialix);
-
 #undef RS_EVENT_WRITE_WAKEUP
 #define RS_EVENT_WRITE_WAKEUP	0
 
-#define SPECIALIX_TYPE_NORMAL	1
-#define SPECIALIX_TYPE_CALLOUT	2
-
-static struct tty_driver specialix_driver, specialix_callout_driver;
-static int    specialix_refcount;
-static struct tty_struct * specialix_table[SX_NBOARD * SX_NPORT];
-static struct termios * specialix_termios[SX_NBOARD * SX_NPORT];
-static struct termios * specialix_termios_locked[SX_NBOARD * SX_NPORT];
+static struct tty_driver *specialix_driver;
 static unsigned char * tmp_buf;
 static DECLARE_MUTEX(tmp_buf_sem);
 
@@ -205,13 +162,13 @@ static struct specialix_port sx_port[SX_NBOARD * SX_NPORT];
 
 #ifdef SPECIALIX_TIMER
 static struct timer_list missed_irq_timer;
-static void sx_interrupt(int irq, void * dev_id, struct pt_regs * regs);
+static irqreturn_t sx_interrupt(int irq, void * dev_id, struct pt_regs * regs);
 #endif
 
 
 
 static inline int sx_paranoia_check(struct specialix_port const * port,
-				    kdev_t device, const char *routine)
+				    char *name, const char *routine)
 {
 #ifdef SPECIALIX_PARANOIA_CHECK
 	static const char *badmagic =
@@ -220,11 +177,11 @@ static inline int sx_paranoia_check(struct specialix_port const * port,
 		KERN_ERR "sx: Warning: null specialix port for device %s in %s\n";
  
 	if (!port) {
-		printk(badinfo, kdevname(device), routine);
+		printk(badinfo, name, routine);
 		return 1;
 	}
 	if (port->magic != SPECIALIX_MAGIC) {
-		printk(badmagic, kdevname(device), routine);
+		printk(badmagic, name, routine);
 		return 1;
 	}
 #endif
@@ -239,28 +196,28 @@ static inline int sx_paranoia_check(struct specialix_port const * port,
  */
 
 /* Get board number from pointer */
-extern inline int board_No (struct specialix_board * bp)
+static inline int board_No (struct specialix_board * bp)
 {
 	return bp - sx_board;
 }
 
 
 /* Get port number from pointer */
-extern inline int port_No (struct specialix_port const * port)
+static inline int port_No (struct specialix_port const * port)
 {
 	return SX_PORT(port - sx_port); 
 }
 
 
 /* Get pointer to board from pointer to port */
-extern inline struct specialix_board * port_Board(struct specialix_port const * port)
+static inline struct specialix_board * port_Board(struct specialix_port const * port)
 {
 	return &sx_board[SX_BOARD(port - sx_port)];
 }
 
 
 /* Input Byte from CL CD186x register */
-extern inline unsigned char sx_in(struct specialix_board  * bp, unsigned short reg)
+static inline unsigned char sx_in(struct specialix_board  * bp, unsigned short reg)
 {
 	bp->reg = reg | 0x80;
 	outb (reg | 0x80, bp->base + SX_ADDR_REG);
@@ -269,7 +226,7 @@ extern inline unsigned char sx_in(struct specialix_board  * bp, unsigned short r
 
 
 /* Output Byte to CL CD186x register */
-extern inline void sx_out(struct specialix_board  * bp, unsigned short reg,
+static inline void sx_out(struct specialix_board  * bp, unsigned short reg,
 			  unsigned char val)
 {
 	bp->reg = reg | 0x80;
@@ -279,7 +236,7 @@ extern inline void sx_out(struct specialix_board  * bp, unsigned short reg,
 
 
 /* Input Byte from CL CD186x register */
-extern inline unsigned char sx_in_off(struct specialix_board  * bp, unsigned short reg)
+static inline unsigned char sx_in_off(struct specialix_board  * bp, unsigned short reg)
 {
 	bp->reg = reg;
 	outb (reg, bp->base + SX_ADDR_REG);
@@ -288,7 +245,7 @@ extern inline unsigned char sx_in_off(struct specialix_board  * bp, unsigned sho
 
 
 /* Output Byte to CL CD186x register */
-extern inline void sx_out_off(struct specialix_board  * bp, unsigned short reg,
+static inline void sx_out_off(struct specialix_board  * bp, unsigned short reg,
 			  unsigned char val)
 {
 	bp->reg = reg;
@@ -298,7 +255,7 @@ extern inline void sx_out_off(struct specialix_board  * bp, unsigned short reg,
 
 
 /* Wait for Channel Command Register ready */
-extern inline void sx_wait_CCR(struct specialix_board  * bp)
+static inline void sx_wait_CCR(struct specialix_board  * bp)
 {
 	unsigned long delay;
 
@@ -311,7 +268,7 @@ extern inline void sx_wait_CCR(struct specialix_board  * bp)
 
 
 /* Wait for Channel Command Register ready */
-extern inline void sx_wait_CCR_off(struct specialix_board  * bp)
+static inline void sx_wait_CCR_off(struct specialix_board  * bp)
 {
 	unsigned long delay;
 
@@ -327,13 +284,13 @@ extern inline void sx_wait_CCR_off(struct specialix_board  * bp)
  *  specialix IO8+ IO range functions.
  */
 
-extern inline int sx_check_io_range(struct specialix_board * bp)
+static inline int sx_check_io_range(struct specialix_board * bp)
 {
 	return check_region (bp->base, SX_IO_SPACE);
 }
 
 
-extern inline void sx_request_io_range(struct specialix_board * bp)
+static inline void sx_request_io_range(struct specialix_board * bp)
 {
 	request_region(bp->base, 
 	               bp->flags&SX_BOARD_IS_PCI?SX_PCI_IO_SPACE:SX_IO_SPACE,
@@ -341,7 +298,7 @@ extern inline void sx_request_io_range(struct specialix_board * bp)
 }
 
 
-extern inline void sx_release_io_range(struct specialix_board * bp)
+static inline void sx_release_io_range(struct specialix_board * bp)
 {
 	release_region(bp->base, 
 	               bp->flags&SX_BOARD_IS_PCI?SX_PCI_IO_SPACE:SX_IO_SPACE);
@@ -351,7 +308,7 @@ extern inline void sx_release_io_range(struct specialix_board * bp)
 /* Must be called with enabled interrupts */
 /* Ugly. Very ugly. Don't use this for anything else than initialization 
    code */
-extern inline void sx_long_delay(unsigned long delay)
+static inline void sx_long_delay(unsigned long delay)
 {
 	unsigned long i;
 	
@@ -599,24 +556,14 @@ static int sx_probe(struct specialix_board *bp)
  *  Interrupt processing routines.
  * */
 
-extern inline void sx_mark_event(struct specialix_port * port, int event)
+static inline void sx_mark_event(struct specialix_port * port, int event)
 {
-	/* 
-	 * I'm not quite happy with current scheme all serial
-	 * drivers use their own BH routine.
-	 * It seems this easily can be done with one BH routine
-	 * serving for all serial drivers.
-	 * For now I must introduce another one - SPECIALIX_BH.
-	 * Still hope this will be changed in near future.
-	 * -- Dmitry.
-	 */
 	set_bit(event, &port->event);
-	queue_task(&port->tqueue, &tq_specialix);
-	mark_bh(SPECIALIX_BH);
+	schedule_work(&port->tqueue);
 }
 
 
-extern inline struct specialix_port * sx_get_port(struct specialix_board * bp,
+static inline struct specialix_port * sx_get_port(struct specialix_board * bp,
 					       unsigned char const * what)
 {
 	unsigned char channel;
@@ -635,7 +582,7 @@ extern inline struct specialix_port * sx_get_port(struct specialix_board * bp,
 }
 
 
-extern inline void sx_receive_exc(struct specialix_board * bp)
+static inline void sx_receive_exc(struct specialix_board * bp)
 {
 	struct specialix_port *port;
 	struct tty_struct *tty;
@@ -697,11 +644,11 @@ extern inline void sx_receive_exc(struct specialix_board * bp)
 	
 	*tty->flip.char_buf_ptr++ = ch;
 	tty->flip.count++;
-	queue_task(&tty->flip.tqueue, &tq_timer);
+	schedule_delayed_work(&tty->flip.work, 1);
 }
 
 
-extern inline void sx_receive(struct specialix_board * bp)
+static inline void sx_receive(struct specialix_board * bp)
 {
 	struct specialix_port *port;
 	struct tty_struct *tty;
@@ -728,11 +675,11 @@ extern inline void sx_receive(struct specialix_board * bp)
 		*tty->flip.flag_buf_ptr++ = 0;
 		tty->flip.count++;
 	}
-	queue_task(&tty->flip.tqueue, &tq_timer);
+	schedule_delayed_work(&tty->flip.work, 1);
 }
 
 
-extern inline void sx_transmit(struct specialix_board * bp)
+static inline void sx_transmit(struct specialix_board * bp)
 {
 	struct specialix_port *port;
 	struct tty_struct *tty;
@@ -802,7 +749,7 @@ extern inline void sx_transmit(struct specialix_board * bp)
 }
 
 
-extern inline void sx_check_modem(struct specialix_board * bp)
+static inline void sx_check_modem(struct specialix_board * bp)
 {
 	struct specialix_port *port;
 	struct tty_struct *tty;
@@ -828,19 +775,11 @@ extern inline void sx_check_modem(struct specialix_board * bp)
 			printk ( "Waking up guys in open.\n");
 #endif
 			wake_up_interruptible(&port->open_wait);
-		}
-		else if (!((port->flags & ASYNC_CALLOUT_ACTIVE) &&
-		           (port->flags & ASYNC_CALLOUT_NOHUP))) {
+		} else {
 #ifdef SPECIALIX_DEBUG
 			printk ( "Sending HUP.\n");
 #endif
-			MOD_INC_USE_COUNT;
-			if (schedule_task(&port->tqueue_hangup) == 0)
-				MOD_DEC_USE_COUNT;
-		} else {
-#ifdef SPECIALIX_DEBUG
-			printk ( "Don't need to send HUP.\n");
-#endif
+			schedule_work(&port->tqueue_hangup);
 		}
 	}
 	
@@ -877,7 +816,7 @@ extern inline void sx_check_modem(struct specialix_board * bp)
 
 
 /* The main interrupt processing routine */
-static void sx_interrupt(int irq, void * dev_id, struct pt_regs * regs)
+static irqreturn_t sx_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	unsigned char status;
 	unsigned char ack;
@@ -891,7 +830,7 @@ static void sx_interrupt(int irq, void * dev_id, struct pt_regs * regs)
 #ifdef SPECIALIX_DEBUG 
 		printk (KERN_DEBUG "sx: False interrupt. irq %d.\n", irq);
 #endif
-		return;
+		return IRQ_NONE;
 	}
 
 	saved_reg = bp->reg;
@@ -934,6 +873,7 @@ static void sx_interrupt(int irq, void * dev_id, struct pt_regs * regs)
 	}
 	bp->reg = saved_reg;
 	outb (bp->reg, bp->base + SX_ADDR_REG);
+	return IRQ_HANDLED;
 }
 
 
@@ -962,7 +902,7 @@ void turn_ints_on (struct specialix_board *bp)
 
 
 /* Called with disabled interrupts */
-extern inline int sx_setup_board(struct specialix_board * bp)
+static inline int sx_setup_board(struct specialix_board * bp)
 {
 	int error;
 
@@ -980,13 +920,12 @@ extern inline int sx_setup_board(struct specialix_board * bp)
 	turn_ints_on (bp);
 	bp->flags |= SX_BOARD_ACTIVE;
 
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 
 /* Called with disabled interrupts */
-extern inline void sx_shutdown_board(struct specialix_board *bp)
+static inline void sx_shutdown_board(struct specialix_board *bp)
 {
 	if (!(bp->flags & SX_BOARD_ACTIVE))
 		return;
@@ -1000,7 +939,6 @@ extern inline void sx_shutdown_board(struct specialix_board *bp)
 
 	turn_ints_off (bp);
 
-	MOD_DEC_USE_COUNT;
 }
 
 
@@ -1015,7 +953,7 @@ static void sx_change_speed(struct specialix_board *bp, struct specialix_port *p
 	long tmp;
 	unsigned char cor1 = 0, cor3 = 0;
 	unsigned char mcor1 = 0, mcor2 = 0;
-	static int again;
+	static unsigned long again;
 	
 	if (!(tty = port->tty) || !tty->termios)
 		return;
@@ -1232,10 +1170,10 @@ static int sx_setup_port(struct specialix_board *bp, struct specialix_port *port
 		return 0;
 	
 	if (!port->xmit_buf) {
-		/* We may sleep in get_free_page() */
+		/* We may sleep in get_zeroed_page() */
 		unsigned long tmp;
 		
-		if (!(tmp = get_free_page(GFP_KERNEL)))
+		if (!(tmp = get_zeroed_page(GFP_KERNEL)))
 			return -ENOMEM;
 
 		if (port->xmit_buf) {
@@ -1345,25 +1283,6 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 		else
 			return -ERESTARTSYS;
 	}
-
-	/*
-	 * If this is a callout device, then just make sure the normal
-	 * device isn't being used.
-	 */
-	if (tty->driver.subtype == SPECIALIX_TYPE_CALLOUT) {
-		if (port->flags & ASYNC_NORMAL_ACTIVE)
-			return -EBUSY;
-		if ((port->flags & ASYNC_CALLOUT_ACTIVE) &&
-		    (port->flags & ASYNC_SESSION_LOCKOUT) &&
-		    (port->session != current->session))
-			return -EBUSY;
-		if ((port->flags & ASYNC_CALLOUT_ACTIVE) &&
-		    (port->flags & ASYNC_PGRP_LOCKOUT) &&
-		    (port->pgrp != current->pgrp))
-			return -EBUSY;
-		port->flags |= ASYNC_CALLOUT_ACTIVE;
-		return 0;
-	}
 	
 	/*
 	 * If non-blocking mode is set, or the port is not enabled,
@@ -1371,20 +1290,13 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 	 */
 	if ((filp->f_flags & O_NONBLOCK) ||
 	    (tty->flags & (1 << TTY_IO_ERROR))) {
-		if (port->flags & ASYNC_CALLOUT_ACTIVE)
-			return -EBUSY;
 		port->flags |= ASYNC_NORMAL_ACTIVE;
 		return 0;
 	}
 
-	if (port->flags & ASYNC_CALLOUT_ACTIVE) {
-		if (port->normal_termios.c_cflag & CLOCAL) 
-			do_clocal = 1;
-	} else {
-		if (C_CLOCAL(tty))
-			do_clocal = 1;
-	}
-	
+	if (C_CLOCAL(tty))
+		do_clocal = 1;
+
 	/*
 	 * Block waiting for the carrier detect and the line to become
 	 * free (i.e., not in use by the callout).  While we are in
@@ -1403,17 +1315,15 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 		cli();
 		sx_out(bp, CD186x_CAR, port_No(port));
 		CD = sx_in(bp, CD186x_MSVR) & MSVR_CD;
-		if (!(port->flags & ASYNC_CALLOUT_ACTIVE)) {
-			if (SX_CRTSCTS (tty)) {
-				/* Activate RTS */
-				port->MSVR |= MSVR_DTR;
-				sx_out (bp, CD186x_MSVR, port->MSVR);
-			} else {
-				/* Activate DTR */
-				port->MSVR |= MSVR_DTR;
-				sx_out (bp, CD186x_MSVR, port->MSVR);
-			} 
-		}
+		if (SX_CRTSCTS (tty)) {
+			/* Activate RTS */
+			port->MSVR |= MSVR_DTR;		/* WTF? */
+			sx_out (bp, CD186x_MSVR, port->MSVR);
+		} else {
+			/* Activate DTR */
+			port->MSVR |= MSVR_DTR;
+			sx_out (bp, CD186x_MSVR, port->MSVR);
+		} 
 		sti();
 		set_current_state(TASK_INTERRUPTIBLE);
 		if (tty_hung_up_p(filp) ||
@@ -1424,8 +1334,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 				retval = -ERESTARTSYS;	
 			break;
 		}
-		if (!(port->flags & ASYNC_CALLOUT_ACTIVE) &&
-		    !(port->flags & ASYNC_CLOSING) &&
+		if (!(port->flags & ASYNC_CLOSING) &&
 		    (do_clocal || CD))
 			break;
 		if (signal_pending(current)) {
@@ -1453,22 +1362,21 @@ static int sx_open(struct tty_struct * tty, struct file * filp)
 	int error;
 	struct specialix_port * port;
 	struct specialix_board * bp;
-	unsigned long flags;
 	
-	board = SX_BOARD(MINOR(tty->device));
+	board = SX_BOARD(tty->index);
 
-	if (board > SX_NBOARD || !(sx_board[board].flags & SX_BOARD_PRESENT))
+	if (board >= SX_NBOARD || !(sx_board[board].flags & SX_BOARD_PRESENT))
 		return -ENODEV;
 	
 	bp = &sx_board[board];
-	port = sx_port + board * SX_NPORT + SX_PORT(MINOR(tty->device));
+	port = sx_port + board * SX_NPORT + SX_PORT(tty->index);
 
 #ifdef DEBUG_SPECIALIX
 	printk (KERN_DEBUG "Board = %d, bp = %p, port = %p, portno = %d.\n", 
-	        board, bp, port, SX_PORT(MINOR(tty->device)));
+	        board, bp, port, SX_PORT(tty->index));
 #endif
 
-	if (sx_paranoia_check(port, tty->device, "sx_open"))
+	if (sx_paranoia_check(port, tty->name, "sx_open"))
 		return -ENODEV;
 
 	if ((error = sx_setup_board(bp)))
@@ -1484,18 +1392,6 @@ static int sx_open(struct tty_struct * tty, struct file * filp)
 	if ((error = block_til_ready(tty, filp, port)))
 		return error;
 
-	if ((port->count == 1) && (port->flags & ASYNC_SPLIT_TERMIOS)) {
-		if (tty->driver.subtype == SPECIALIX_TYPE_NORMAL)
-			*tty->termios = port->normal_termios;
-		else
-			*tty->termios = port->callout_termios;
-		save_flags(flags); cli();
-		sx_change_speed(bp, port);
-		restore_flags(flags);
-	}
-
-	port->session = current->session;
-	port->pgrp = current->pgrp;
 	return 0;
 }
 
@@ -1507,7 +1403,7 @@ static void sx_close(struct tty_struct * tty, struct file * filp)
 	unsigned long flags;
 	unsigned long timeout;
 	
-	if (!port || sx_paranoia_check(port, tty->device, "close"))
+	if (!port || sx_paranoia_check(port, tty->name, "close"))
 		return;
 	
 	save_flags(flags); cli();
@@ -1533,14 +1429,6 @@ static void sx_close(struct tty_struct * tty, struct file * filp)
 		return;
 	}
 	port->flags |= ASYNC_CLOSING;
-	/*
-	 * Save the termios structure, since this port may have
-	 * separate termios for callout and dialin.
-	 */
-	if (port->flags & ASYNC_NORMAL_ACTIVE)
-		port->normal_termios = *tty->termios;
-	if (port->flags & ASYNC_CALLOUT_ACTIVE)
-		port->callout_termios = *tty->termios;
 	/*
 	 * Now we wait for the transmit buffer to clear; and we notify 
 	 * the line discipline to only process XON/XOFF characters.
@@ -1577,8 +1465,8 @@ static void sx_close(struct tty_struct * tty, struct file * filp)
 
 	}
 	sx_shutdown_port(bp, port);
-	if (tty->driver.flush_buffer)
-		tty->driver.flush_buffer(tty);
+	if (tty->driver->flush_buffer)
+		tty->driver->flush_buffer(tty);
 	if (tty->ldisc.flush_buffer)
 		tty->ldisc.flush_buffer(tty);
 	tty->closing = 0;
@@ -1591,8 +1479,7 @@ static void sx_close(struct tty_struct * tty, struct file * filp)
 		}
 		wake_up_interruptible(&port->open_wait);
 	}
-	port->flags &= ~(ASYNC_NORMAL_ACTIVE|ASYNC_CALLOUT_ACTIVE|
-			 ASYNC_CLOSING);
+	port->flags &= ~(ASYNC_NORMAL_ACTIVE|ASYNC_CLOSING);
 	wake_up_interruptible(&port->close_wait);
 	restore_flags(flags);
 }
@@ -1606,7 +1493,7 @@ static int sx_write(struct tty_struct * tty, int from_user,
 	int c, total = 0;
 	unsigned long flags;
 				
-	if (sx_paranoia_check(port, tty->device, "sx_write"))
+	if (sx_paranoia_check(port, tty->name, "sx_write"))
 		return 0;
 	
 	bp = port_Board(port);
@@ -1680,7 +1567,7 @@ static void sx_put_char(struct tty_struct * tty, unsigned char ch)
 	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
 	unsigned long flags;
 
-	if (sx_paranoia_check(port, tty->device, "sx_put_char"))
+	if (sx_paranoia_check(port, tty->name, "sx_put_char"))
 		return;
 
 	if (!tty || !port->xmit_buf)
@@ -1705,7 +1592,7 @@ static void sx_flush_chars(struct tty_struct * tty)
 	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
 	unsigned long flags;
 				
-	if (sx_paranoia_check(port, tty->device, "sx_flush_chars"))
+	if (sx_paranoia_check(port, tty->name, "sx_flush_chars"))
 		return;
 	
 	if (port->xmit_cnt <= 0 || tty->stopped || tty->hw_stopped ||
@@ -1725,7 +1612,7 @@ static int sx_write_room(struct tty_struct * tty)
 	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
 	int	ret;
 				
-	if (sx_paranoia_check(port, tty->device, "sx_write_room"))
+	if (sx_paranoia_check(port, tty->name, "sx_write_room"))
 		return 0;
 
 	ret = SERIAL_XMIT_SIZE - port->xmit_cnt - 1;
@@ -1739,7 +1626,7 @@ static int sx_chars_in_buffer(struct tty_struct *tty)
 {
 	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
 				
-	if (sx_paranoia_check(port, tty->device, "sx_chars_in_buffer"))
+	if (sx_paranoia_check(port, tty->name, "sx_chars_in_buffer"))
 		return 0;
 	
 	return port->xmit_cnt;
@@ -1751,7 +1638,7 @@ static void sx_flush_buffer(struct tty_struct *tty)
 	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
 	unsigned long flags;
 				
-	if (sx_paranoia_check(port, tty->device, "sx_flush_buffer"))
+	if (sx_paranoia_check(port, tty->name, "sx_flush_buffer"))
 		return;
 
 	save_flags(flags); cli();
@@ -1812,7 +1699,7 @@ static int sx_set_modem_info(struct specialix_port * port, unsigned int cmd,
 	if (error) 
 		return error;
 
-	Get_user(arg, (unsigned long *) value);
+	get_user(arg, (unsigned long *) value);
 	switch (cmd) {
 	case TIOCMBIS: 
 	   /*	if (arg & TIOCM_RTS) 
@@ -1867,7 +1754,7 @@ static int sx_set_modem_info(struct specialix_port * port, unsigned int cmd,
 }
 
 
-extern inline void sx_send_break(struct specialix_port * port, unsigned long length)
+static inline void sx_send_break(struct specialix_port * port, unsigned long length)
 {
 	struct specialix_board *bp = port_Board(port);
 	unsigned long flags;
@@ -1886,7 +1773,7 @@ extern inline void sx_send_break(struct specialix_port * port, unsigned long len
 }
 
 
-extern inline int sx_set_serial_info(struct specialix_port * port,
+static inline int sx_set_serial_info(struct specialix_port * port,
                                      struct serial_struct * newinfo)
 {
 	struct serial_struct tmp;
@@ -1942,7 +1829,7 @@ extern inline int sx_set_serial_info(struct specialix_port * port,
 }
 
 
-extern inline int sx_get_serial_info(struct specialix_port * port,
+static inline int sx_get_serial_info(struct specialix_port * port,
 				     struct serial_struct * retinfo)
 {
 	struct serial_struct tmp;
@@ -1977,7 +1864,7 @@ static int sx_ioctl(struct tty_struct * tty, struct file * filp,
 	int error;
 	int retval;
 				
-	if (sx_paranoia_check(port, tty->device, "sx_ioctl"))
+	if (sx_paranoia_check(port, tty->name, "sx_ioctl"))
 		return -ENODEV;
 	
 	switch (cmd) {
@@ -2004,7 +1891,7 @@ static int sx_ioctl(struct tty_struct * tty, struct file * filp,
 		         (unsigned long *) arg);
 		return 0;
 	 case TIOCSSOFTCAR:
-		Get_user(arg, (unsigned long *) arg);
+		get_user(arg, (unsigned long *) arg);
 		tty->termios->c_cflag =
 			((tty->termios->c_cflag & ~CLOCAL) |
 			(arg ? CLOCAL : 0));
@@ -2036,7 +1923,7 @@ static void sx_throttle(struct tty_struct * tty)
 	struct specialix_board *bp;
 	unsigned long flags;
 				
-	if (sx_paranoia_check(port, tty->device, "sx_throttle"))
+	if (sx_paranoia_check(port, tty->name, "sx_throttle"))
 		return;
 	
 	bp = port_Board(port);
@@ -2071,7 +1958,7 @@ static void sx_unthrottle(struct tty_struct * tty)
 	struct specialix_board *bp;
 	unsigned long flags;
 				
-	if (sx_paranoia_check(port, tty->device, "sx_unthrottle"))
+	if (sx_paranoia_check(port, tty->name, "sx_unthrottle"))
 		return;
 	
 	bp = port_Board(port);
@@ -2099,7 +1986,7 @@ static void sx_stop(struct tty_struct * tty)
 	struct specialix_board *bp;
 	unsigned long flags;
 				
-	if (sx_paranoia_check(port, tty->device, "sx_stop"))
+	if (sx_paranoia_check(port, tty->name, "sx_stop"))
 		return;
 	
 	bp = port_Board(port);
@@ -2118,7 +2005,7 @@ static void sx_start(struct tty_struct * tty)
 	struct specialix_board *bp;
 	unsigned long flags;
 				
-	if (sx_paranoia_check(port, tty->device, "sx_start"))
+	if (sx_paranoia_check(port, tty->name, "sx_start"))
 		return;
 	
 	bp = port_Board(port);
@@ -2134,11 +2021,11 @@ static void sx_start(struct tty_struct * tty)
 
 
 /*
- * This routine is called from the scheduler tqueue when the interrupt
+ * This routine is called from the work-queue when the interrupt
  * routine has signalled that a hangup has occurred.  The path of
  * hangup processing is:
  *
- * 	serial interrupt routine -> (scheduler tqueue) ->
+ * 	serial interrupt routine -> (workqueue) ->
  * 	do_sx_hangup() -> tty->hangup() -> sx_hangup()
  * 
  */
@@ -2150,7 +2037,6 @@ static void do_sx_hangup(void *private_)
 	tty = port->tty;
 	if (tty)
 		tty_hangup(tty);	/* FIXME: module removal race here */
-	MOD_DEC_USE_COUNT;
 }
 
 
@@ -2159,7 +2045,7 @@ static void sx_hangup(struct tty_struct * tty)
 	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
 	struct specialix_board *bp;
 				
-	if (sx_paranoia_check(port, tty->device, "sx_hangup"))
+	if (sx_paranoia_check(port, tty->name, "sx_hangup"))
 		return;
 	
 	bp = port_Board(port);
@@ -2167,7 +2053,7 @@ static void sx_hangup(struct tty_struct * tty)
 	sx_shutdown_port(bp, port);
 	port->event = 0;
 	port->count = 0;
-	port->flags &= ~(ASYNC_NORMAL_ACTIVE|ASYNC_CALLOUT_ACTIVE);
+	port->flags &= ~ASYNC_NORMAL_ACTIVE;
 	port->tty = 0;
 	wake_up_interruptible(&port->open_wait);
 }
@@ -2178,7 +2064,7 @@ static void sx_set_termios(struct tty_struct * tty, struct termios * old_termios
 	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
 	unsigned long flags;
 				
-	if (sx_paranoia_check(port, tty->device, "sx_set_termios"))
+	if (sx_paranoia_check(port, tty->name, "sx_set_termios"))
 		return;
 	
 	if (tty->termios->c_cflag == old_termios->c_cflag &&
@@ -2194,12 +2080,6 @@ static void sx_set_termios(struct tty_struct * tty, struct termios * old_termios
 		tty->hw_stopped = 0;
 		sx_start(tty);
 	}
-}
-
-
-static void do_specialix_bh(void)
-{
-	 run_task_queue(&tq_specialix);
 }
 
 
@@ -2219,78 +2099,63 @@ static void do_softint(void *private_)
 	}
 }
 
+static struct tty_operations sx_ops = {
+	.open  = sx_open,
+	.close = sx_close,
+	.write = sx_write,
+	.put_char = sx_put_char,
+	.flush_chars = sx_flush_chars,
+	.write_room = sx_write_room,
+	.chars_in_buffer = sx_chars_in_buffer,
+	.flush_buffer = sx_flush_buffer,
+	.ioctl = sx_ioctl,
+	.throttle = sx_throttle,
+	.unthrottle = sx_unthrottle,
+	.set_termios = sx_set_termios,
+	.stop = sx_stop,
+	.start = sx_start,
+	.hangup = sx_hangup,
+};
 
 static int sx_init_drivers(void)
 {
 	int error;
 	int i;
 
-	
-	if (!(tmp_buf = (unsigned char *) get_free_page(GFP_KERNEL))) {
-		printk(KERN_ERR "sx: Couldn't get free page.\n");
+	specialix_driver = alloc_tty_driver(SX_NBOARD * SX_NPORT);
+	if (!specialix_driver) {
+		printk(KERN_ERR "sx: Couldn't allocate tty_driver.\n");
 		return 1;
 	}
-	init_bh(SPECIALIX_BH, do_specialix_bh);
-	memset(&specialix_driver, 0, sizeof(specialix_driver));
-	specialix_driver.magic = TTY_DRIVER_MAGIC;
-	specialix_driver.name = "ttyW";
-	specialix_driver.major = SPECIALIX_NORMAL_MAJOR;
-	specialix_driver.num = SX_NBOARD * SX_NPORT;
-	specialix_driver.type = TTY_DRIVER_TYPE_SERIAL;
-	specialix_driver.subtype = SPECIALIX_TYPE_NORMAL;
-	specialix_driver.init_termios = tty_std_termios;
-	specialix_driver.init_termios.c_cflag =
-		B9600 | CS8 | CREAD | HUPCL | CLOCAL;
-	specialix_driver.flags = TTY_DRIVER_REAL_RAW;
-	specialix_driver.refcount = &specialix_refcount;
-	specialix_driver.table = specialix_table;
-	specialix_driver.termios = specialix_termios;
-	specialix_driver.termios_locked = specialix_termios_locked;
-
-	specialix_driver.open  = sx_open;
-	specialix_driver.close = sx_close;
-	specialix_driver.write = sx_write;
-	specialix_driver.put_char = sx_put_char;
-	specialix_driver.flush_chars = sx_flush_chars;
-	specialix_driver.write_room = sx_write_room;
-	specialix_driver.chars_in_buffer = sx_chars_in_buffer;
-	specialix_driver.flush_buffer = sx_flush_buffer;
-	specialix_driver.ioctl = sx_ioctl;
-	specialix_driver.throttle = sx_throttle;
-	specialix_driver.unthrottle = sx_unthrottle;
-	specialix_driver.set_termios = sx_set_termios;
-	specialix_driver.stop = sx_stop;
-	specialix_driver.start = sx_start;
-	specialix_driver.hangup = sx_hangup;
-
-	specialix_callout_driver = specialix_driver;
-	specialix_callout_driver.name = "cuw";
-	specialix_callout_driver.major = SPECIALIX_CALLOUT_MAJOR;
-	specialix_callout_driver.subtype = SPECIALIX_TYPE_CALLOUT;
 	
-	if ((error = tty_register_driver(&specialix_driver))) {
+	if (!(tmp_buf = (unsigned char *) get_zeroed_page(GFP_KERNEL))) {
+		printk(KERN_ERR "sx: Couldn't get free page.\n");
+		put_tty_driver(specialix_driver);
+		return 1;
+	}
+	specialix_driver->owner = THIS_MODULE;
+	specialix_driver->name = "ttyW";
+	specialix_driver->major = SPECIALIX_NORMAL_MAJOR;
+	specialix_driver->type = TTY_DRIVER_TYPE_SERIAL;
+	specialix_driver->subtype = SERIAL_TYPE_NORMAL;
+	specialix_driver->init_termios = tty_std_termios;
+	specialix_driver->init_termios.c_cflag =
+		B9600 | CS8 | CREAD | HUPCL | CLOCAL;
+	specialix_driver->flags = TTY_DRIVER_REAL_RAW;
+	tty_set_operations(specialix_driver, &sx_ops);
+
+	if ((error = tty_register_driver(specialix_driver))) {
+		put_tty_driver(specialix_driver);
 		free_page((unsigned long)tmp_buf);
 		printk(KERN_ERR "sx: Couldn't register specialix IO8+ driver, error = %d\n",
 		       error);
 		return 1;
 	}
-	if ((error = tty_register_driver(&specialix_callout_driver))) {
-		free_page((unsigned long)tmp_buf);
-		tty_unregister_driver(&specialix_driver);
-		printk(KERN_ERR "sx: Couldn't register specialix IO8+ callout driver, error = %d\n",
-		       error);
-		return 1;
-	}
-	
 	memset(sx_port, 0, sizeof(sx_port));
 	for (i = 0; i < SX_NPORT * SX_NBOARD; i++) {
-		sx_port[i].callout_termios = specialix_callout_driver.init_termios;
-		sx_port[i].normal_termios  = specialix_driver.init_termios;
 		sx_port[i].magic = SPECIALIX_MAGIC;
-		sx_port[i].tqueue.routine = do_softint;
-		sx_port[i].tqueue.data = &sx_port[i];
-		sx_port[i].tqueue_hangup.routine = do_sx_hangup;
-		sx_port[i].tqueue_hangup.data = &sx_port[i];
+		INIT_WORK(&sx_port[i].tqueue, do_softint, &sx_port[i]);
+		INIT_WORK(&sx_port[i].tqueue_hangup, do_sx_hangup, &sx_port[i]);
 		sx_port[i].close_delay = 50 * HZ/100;
 		sx_port[i].closing_wait = 3000 * HZ/100;
 		init_waitqueue_head(&sx_port[i].open_wait);
@@ -2304,8 +2169,8 @@ static int sx_init_drivers(void)
 static void sx_release_drivers(void)
 {
 	free_page((unsigned long)tmp_buf);
-	tty_unregister_driver(&specialix_driver);
-	tty_unregister_driver(&specialix_callout_driver);
+	tty_unregister_driver(specialix_driver);
+	put_tty_driver(specialix_driver);
 }
 
 
@@ -2339,7 +2204,7 @@ void specialix_setup(char *str, int * ints)
 /* 
  * This routine must be called by kernel at boot time 
  */
-int specialix_init(void) 
+static int __init specialix_init(void)
 {
 	int i;
 	int found = 0;
@@ -2360,11 +2225,11 @@ int specialix_init(void)
 			found++;
 
 #ifdef CONFIG_PCI
-	if (pci_present()) {
+	{
 		struct pci_dev *pdev = NULL;
 
 		i=0;
-		while (i <= SX_NBOARD) {
+		while (i < SX_NBOARD) {
 			if (sx_board[i].flags & SX_BOARD_PRESENT) {
 				i++;
 				continue;
@@ -2397,7 +2262,6 @@ int specialix_init(void)
 	return 0;
 }
 
-#ifdef MODULE
 int iobase[SX_NBOARD]  = {0,};
 
 int irq [SX_NBOARD] = {0,};
@@ -2414,7 +2278,7 @@ MODULE_PARM(irq,"1-" __MODULE_STRING(SX_NBOARD) "i");
  * only use 4 different interrupts. 
  *
  */
-int init_module(void) 
+static int __init specialix_init_module(void)
 {
 	int i;
 
@@ -2428,8 +2292,7 @@ int init_module(void)
 	return specialix_init();
 }
 	
-
-void cleanup_module(void)
+static void __exit specialix_exit_module(void)
 {
 	int i;
 	
@@ -2442,6 +2305,8 @@ void cleanup_module(void)
 #endif
 	
 }
-#endif /* MODULE */
+
+module_init(specialix_init_module);
+module_exit(specialix_exit_module);
 
 MODULE_LICENSE("GPL");

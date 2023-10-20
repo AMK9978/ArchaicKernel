@@ -1,4 +1,4 @@
-/*  $Id: setup.c,v 1.71 2001/11/13 00:49:28 davem Exp $
+/*  $Id: setup.c,v 1.72 2002/02/09 19:49:30 davem Exp $
  *  linux/arch/sparc64/kernel/setup.c
  *
  *  Copyright (C) 1995,1996  David S. Miller (davem@caip.rutgers.edu)
@@ -24,10 +24,13 @@
 #include <linux/kdev_t.h>
 #include <linux/major.h>
 #include <linux/string.h>
-#include <linux/blk.h>
 #include <linux/init.h>
 #include <linux/inet.h>
 #include <linux/console.h>
+#include <linux/root_dev.h>
+#include <linux/interrupt.h>
+#include <linux/cpu.h>
+#include <linux/initrd.h>
 
 #include <asm/segment.h>
 #include <asm/system.h>
@@ -40,6 +43,8 @@
 #include <asm/head.h>
 #include <asm/starfire.h>
 #include <asm/hardirq.h>
+#include <asm/mmu_context.h>
+#include <asm/timer.h>
 
 #ifdef CONFIG_IP_PNP
 #include <net/ipconfig.h>
@@ -63,23 +68,21 @@ struct screen_info screen_info = {
  * prints out pretty messages and returns.
  */
 
-#if CONFIG_SUN_CONSOLE
 void (*prom_palette)(int);
-#endif
 void (*prom_keyboard)(void);
 asmlinkage void sys_sync(void);	/* it's really int */
 
 static void
 prom_console_write(struct console *con, const char *s, unsigned n)
 {
-	prom_printf("%s", s);
+	prom_write(s, n);
 }
 
 static struct console prom_console = {
-	name:		"prom",
-	write:		prom_console_write,
-	flags:		CON_CONSDEV | CON_ENABLED,
-	index:		-1,
+	.name =		"prom",
+	.write =	prom_console_write,
+	.flags =	CON_CONSDEV | CON_ENABLED,
+	.index =	-1,
 };
 
 #define PROM_TRUE	-1
@@ -105,8 +108,13 @@ int prom_callback(long *args)
 	 * administrator has done a switch-cpu inside obp. In either 
 	 * case, the cpu is marked as in-interrupt. Drop IRQ locks.
 	 */
-	irq_exit(smp_processor_id(), 0);
-	save_and_cli(flags);
+	irq_exit();
+
+	/* XXX Revisit the locking here someday.  This is a debugging
+	 * XXX feature so it isnt all that critical.  -DaveM
+	 */
+	local_irq_save(flags);
+
 	spin_unlock(&prom_entry_lock);
 	cons = console_drivers;
 	while (cons) {
@@ -120,10 +128,10 @@ int prom_callback(long *args)
 	if (!strcmp(cmd, "sync")) {
 		prom_printf("PROM `%s' command...\n", cmd);
 		show_free_areas();
-		if(current->pid != 0) {
-			sti();
+		if (current->pid != 0) {
+			local_irq_enable();
 			sys_sync();
-			cli();
+			local_irq_disable();
 		}
 		args[2] = 0;
 		args[args[1] + 3] = -1;
@@ -145,7 +153,7 @@ int prom_callback(long *args)
 			pmd_t *pmdp;
 			pte_t *ptep;
 
-			for_each_task(p) {
+			for_each_process(p) {
 				mm = p->mm;
 				if (CTX_HWBITS(mm->context) == ctx)
 					break;
@@ -160,11 +168,16 @@ int prom_callback(long *args)
 			pmdp = pmd_offset(pgdp, va);
 			if (pmd_none(*pmdp))
 				goto done;
-			ptep = pte_offset(pmdp, va);
-			if (!pte_present(*ptep))
-				goto done;
-			tte = pte_val(*ptep);
-			res = PROM_TRUE;
+
+			/* Preemption implicitly disabled by virtue of
+			 * being called from inside OBP.
+			 */
+			ptep = pte_offset_map(pmdp, va);
+			if (pte_present(*ptep)) {
+				tte = pte_val(*ptep);
+				res = PROM_TRUE;
+			}
+			pte_unmap(ptep);
 			goto done;
 		}
 
@@ -182,7 +195,7 @@ int prom_callback(long *args)
 
 			if (tlb_type == spitfire)
 				tte = spitfire_get_dtlb_data(SPITFIRE_HIGHEST_LOCKED_TLBENT);
-			else if (tlb_type == cheetah)
+			else if (tlb_type == cheetah || tlb_type == cheetah_plus)
 				tte = cheetah_get_ldtlb_data(CHEETAH_HIGHEST_LOCKED_TLBENT);
 
 			res = PROM_TRUE;
@@ -210,11 +223,15 @@ int prom_callback(long *args)
 			pmdp = pmd_offset(pgdp, va);
 			if (pmd_none(*pmdp))
 				goto done;
-			ptep = pte_offset(pmdp, va);
-			if (!pte_present(*ptep))
-				goto done;
-			tte = pte_val(*ptep);
-			res = PROM_TRUE;
+
+			/* Preemption implicitly disabled by virtue of
+			 * being called from inside OBP.
+			 */
+			ptep = pte_offset_kernel(pmdp, va);
+			if (pte_present(*ptep)) {
+				tte = pte_val(*ptep);
+				res = PROM_TRUE;
+			}
 			goto done;
 		}
 
@@ -290,33 +307,29 @@ int prom_callback(long *args)
 		register_console(cons);
 	}
 	spin_lock(&prom_entry_lock);
-	restore_flags(flags);
+	local_irq_restore(flags);
+
 	/*
 	 * Restore in-interrupt status for a resume from obp.
 	 */
-	irq_enter(smp_processor_id(), 0);
+	irq_enter();
 	return 0;
 }
-
-extern void rs_kgdb_hook(int tty_num); /* sparc/serial.c */
 
 unsigned int boot_flags = 0;
 #define BOOTME_DEBUG  0x1
 #define BOOTME_SINGLE 0x2
-#define BOOTME_KGDB   0x4
 
-#ifdef CONFIG_SUN_CONSOLE
 static int console_fb __initdata = 0;
-#endif
 
 /* Exported for mm/init.c:paging_init. */
 unsigned long cmdline_memory_size = 0;
 
 static struct console prom_debug_console = {
-	name:		"debug",
-	write:		prom_console_write,
-	flags:		CON_PRINTBUFFER,
-	index:		-1,
+	.name =		"debug",
+	.write =	prom_console_write,
+	.flags =	CON_PRINTBUFFER,
+	.index =	-1,
 };
 
 /* XXX Implement this at some point... */
@@ -375,28 +388,7 @@ static void __init boot_flags_init(char *commands)
 			commands++;
 			while (*commands && *commands != ' ')
 				process_switch(*commands++);
-		} else if (strlen(commands) >= 9
-			   && !strncmp(commands, "kgdb=tty", 8)) {
-			boot_flags |= BOOTME_KGDB;
-			switch (commands[8]) {
-#ifdef CONFIG_SUN_SERIAL
-			case 'a':
-				rs_kgdb_hook(0);
-				prom_printf("KGDB: Using serial line /dev/ttya.\n");
-				break;
-			case 'b':
-				rs_kgdb_hook(1);
-				prom_printf("KGDB: Using serial line /dev/ttyb.\n");
-				break;
-#endif
-			default:
-				printk("KGDB: Unknown tty line.\n");
-				boot_flags &= ~BOOTME_KGDB;
-				break;
-			}
-			commands += 9;
 		} else {
-#if CONFIG_SUN_CONSOLE
 			if (!strncmp(commands, "console=", 8)) {
 				commands += 8;
 				if (!strncmp (commands, "ttya", 4)) {
@@ -417,9 +409,7 @@ static void __init boot_flags_init(char *commands)
 				} else {
 					console_fb = 1;
 				}
-			} else
-#endif
-			if (!strncmp(commands, "mem=", 4)) {
+			} else if (!strncmp(commands, "mem=", 4)) {
 				/*
 				 * "mem=XXX[kKmM]" overrides the PROM-reported
 				 * memory size.
@@ -456,8 +446,6 @@ extern int root_mountflags;
 char saved_command_line[256];
 char reboot_command[256];
 
-extern unsigned long phys_base;
-
 static struct pt_regs fake_swapper_regs = { { 0, }, 0, 0, 0, 0 };
 
 void register_prom_callbacks(void)
@@ -475,7 +463,6 @@ extern void paging_init(void);
 
 void __init setup_arch(char **cmdline_p)
 {
-	extern int serial_console;  /* in console.c, of course */
 	unsigned long highest_paddr;
 	int i;
 
@@ -497,7 +484,7 @@ void __init setup_arch(char **cmdline_p)
 		extern unsigned int irqsz_patchme[1];
 		irqsz_patchme[0] |= ((i == SMP_CACHE_BYTES) ? SMP_CACHE_BYTES_SHIFT : \
 							SMP_CACHE_BYTES_SHIFT + 1);
-		flushi((long)&irqsz_patchme[1]);
+		flushi((long)&irqsz_patchme[0]);
 	} else {
 		prom_printf("Unexpected size of irq_stat[] elements\n");
 		prom_halt();
@@ -526,17 +513,18 @@ void __init setup_arch(char **cmdline_p)
 		if (highest_paddr < top)
 			highest_paddr = top;
 	}
+	pfn_base = phys_base >> PAGE_SHIFT;
 
 	if (!root_flags)
 		root_mountflags &= ~MS_RDONLY;
-	ROOT_DEV = to_kdev_t(root_dev);
-#ifdef CONFIG_BLK_DEV_RAM
+	ROOT_DEV = old_decode_dev(root_dev);
+#ifdef CONFIG_BLK_DEV_INITRD
 	rd_image_start = ram_flags & RAMDISK_IMAGE_START_MASK;
 	rd_prompt = ((ram_flags & RAMDISK_PROMPT_FLAG) != 0);
 	rd_doload = ((ram_flags & RAMDISK_LOAD_FLAG) != 0);	
 #endif
 
-	init_task.thread.kregs = &fake_swapper_regs;
+	init_task.thread_info->kregs = &fake_swapper_regs;
 
 #ifdef CONFIG_IP_PNP
 	if (!ic_set_manually) {
@@ -558,7 +546,6 @@ void __init setup_arch(char **cmdline_p)
 	}
 #endif
 
-#ifdef CONFIG_SUN_SERIAL
 	switch (console_fb) {
 	case 0: /* Let's get our io devices from prom */
 		{
@@ -587,12 +574,7 @@ void __init setup_arch(char **cmdline_p)
 	case 3: /* Force ttyb as console */
 		serial_console = 2;
 		break;
-	}
-#else
-	serial_console = 0;
-#endif
-	if (serial_console)
-		conswitchp = NULL;
+	};
 
 	paging_init();
 }
@@ -604,46 +586,40 @@ asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int on)
 
 /* BUFFER is PAGE_SIZE bytes long. */
 
-extern char *sparc_cpu_type[];
-extern char *sparc_fpu_type[];
+extern char *sparc_cpu_type;
+extern char *sparc_fpu_type;
 
 extern void smp_info(struct seq_file *);
 extern void smp_bogo(struct seq_file *);
 extern void mmu_info(struct seq_file *);
 
-#ifndef CONFIG_SMP
-unsigned long up_clock_tick;
-#endif
-
 static int show_cpuinfo(struct seq_file *m, void *__unused)
 {
-	int cpuid = smp_processor_id();
-
 	seq_printf(m, 
 		   "cpu\t\t: %s\n"
 		   "fpu\t\t: %s\n"
 		   "promlib\t\t: Version 3 Revision %d\n"
 		   "prom\t\t: %d.%d.%d\n"
 		   "type\t\t: sun4u\n"
-		   "ncpus probed\t: %d\n"
-		   "ncpus active\t: %d\n"
+		   "ncpus probed\t: %ld\n"
+		   "ncpus active\t: %ld\n"
 #ifndef CONFIG_SMP
 		   "Cpu0Bogo\t: %lu.%02lu\n"
 		   "Cpu0ClkTck\t: %016lx\n"
 #endif
 		   ,
-		   sparc_cpu_type[cpuid],
-		   sparc_fpu_type[cpuid],
+		   sparc_cpu_type,
+		   sparc_fpu_type,
 		   prom_rev,
 		   prom_prev >> 16,
 		   (prom_prev >> 8) & 0xff,
 		   prom_prev & 0xff,
-		   linux_num_cpus,
-		   smp_num_cpus
+		   (long)num_possible_cpus(),
+		   (long)num_online_cpus()
 #ifndef CONFIG_SMP
-		   , loops_per_jiffy/(500000/HZ),
-		   (loops_per_jiffy/(5000/HZ)) % 100,
-		   up_clock_tick
+		   , cpu_data(0).udelay_val/(500000/HZ),
+		   (cpu_data(0).udelay_val/(5000/HZ)) % 100,
+		   cpu_data(0).clock_tick
 #endif
 		);
 #ifdef CONFIG_SMP
@@ -676,8 +652,46 @@ static void c_stop(struct seq_file *m, void *v)
 }
 
 struct seq_operations cpuinfo_op = {
-	start:	c_start,
-	next:	c_next,
-	stop:	c_stop,
-	show:	show_cpuinfo,
+	.start =c_start,
+	.next =	c_next,
+	.stop =	c_stop,
+	.show =	show_cpuinfo,
 };
+
+extern int stop_a_enabled;
+
+void sun_do_break(void)
+{
+	if (!stop_a_enabled)
+		return;
+
+	printk("\n");
+	flush_user_windows();
+
+	prom_cmdline();
+}
+
+int serial_console;
+int stop_a_enabled = 1;
+
+static int __init topology_init(void)
+{
+	int i, err;
+
+	err = -ENOMEM;
+	for (i = 0; i < NR_CPUS; i++) {
+		if (cpu_possible(i)) {
+			struct cpu *p = kmalloc(sizeof(*p), GFP_KERNEL);
+
+			if (p) {
+				memset(p, 0, sizeof(*p));
+				register_cpu(p, i, NULL);
+				err = 0;
+			}
+		}
+	}
+
+	return err;
+}
+
+subsys_initcall(topology_init);

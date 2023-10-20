@@ -25,13 +25,10 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/tty.h>
-#include <linux/sched.h>
 #include <linux/init.h>
 
 #include <net/irda/irda.h>
-#include <net/irda/irmod.h>
 #include <net/irda/irda_device.h>
-#include <net/irda/irtty.h>
 
 static int  girbil_reset(struct irda_task *task);
 static void girbil_open(dongle_t *self, struct qos_info *qos);
@@ -66,12 +63,12 @@ static int  girbil_change_speed(struct irda_task *task);
 #define GIRBIL_LOAD    0x51 /* Load the new baud rate value */
 
 static struct dongle_reg dongle = {
-	Q_NULL,
-	IRDA_GIRBIL_DONGLE,
-	girbil_open,
-	girbil_close,
-	girbil_reset,
-	girbil_change_speed,
+	.type = IRDA_GIRBIL_DONGLE,
+	.open = girbil_open,
+	.close = girbil_close,
+	.reset = girbil_reset,
+	.change_speed = girbil_change_speed,
+	.owner = THIS_MODULE,
 };
 
 int __init girbil_init(void)
@@ -79,7 +76,7 @@ int __init girbil_init(void)
 	return irda_device_register_dongle(&dongle);
 }
 
-void girbil_cleanup(void)
+void __exit girbil_cleanup(void)
 {
 	irda_device_unregister_dongle(&dongle);
 }
@@ -88,16 +85,12 @@ static void girbil_open(dongle_t *self, struct qos_info *qos)
 {
 	qos->baud_rate.bits &= IR_9600|IR_19200|IR_38400|IR_57600|IR_115200;
 	qos->min_turn_time.bits = 0x03;
-
-	MOD_INC_USE_COUNT;
 }
 
 static void girbil_close(dongle_t *self)
 {
 	/* Power off dongle */
 	self->set_dtr_rts(self->dev, FALSE, FALSE);
-
-	MOD_DEC_USE_COUNT;
 }
 
 /*
@@ -130,7 +123,7 @@ static int girbil_change_speed(struct irda_task *task)
 		}
 		break;
 	case IRDA_TASK_CHILD_WAIT:
-		WARNING(__FUNCTION__ "(), resetting dongle timed out!\n");
+		WARNING("%s(), resetting dongle timed out!\n", __FUNCTION__);
 		ret = -1;
 		break;
 	case IRDA_TASK_CHILD_DONE:
@@ -169,7 +162,7 @@ static int girbil_change_speed(struct irda_task *task)
 		self->speed_task = NULL;
 		break;
 	default:
-		ERROR(__FUNCTION__ "(), unknown state %d\n", task->state);
+		ERROR("%s(), unknown state %d\n", __FUNCTION__, task->state);
 		irda_task_next_state(task, IRDA_TASK_DONE);
 		self->speed_task = NULL;
 		ret = -1;
@@ -222,7 +215,7 @@ static int girbil_reset(struct irda_task *task)
 		self->reset_task = NULL;
 		break;
 	default:
-		ERROR(__FUNCTION__ "(), unknown state %d\n", task->state);
+		ERROR("%s(), unknown state %d\n", __FUNCTION__, task->state);
 		irda_task_next_state(task, IRDA_TASK_DONE);
 		self->reset_task = NULL;
 		ret = -1;
@@ -231,11 +224,10 @@ static int girbil_reset(struct irda_task *task)
 	return ret;
 }
 
-#ifdef MODULE
 MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");
 MODULE_DESCRIPTION("Greenwich GIrBIL dongle driver");
 MODULE_LICENSE("GPL");
-
+MODULE_ALIAS("irda-dongle-4"); /* IRDA_GIRBIL_DONGLE */
 	
 /*
  * Function init_module (void)
@@ -243,10 +235,7 @@ MODULE_LICENSE("GPL");
  *    Initialize Girbil module
  *
  */
-int init_module(void)
-{
-	return girbil_init();
-}
+module_init(girbil_init);
 
 /*
  * Function cleanup_module (void)
@@ -254,8 +243,5 @@ int init_module(void)
  *    Cleanup Girbil module
  *
  */
-void cleanup_module(void)
-{
-        girbil_cleanup();
-}
-#endif /* MODULE */
+module_exit(girbil_cleanup);
+

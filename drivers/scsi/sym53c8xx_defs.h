@@ -1,7 +1,7 @@
 /******************************************************************************
 **  High Performance device driver for the Symbios 53C896 controller.
 **
-**  Copyright (C) 1998-2000  Gerard Roudier <groudier@club-internet.fr>
+**  Copyright (C) 1998-2001  Gerard Roudier <groudier@free.fr>
 **
 **  This driver also supports all the Symbios 53C8XX controller family, 
 **  except 53C810 revisions < 16, 53C825 revisions < 16 and all 
@@ -32,7 +32,7 @@
 **  The Linux port of the FreeBSD ncr driver has been achieved in 
 **  november 1995 by:
 **
-**          Gerard Roudier              <groudier@club-internet.fr>
+**          Gerard Roudier              <groudier@free.fr>
 **
 **  Being given that this driver originates from the FreeBSD version, and
 **  in order to keep synergy on both, any suggested enhancements and corrections
@@ -51,6 +51,13 @@
 **  NVRAM detection and reading.
 **    Copyright (C) 1997 Richard Waltham <dormouse@farsrobt.demon.co.uk>
 **
+**  Added support for MIPS big endian systems.
+**    Carsten Langgaard, carstenl@mips.com
+**    Copyright (C) 2000 MIPS Technologies, Inc.  All rights reserved.
+**
+**  Added support for HP PARISC big endian systems.
+**    Copyright (C) 2000 MIPS Technologies, Inc.  All rights reserved.
+**
 *******************************************************************************
 */
 
@@ -61,12 +68,7 @@
 **	Check supported Linux versions
 */
 
-#if !defined(LINUX_VERSION_CODE)
-#include <linux/version.h>
-#endif
 #include <linux/config.h>
-
-#define LinuxVersionCode(v, p, s) (((v)<<16)+((p)<<8)+(s))
 
 /*
  * NCR PQS/PDS special device support.
@@ -78,8 +80,10 @@
 /*
  *	No more an option, enabled by default.
  */
-#ifndef CONFIG_SCSI_NCR53C8XX_NVRAM_DETECT
-#define CONFIG_SCSI_NCR53C8XX_NVRAM_DETECT
+#ifndef CONFIG_SCSI_NCR53C8XX_NO_NVRAM
+# ifndef CONFIG_SCSI_NCR53C8XX_NVRAM_DETECT
+#  define CONFIG_SCSI_NCR53C8XX_NVRAM_DETECT
+# endif
 #endif
 
 /*
@@ -174,13 +178,6 @@
 #define	SCSI_NCR_IOMAPPED
 #elif defined(__alpha__)
 #define	SCSI_NCR_IOMAPPED
-#elif defined(__powerpc__)
-#if LINUX_VERSION_CODE <= LinuxVersionCode(2,4,3)
-#define	SCSI_NCR_IOMAPPED
-#define SCSI_NCR_PCI_MEM_NOT_SUPPORTED
-#endif
-#elif defined(__sparc__)
-#undef SCSI_NCR_IOMAPPED
 #endif
 
 /*
@@ -249,17 +246,6 @@
 #define SCSI_NCR_SETUP_SCSI_PARITY	(0)
 #else
 #define SCSI_NCR_SETUP_SCSI_PARITY	(1)
-#endif
-
-/*
- * Vendor specific stuff
- */
-#ifdef CONFIG_SCSI_NCR53C8XX_SYMBIOS_COMPAT
-#define SCSI_NCR_SETUP_LED_PIN		(1)
-#define SCSI_NCR_SETUP_DIFF_SUPPORT	(4)
-#else
-#define SCSI_NCR_SETUP_LED_PIN		(0)
-#define SCSI_NCR_SETUP_DIFF_SUPPORT	(0)
 #endif
 
 /*
@@ -367,10 +353,6 @@
 
 #ifdef	__BIG_ENDIAN
 
-#if	LINUX_VERSION_CODE < LinuxVersionCode(2,1,0)
-#error	"BIG ENDIAN byte ordering needs kernel version >= 2.1.0"
-#endif
-
 #define	inw_l2b		inw
 #define	inl_l2b		inl
 #define	outw_b2l	outw
@@ -379,16 +361,24 @@
 #define	readb_raw	readb
 #define	writeb_raw	writeb
 
-#if defined(__hppa__)
-#define	readw_l2b(a)	le16_to_cpu(readw(a))
-#define	readl_l2b(a)	le32_to_cpu(readl(a))
-#define	writew_b2l(v,a)	writew(cpu_to_le16(v),a)
-#define	writel_b2l(v,a)	writel(cpu_to_le32(v),a)
-#else	/* Other bid-endian */
+#if defined(SCSI_NCR_BIG_ENDIAN)
+#define	readw_l2b	__raw_readw
+#define	readl_l2b	__raw_readl
+#define	writew_b2l	__raw_writew
+#define	writel_b2l	__raw_writel
+#define	readw_raw	__raw_readw
+#define	readl_raw(a)	__raw_readl((unsigned long)(a))
+#define	writew_raw	__raw_writew
+#define	writel_raw(v,a)	__raw_writel(v,(unsigned long)(a))
+#else	/* Other big-endian */
 #define	readw_l2b	readw
 #define	readl_l2b	readl
 #define	writew_b2l	writew
 #define	writel_b2l	writel
+#define	readw_raw	readw
+#define	readl_raw	readl
+#define	writew_raw	writew
+#define	writel_raw	writel
 #endif
 
 #else	/* little endian */
@@ -417,8 +407,10 @@
 #endif
 #endif
 
+#if !defined(__hppa__) && !defined(__mips__)
 #ifdef	SCSI_NCR_BIG_ENDIAN
 #error	"The NCR in BIG ENDIAN addressing mode is not (yet) supported"
+#endif
 #endif
 
 
@@ -431,18 +423,9 @@
  *  Other architectures implement a weaker ordering that 
  *  requires memory barriers (and also IO barriers when they 
  *  make sense) to be used.
- *  We want to be paranoid for ppc and ia64. :)
  */
 
-#if	defined(__i386__) || defined(__x86_64__)
-#define MEMORY_BARRIER()	do { ; } while(0)
-#elif	defined	__powerpc__
-#define MEMORY_BARRIER()	__asm__ volatile("eieio; sync" : : : "memory")
-#elif	defined	__ia64__
-#define MEMORY_BARRIER()	__asm__ volatile("mf.a; mf" : : : "memory")
-#else
 #define MEMORY_BARRIER()	mb()
-#endif
 
 
 /*
@@ -466,7 +449,7 @@
 #endif
 
 /*
- *  If the CPU and the NCR use same endian-ness adressing,
+ *  If the CPU and the NCR use same endian-ness addressing,
  *  no byte reordering is needed for script patching.
  *  Macro cpu_to_scr() is to be used for script patching.
  *  Macro scr_to_cpu() is to be used for getting a DWORD 
@@ -500,7 +483,7 @@
  *  would have been correctly designed for PCI, this 
  *  option would be useless.
  *
- *  If the CPU and the NCR use same endian-ness adressing,
+ *  If the CPU and the NCR use same endian-ness addressing,
  *  no byte reordering is needed for accessing chip io 
  *  registers. Functions suffixed by '_raw' are assumed 
  *  to access the chip over the PCI without doing byte 
@@ -511,7 +494,6 @@
  */
 
 #if defined(SCSI_NCR_IOMAPPED)
-
 /*
  *  IO mapped only input / ouput
  */
@@ -572,10 +554,20 @@
 
 #else
 
+#ifdef CONFIG_SCSI_NCR53C8XX_NO_WORD_TRANSFERS
+/* Only 8 or 32 bit transfers allowed */
+#define INW_OFF(o)		(readb((char *)np->reg + ncr_offw(o)) << 8 | readb((char *)np->reg + ncr_offw(o) + 1))
+#else
 #define INW_OFF(o)		readw_raw((char *)np->reg + ncr_offw(o))
+#endif
 #define INL_OFF(o)		readl_raw((char *)np->reg + (o))
 
+#ifdef CONFIG_SCSI_NCR53C8XX_NO_WORD_TRANSFERS
+/* Only 8 or 32 bit transfers allowed */
+#define OUTW_OFF(o, val)	do { writeb((char)((val) >> 8), (char *)np->reg + ncr_offw(o)); writeb((char)(val), (char *)np->reg + ncr_offw(o) + 1); } while (0)
+#else
 #define OUTW_OFF(o, val)	writew_raw((val), (char *)np->reg + ncr_offw(o))
+#endif
 #define OUTL_OFF(o, val)	writel_raw((val), (char *)np->reg + (o))
 
 #endif
@@ -622,6 +614,10 @@
 /*
 **	NCR53C8XX Device Ids
 */
+
+#ifndef PSEUDO_720_ID
+#define PSEUDO_720_ID 0x5a00
+#endif
 
 #ifndef PCI_DEVICE_ID_NCR_53C810
 #define PCI_DEVICE_ID_NCR_53C810 1
@@ -726,6 +722,9 @@ typedef struct {
 #define FE_DAC	 	(1<<24)   /* Support DAC cycles (64 bit addressing) */
 #define FE_ISTAT1 	(1<<25)   /* Have ISTAT1, MBOX0, MBOX1 registers */
 #define FE_DAC_IN_USE	(1<<26)	  /* Platform does DAC cycles */
+#define FE_EHP		(1<<27)   /* 720: Even host parity */
+#define FE_MUX		(1<<28)   /* 720: Multiplexed bus */
+#define FE_EA		(1<<29)   /* 720: Enable Ack */
 
 #define FE_CACHE_SET	(FE_ERL|FE_CLSE|FE_WRIE|FE_ERMP)
 #define FE_SCSI_SET	(FE_WIDE|FE_ULTRA|FE_ULTRA2|FE_DBLR|FE_QUAD|F_CLK80)
@@ -747,6 +746,9 @@ typedef struct {
 
 #define SCSI_NCR_CHIP_TABLE						\
 {									\
+ {PSEUDO_720_ID, 0x0f, "720",  3,  8, 4,				\
+ FE_WIDE|FE_DIFF|FE_EHP|FE_MUX|FE_EA}					\
+ ,									\
  {PCI_DEVICE_ID_NCR_53C810, 0x0f, "810",  4,  8, 4,			\
  FE_ERL}								\
  ,									\
@@ -819,6 +821,7 @@ typedef struct {
  */
 #define SCSI_NCR_CHIP_IDS		\
 {					\
+	PSEUDO_720_ID,		\
 	PCI_DEVICE_ID_NCR_53C810,	\
 	PCI_DEVICE_ID_NCR_53C815,	\
 	PCI_DEVICE_ID_NCR_53C820,	\
@@ -889,10 +892,10 @@ struct ncr_driver_setup {
 	SCSI_NCR_SETUP_DEFAULT_SYNC,		\
 	0x00,					\
 	7,					\
-	SCSI_NCR_SETUP_LED_PIN,			\
+	0,					\
 	1,					\
 	SCSI_NCR_SETUP_SETTLE_TIME,		\
-	SCSI_NCR_SETUP_DIFF_SUPPORT,		\
+	0,					\
 	0,					\
 	1,					\
 	0,					\
@@ -948,7 +951,7 @@ struct Symbios_nvram {
 /* Controller set up 20 bytes */
 	u_char	v_major;	/* 0x00 */
 	u_char	v_minor;	/* 0x30 */
-	u_int32	boot_crc;
+	u32	boot_crc;
 	u_short	flags;
 #define SYMBIOS_SCAM_ENABLE	(1)
 #define SYMBIOS_PARITY_ENABLE	(1<<1)
@@ -1170,6 +1173,7 @@ struct ncr_reg {
 /*17*/  u_char    nc_mbox1;	/* 896 and later cores only */
 
 /*18*/	u_char	  nc_ctest0;
+	#define   EHP     0x04	/* 720 even host parity             */
 /*19*/  u_char    nc_ctest1;
 
 /*1a*/  u_char    nc_ctest2;
@@ -1183,10 +1187,11 @@ struct ncr_reg {
 	#define   WRIE    0x01  /* mod: write and invalidate enable */
 				/* bits 4-7 rsvd for C1010          */
 
-/*1c*/  u_int32    nc_temp;	/* ### Temporary stack              */
+/*1c*/  u32    nc_temp;	/* ### Temporary stack              */
 
 /*20*/	u_char	  nc_dfifo;
 /*21*/  u_char    nc_ctest4;
+	#define   MUX     0x80  /* 720 host bus multiplex mode      */
 	#define   BDIS    0x80  /* mod: burst disable               */
 	#define   MPEE    0x08  /* mod: master parity error enable  */
 
@@ -1195,10 +1200,10 @@ struct ncr_reg {
 				/* bits 0-1, 3-7 rsvd for C1010          */
 /*23*/  u_char    nc_ctest6;
 
-/*24*/  u_int32    nc_dbc;	/* ### Byte count and command       */
-/*28*/  u_int32    nc_dnad;	/* ### Next command register        */
-/*2c*/  u_int32    nc_dsp;	/* --> Script Pointer               */
-/*30*/  u_int32    nc_dsps;	/* --> Script pointer save/opcode#2 */
+/*24*/  u32    nc_dbc;	/* ### Byte count and command       */
+/*28*/  u32    nc_dnad;	/* ### Next command register        */
+/*2c*/  u32    nc_dsp;	/* --> Script Pointer               */
+/*30*/  u32    nc_dsps;	/* --> Script pointer save/opcode#2 */
 
 /*34*/  u_char     nc_scratcha;  /* Temporary register a            */
 /*35*/  u_char     nc_scratcha1;
@@ -1219,6 +1224,7 @@ struct ncr_reg {
 	#define   CLSE    0x80  /* mod: cache line size enable      */
 	#define   PFF     0x40  /* cmd: pre-fetch flush             */
 	#define   PFEN    0x20  /* mod: pre-fetch enable            */
+	#define   EA      0x20  /* mod: 720 enable-ack              */
 	#define   SSM     0x10  /* mod: single step mode            */
 	#define   IRQM    0x08  /* mod: irq mode (1 = totem pole !) */
 	#define   STD     0x04  /* cmd: start dma mode              */
@@ -1226,7 +1232,7 @@ struct ncr_reg {
  	#define	  NOCOM   0x01	/* cmd: protect sfbr while reselect */
 				/* bits 0-1 rsvd for C1010          */
 
-/*3c*/  u_int32    nc_adder;
+/*3c*/  u32    nc_adder;
 
 /*40*/  u_short   nc_sien;	/* -->: interrupt enable            */
 /*42*/  u_short   nc_sist;	/* <--: interrupt status            */
@@ -1261,6 +1267,7 @@ struct ncr_reg {
 
 /*4e*/  u_char    nc_stest2;
 	#define   ROF     0x40	/* reset scsi offset (after gross error!) */
+	#define   DIF     0x20  /* 720 SCSI differential mode             */
 	#define   EXT     0x02  /* extended filtering                     */
 
 /*4f*/  u_char    nc_stest3;
@@ -1304,13 +1311,13 @@ struct ncr_reg {
 /*5f*/  u_char    nc_scr3;	/*                                  */
 
 /*60*/  u_char    nc_scrx[64];	/* Working register C-R             */
-/*a0*/	u_int32   nc_mmrs;	/* Memory Move Read Selector        */
-/*a4*/	u_int32   nc_mmws;	/* Memory Move Write Selector       */
-/*a8*/	u_int32   nc_sfs;	/* Script Fetch Selector            */
-/*ac*/	u_int32   nc_drs;	/* DSA Relative Selector            */
-/*b0*/	u_int32   nc_sbms;	/* Static Block Move Selector       */
-/*b4*/	u_int32   nc_dbms;	/* Dynamic Block Move Selector      */
-/*b8*/	u_int32   nc_dnad64;	/* DMA Next Address 64              */
+/*a0*/	u32   nc_mmrs;	/* Memory Move Read Selector        */
+/*a4*/	u32   nc_mmws;	/* Memory Move Write Selector       */
+/*a8*/	u32   nc_sfs;	/* Script Fetch Selector            */
+/*ac*/	u32   nc_drs;	/* DSA Relative Selector            */
+/*b0*/	u32   nc_sbms;	/* Static Block Move Selector       */
+/*b4*/	u32   nc_dbms;	/* Dynamic Block Move Selector      */
+/*b8*/	u32   nc_dnad64;	/* DMA Next Address 64              */
 /*bc*/	u_short   nc_scntl4;    /* C1010 only                       */
 	#define   U3EN   0x80	/* Enable Ultra 3                   */
 	#define   AIPEN	 0x40   /* Allow check upper byte lanes     */
@@ -1322,8 +1329,8 @@ struct ncr_reg {
 /*be*/  u_char   nc_aipcntl0;	/* Epat Control 1 C1010 only        */
 /*bf*/  u_char   nc_aipcntl1;	/* AIP Control C1010_66 Only        */
 
-/*c0*/	u_int32   nc_pmjad1;	/* Phase Mismatch Jump Address 1    */
-/*c4*/	u_int32   nc_pmjad2;	/* Phase Mismatch Jump Address 2    */
+/*c0*/	u32   nc_pmjad1;	/* Phase Mismatch Jump Address 1    */
+/*c4*/	u32   nc_pmjad2;	/* Phase Mismatch Jump Address 2    */
 /*c8*/	u_char    nc_rbc;	/* Remaining Byte Count             */
 /*c9*/	u_char    nc_rbc1;	/*                                  */
 /*ca*/	u_char    nc_rbc2;	/*                                  */
@@ -1333,22 +1340,22 @@ struct ncr_reg {
 /*cd*/	u_char    nc_ua1;	/*                                  */
 /*ce*/	u_char    nc_ua2;	/*                                  */
 /*cf*/	u_char    nc_ua3;	/*                                  */
-/*d0*/	u_int32   nc_esa;	/* Entry Storage Address            */
+/*d0*/	u32   nc_esa;	/* Entry Storage Address            */
 /*d4*/	u_char    nc_ia;	/* Instruction Address              */
 /*d5*/	u_char    nc_ia1;
 /*d6*/	u_char    nc_ia2;
 /*d7*/	u_char    nc_ia3;
-/*d8*/	u_int32   nc_sbc;	/* SCSI Byte Count (3 bytes only)   */
-/*dc*/	u_int32   nc_csbc;	/* Cumulative SCSI Byte Count       */
+/*d8*/	u32   nc_sbc;	/* SCSI Byte Count (3 bytes only)   */
+/*dc*/	u32   nc_csbc;	/* Cumulative SCSI Byte Count       */
 
                                 /* Following for C1010 only         */
 /*e0*/ u_short    nc_crcpad;    /* CRC Value                        */
 /*e2*/ u_char     nc_crccntl0;  /* CRC control register             */
 	#define   SNDCRC  0x10	/* Send CRC Request                 */
 /*e3*/ u_char     nc_crccntl1;  /* CRC control register             */
-/*e4*/ u_int32    nc_crcdata;   /* CRC data register                */ 
-/*e8*/ u_int32	  nc_e8_;	/* rsvd 			    */
-/*ec*/ u_int32	  nc_ec_;	/* rsvd 			    */
+/*e4*/ u32    nc_crcdata;   /* CRC data register                */ 
+/*e8*/ u32	  nc_e8_;	/* rsvd 			    */
+/*ec*/ u32	  nc_ec_;	/* rsvd 			    */
 /*f0*/ u_short    nc_dfbc;      /* DMA FIFO byte count              */ 
 
 };
@@ -1363,7 +1370,7 @@ struct ncr_reg {
 #define REGJ(p,r) (offsetof(struct ncr_reg, p ## r))
 #define REG(r) REGJ (nc_, r)
 
-typedef u_int32 ncrcmd;
+typedef u32 ncrcmd;
 
 /*-----------------------------------------------------------
 **
@@ -1415,8 +1422,8 @@ typedef u_int32 ncrcmd;
 #define SCR_CHMOV_TBL     (0x10000000)
 
 struct scr_tblmove {
-        u_int32  size;
-        u_int32  addr;
+        u32  size;
+        u32  addr;
 };
 
 /*-----------------------------------------------------------
@@ -1439,15 +1446,25 @@ struct scr_tblmove {
 #define	SCR_SEL_TBL	0x42000000
 #define	SCR_SEL_TBL_ATN	0x43000000
 
+
+#ifdef SCSI_NCR_BIG_ENDIAN
+struct scr_tblsel {
+        u_char  sel_scntl3;
+        u_char  sel_id;
+        u_char  sel_sxfer;
+        u_char  sel_scntl4;	
+};
+#else
 struct scr_tblsel {
         u_char  sel_scntl4;	
         u_char  sel_sxfer;
         u_char  sel_id;
         u_char  sel_scntl3;
 };
+#endif
 
 #define SCR_JMP_REL     0x04000000
-#define SCR_ID(id)	(((u_int32)(id)) << 16)
+#define SCR_ID(id)	(((u32)(id)) << 16)
 
 /*-----------------------------------------------------------
 **

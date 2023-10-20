@@ -7,36 +7,18 @@ static char version[] =
         "myri_sbus.c:v1.9 12/Sep/99 David S. Miller (davem@redhat.com)\n";
 
 #include <linux/module.h>
-
 #include <linux/config.h>
+#include <linux/errno.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
-
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
-#include <linux/errno.h>
-#include <asm/byteorder.h>
-
-#include <asm/idprom.h>
-#include <asm/sbus.h>
-#include <asm/openprom.h>
-#include <asm/oplib.h>
-#include <asm/auxio.h>
-#include <asm/pgtable.h>
-#include <asm/irq.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
@@ -46,10 +28,21 @@ static char version[] =
 #include <net/sock.h>
 #include <net/ipv6.h>
 
+#include <asm/system.h>
+#include <asm/bitops.h>
+#include <asm/io.h>
+#include <asm/dma.h>
+#include <asm/byteorder.h>
+#include <asm/idprom.h>
+#include <asm/sbus.h>
+#include <asm/openprom.h>
+#include <asm/oplib.h>
+#include <asm/auxio.h>
+#include <asm/pgtable.h>
+#include <asm/irq.h>
 #include <asm/checksum.h>
 
 #include "myri_sbus.h"
-
 #include "myri_code.h"
 
 /* #define DEBUG_DETECT */
@@ -540,19 +533,24 @@ static void myri_rx(struct myri_eth *mp, struct net_device *dev)
 	}
 }
 
-static void myri_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t myri_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev		= (struct net_device *) dev_id;
 	struct myri_eth *mp		= (struct myri_eth *) dev->priv;
 	unsigned long lregs		= mp->lregs;
 	struct myri_channel *chan	= &mp->shmem->channel;
+	unsigned long flags;
 	u32 status;
+	int handled = 0;
+
+	spin_lock_irqsave(&mp->irq_lock, flags);
 
 	status = sbus_readl(lregs + LANAI_ISTAT);
 	DIRQ(("myri_interrupt: status[%08x] ", status));
 	if (status & ISTAT_HOST) {
 		u32 softstate;
 
+		handled = 1;
 		DIRQ(("IRQ_DISAB "));
 		myri_disable_irq(lregs, mp->cregs);
 		softstate = sbus_readl(&chan->state);
@@ -569,6 +567,10 @@ static void myri_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		myri_enable_irq(lregs, mp->cregs);
 	}
 	DIRQ(("\n"));
+
+	spin_unlock_irqrestore(&mp->irq_lock, flags);
+
+	return IRQ_RETVAL(handled);
 }
 
 static int myri_open(struct net_device *dev)
@@ -622,7 +624,7 @@ static int myri_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		return 1;
 	}
 
-	save_and_cli(flags);
+	spin_lock_irqsave(&mp->irq_lock, flags);
 
 	DHDR(("xmit[skbdata(%p)]\n", skb->data));
 #ifdef DEBUG_HEADER
@@ -669,7 +671,7 @@ static int myri_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	DTX(("tbusy=0, returning 0\n"));
 	netif_start_queue(dev);
-	restore_flags(flags);
+	spin_unlock_irqrestore(&mp->irq_lock, flags);
 	return 0;
 }
 
@@ -764,9 +766,13 @@ static int myri_rebuild_header(struct sk_buff *skb)
 int myri_header_cache(struct neighbour *neigh, struct hh_cache *hh)
 {
 	unsigned short type = hh->hh_type;
-	unsigned char *pad = (unsigned char *) hh->hh_data;
-	struct ethhdr *eth = (struct ethhdr *) (pad + MYRI_PAD_LEN);
+	unsigned char *pad;
+	struct ethhdr *eth;
 	struct net_device *dev = neigh->dev;
+
+	pad = ((unsigned char *) hh->hh_data) +
+		HH_DATA_OFF(sizeof(*eth) + MYRI_PAD_LEN);
+	eth = (struct ethhdr *) (pad + MYRI_PAD_LEN);
 
 	if (type == __constant_htons(ETH_P_802_3))
 		return -1;
@@ -786,7 +792,8 @@ int myri_header_cache(struct neighbour *neigh, struct hh_cache *hh)
 /* Called by Address Resolution module to notify changes in address. */
 void myri_header_cache_update(struct hh_cache *hh, struct net_device *dev, unsigned char * haddr)
 {
-	memcpy(((u8*)hh->hh_data) + 2, haddr, dev->addr_len);
+	memcpy(((u8*)hh->hh_data) + HH_DATA_OFF(sizeof(struct ethhdr)),
+	       haddr, dev->addr_len);
 }
 
 static int myri_change_mtu(struct net_device *dev, int new_mtu)
@@ -799,9 +806,6 @@ static int myri_change_mtu(struct net_device *dev, int new_mtu)
 
 static struct net_device_stats *myri_get_stats(struct net_device *dev)
 { return &(((struct myri_eth *)dev->priv)->enet_stats); }
-
-#define CRC_POLYNOMIAL_BE 0x04c11db7UL  /* Ethernet CRC, big endian */
-#define CRC_POLYNOMIAL_LE 0xedb88320UL  /* Ethernet CRC, little endian */
 
 static void myri_set_multicast(struct net_device *dev)
 {
@@ -884,15 +888,16 @@ static void dump_eeprom(struct myri_eth *mp)
 }
 #endif
 
-static int __init myri_ether_init(struct net_device *dev, struct sbus_dev *sdev, int num)
+static int __init myri_ether_init(struct sbus_dev *sdev, int num)
 {
 	static unsigned version_printed;
+	struct net_device *dev;
 	struct myri_eth *mp;
 	unsigned char prop_buf[32];
 	int i;
 
-	DET(("myri_ether_init(%p,%p,%d):\n", dev, sdev, num));
-	dev = init_etherdev(0, sizeof(struct myri_eth));
+	DET(("myri_ether_init(%p,%d):\n", sdev, num));
+	dev = alloc_etherdev(sizeof(struct myri_eth));
 
 	if (!dev)
 		return -ENOMEM;
@@ -900,9 +905,8 @@ static int __init myri_ether_init(struct net_device *dev, struct sbus_dev *sdev,
 	if (version_printed++ == 0)
 		printk(version);
 
-	printk("%s: MyriCOM MyriNET Ethernet ", dev->name);
-
 	mp = (struct myri_eth *) dev->priv;
+	spin_lock_init(&mp->irq_lock);
 	mp->myri_sdev = sdev;
 
 	/* Clean out skb arrays. */
@@ -969,10 +973,7 @@ static int __init myri_ether_init(struct net_device *dev, struct sbus_dev *sdev,
 #endif
 
 	for (i = 0; i < 6; i++)
-		printk("%2.2x%c",
-		       dev->dev_addr[i] = mp->eeprom.id[i],
-		       i == 5 ? ' ' : ':');
-	printk("\n");
+		dev->dev_addr[i] = mp->eeprom.id[i];
 
 	determine_reg_space_size(mp);
 
@@ -1067,9 +1068,6 @@ static int __init myri_ether_init(struct net_device *dev, struct sbus_dev *sdev,
 		goto err;
 	}
 
-	DET(("ether_setup()\n"));
-	ether_setup(dev);
-
 	dev->mtu		= MYRINET_MTU;
 	dev->change_mtu		= myri_change_mtu;
 	dev->hard_header	= myri_header;
@@ -1082,14 +1080,30 @@ static int __init myri_ether_init(struct net_device *dev, struct sbus_dev *sdev,
 	DET(("Loading LANAI firmware\n"));
 	myri_load_lanai(mp);
 
+	if (register_netdev(dev)) {
+		printk("MyriCOM: Cannot register device.\n");
+		goto err_free_irq;
+	}
+
 #ifdef MODULE
-	dev->ifindex = dev_new_index();
 	mp->next_module = root_myri_dev;
 	root_myri_dev = mp;
 #endif
+
+	printk("%s: MyriCOM MyriNET Ethernet ", dev->name);
+
+	for (i = 0; i < 6; i++)
+		printk("%2.2x%c", dev->dev_addr[i],
+		       i == 5 ? ' ' : ':');
+	printk("\n");
+
 	return 0;
-err:	unregister_netdev(dev);
-	kfree(dev);
+
+err_free_irq:
+	free_irq(dev->irq, dev);
+err:
+	/* This will also free the co-allocated 'dev->priv' */
+	free_netdev(dev);
 	return -ENODEV;
 }
 
@@ -1106,7 +1120,6 @@ static int __init myri_sbus_match(struct sbus_dev *sdev)
 
 static int __init myri_sbus_probe(void)
 {
-	struct net_device *dev = NULL;
 	struct sbus_bus *bus;
 	struct sbus_dev *sdev = 0;
 	static int called;
@@ -1122,12 +1135,10 @@ static int __init myri_sbus_probe(void)
 
 	for_each_sbus(bus) {
 		for_each_sbusdev(sdev, bus) {
-			if (cards)
-				dev = NULL;
 			if (myri_sbus_match(sdev)) {
 				cards++;
 				DET(("Found myricom myrinet as %s\n", sdev->prom_name));
-				if ((v = myri_ether_init(dev, sdev, (cards - 1))))
+				if ((v = myri_ether_init(sdev, (cards - 1))))
 					return v;
 			}
 		}
@@ -1140,12 +1151,12 @@ static int __init myri_sbus_probe(void)
 static void __exit myri_sbus_cleanup(void)
 {
 #ifdef MODULE
-	/* No need to check MOD_IN_USE, as sys_delete_module() checks. */
 	while (root_myri_dev) {
 		struct myri_eth *next = root_myri_dev->next_module;
 
 		unregister_netdev(root_myri_dev->dev);
-		kfree(root_myri_dev->dev);
+		/* this will also free the co-allocated 'root_myri_dev' */
+		free_netdev(root_myri_dev->dev);
 		root_myri_dev = next;
 	}
 #endif /* MODULE */

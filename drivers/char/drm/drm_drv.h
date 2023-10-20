@@ -1,4 +1,31 @@
-/* drm_drv.h -- Generic driver template -*- linux-c -*-
+/**
+ * \file drm_drv.h 
+ * Generic driver template
+ *
+ * \author Rickard E. (Rik) Faith <faith@valinux.com>
+ * \author Gareth Hughes <gareth@valinux.com>
+ *
+ * To use this template, you must at least define the following (samples
+ * given for the MGA driver):
+ *
+ * \code
+ * #define DRIVER_AUTHOR	"VA Linux Systems, Inc."
+ *
+ * #define DRIVER_NAME		"mga"
+ * #define DRIVER_DESC		"Matrox G200/G400"
+ * #define DRIVER_DATE		"20001127"
+ *
+ * #define DRIVER_MAJOR		2
+ * #define DRIVER_MINOR		0
+ * #define DRIVER_PATCHLEVEL	2
+ *
+ * #define DRIVER_IOCTL_COUNT	DRM_ARRAY_SIZE( mga_ioctls )
+ *
+ * #define DRM(x)		mga_##x
+ * \endcode
+ */
+
+/*
  * Created: Thu Nov 23 03:10:50 2000 by gareth@valinux.com
  *
  * Copyright 1999, 2000 Precision Insight, Inc., Cedar Park, Texas.
@@ -23,29 +50,6 @@
  * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
  * OTHER DEALINGS IN THE SOFTWARE.
- *
- * Authors:
- *    Rickard E. (Rik) Faith <faith@valinux.com>
- *    Gareth Hughes <gareth@valinux.com>
- */
-
-/*
- * To use this template, you must at least define the following (samples
- * given for the MGA driver):
- *
- * #define DRIVER_AUTHOR	"VA Linux Systems, Inc."
- *
- * #define DRIVER_NAME		"mga"
- * #define DRIVER_DESC		"Matrox G200/G400"
- * #define DRIVER_DATE		"20001127"
- *
- * #define DRIVER_MAJOR		2
- * #define DRIVER_MINOR		0
- * #define DRIVER_PATCHLEVEL	2
- *
- * #define DRIVER_IOCTL_COUNT	DRM_ARRAY_SIZE( mga_ioctls )
- *
- * #define DRM(x)		mga_##x
  */
 
 #ifndef __MUST_HAVE_AGP
@@ -84,8 +88,18 @@
 #ifndef __HAVE_SG
 #define __HAVE_SG			0
 #endif
+/* __HAVE_KERNEL_CTX_SWITCH isn't used by any of the drm modules in
+ * the DRI cvs tree, but it is required by the kernel tree's sparc
+ * driver.
+ */
 #ifndef __HAVE_KERNEL_CTX_SWITCH
 #define __HAVE_KERNEL_CTX_SWITCH	0
+#endif
+#ifndef __HAVE_DRIVER_FOPS_READ
+#define __HAVE_DRIVER_FOPS_READ		0
+#endif
+#ifndef __HAVE_DRIVER_FOPS_POLL
+#define __HAVE_DRIVER_FOPS_POLL		0
 #endif
 
 #ifndef DRIVER_PREINIT
@@ -113,36 +127,39 @@
 #define DRIVER_IOCTLS
 #endif
 #ifndef DRIVER_FOPS
-#if LINUX_VERSION_CODE >= 0x020400
 #define DRIVER_FOPS				\
 static struct file_operations	DRM(fops) = {	\
-	owner:   THIS_MODULE,			\
-	open:	 DRM(open),			\
-	flush:	 DRM(flush),			\
-	release: DRM(release),			\
-	ioctl:	 DRM(ioctl),			\
-	mmap:	 DRM(mmap),			\
-	read:	 DRM(read),			\
-	fasync:	 DRM(fasync),			\
-	poll:	 DRM(poll),			\
-}
-#else
-#define DRIVER_FOPS				\
-static struct file_operations	DRM(fops) = {	\
-	open:	 DRM(open),			\
-	flush:	 DRM(flush),			\
-	release: DRM(release),			\
-	ioctl:	 DRM(ioctl),			\
-	mmap:	 DRM(mmap),			\
-	read:	 DRM(read),			\
-	fasync:	 DRM(fasync),			\
-	poll:	 DRM(poll),			\
+	.owner   = THIS_MODULE,			\
+	.open	 = DRM(open),			\
+	.flush	 = DRM(flush),			\
+	.release = DRM(release),		\
+	.ioctl	 = DRM(ioctl),			\
+	.mmap	 = DRM(mmap),			\
+	.fasync  = DRM(fasync),			\
+	.poll	 = DRM(poll),			\
+	.read	 = DRM(read),			\
 }
 #endif
+
+#ifndef MODULE
+/** Use an additional macro to avoid preprocessor troubles */
+#define DRM_OPTIONS_FUNC DRM(options)
+/**
+ * Called by the kernel to parse command-line options passed via the
+ * boot-loader (e.g., LILO).  It calls the insmod option routine,
+ * parse_options().
+ */
+static int __init DRM(options)( char *str )
+{
+	DRM(parse_options)( str );
+	return 1;
+}
+
+__setup( DRIVER_NAME "=", DRM_OPTIONS_FUNC );
+#undef DRM_OPTIONS_FUNC
 #endif
 
-
-/*
+/**
  * The default number of instances (minor numbers) to initialize.
  */
 #ifndef DRIVER_NUM_CARDS
@@ -155,6 +172,7 @@ static int		DRM(numdevs) = 0;
 
 DRIVER_FOPS;
 
+/** Ioctl table */
 static drm_ioctl_desc_t		  DRM(ioctls)[] = {
 	[DRM_IOCTL_NR(DRM_IOCTL_VERSION)]       = { DRM(version),     0, 0 },
 	[DRM_IOCTL_NR(DRM_IOCTL_GET_UNIQUE)]    = { DRM(getunique),   0, 0 },
@@ -165,8 +183,8 @@ static drm_ioctl_desc_t		  DRM(ioctls)[] = {
 	[DRM_IOCTL_NR(DRM_IOCTL_GET_STATS)]     = { DRM(getstats),    0, 0 },
 
 	[DRM_IOCTL_NR(DRM_IOCTL_SET_UNIQUE)]    = { DRM(setunique),   1, 1 },
-	[DRM_IOCTL_NR(DRM_IOCTL_BLOCK)]         = { DRM(block),       1, 1 },
-	[DRM_IOCTL_NR(DRM_IOCTL_UNBLOCK)]       = { DRM(unblock),     1, 1 },
+	[DRM_IOCTL_NR(DRM_IOCTL_BLOCK)]         = { DRM(noop),        1, 1 },
+	[DRM_IOCTL_NR(DRM_IOCTL_UNBLOCK)]       = { DRM(noop),        1, 1 },
 	[DRM_IOCTL_NR(DRM_IOCTL_AUTH_MAGIC)]    = { DRM(authmagic),   1, 1 },
 
 	[DRM_IOCTL_NR(DRM_IOCTL_ADD_MAP)]       = { DRM(addmap),      1, 1 },
@@ -190,7 +208,13 @@ static drm_ioctl_desc_t		  DRM(ioctls)[] = {
 
 	[DRM_IOCTL_NR(DRM_IOCTL_LOCK)]	        = { DRM(lock),        1, 0 },
 	[DRM_IOCTL_NR(DRM_IOCTL_UNLOCK)]        = { DRM(unlock),      1, 0 },
+
+#if __HAVE_DMA_FLUSH
+	/* Gamma only, really */
 	[DRM_IOCTL_NR(DRM_IOCTL_FINISH)]        = { DRM(finish),      1, 0 },
+#else
+	[DRM_IOCTL_NR(DRM_IOCTL_FINISH)]        = { DRM(noop),      1, 0 },
+#endif
 
 #if __HAVE_DMA
 	[DRM_IOCTL_NR(DRM_IOCTL_ADD_BUFS)]      = { DRM(addbufs),     1, 1 },
@@ -201,9 +225,7 @@ static drm_ioctl_desc_t		  DRM(ioctls)[] = {
 
 	/* The DRM_IOCTL_DMA ioctl should be defined by the driver.
 	 */
-#if __HAVE_DMA_IRQ
 	[DRM_IOCTL_NR(DRM_IOCTL_CONTROL)]       = { DRM(control),     1, 1 },
-#endif
 #endif
 
 #if __REALLY_HAVE_AGP
@@ -220,6 +242,10 @@ static drm_ioctl_desc_t		  DRM(ioctls)[] = {
 #if __HAVE_SG
 	[DRM_IOCTL_NR(DRM_IOCTL_SG_ALLOC)]      = { DRM(sg_alloc),    1, 1 },
 	[DRM_IOCTL_NR(DRM_IOCTL_SG_FREE)]       = { DRM(sg_free),     1, 1 },
+#endif
+
+#if __HAVE_VBL_IRQ
+	[DRM_IOCTL_NR(DRM_IOCTL_WAIT_VBLANK)]   = { DRM(wait_vblank), 0, 0 },
 #endif
 
 	DRIVER_IOCTLS
@@ -303,10 +329,9 @@ static int DRM(setup)( drm_device_t *dev )
 	if(dev->maplist == NULL) return -ENOMEM;
 	memset(dev->maplist, 0, sizeof(*dev->maplist));
 	INIT_LIST_HEAD(&dev->maplist->head);
-	dev->map_count = 0;
 
 	dev->vmalist = NULL;
-	dev->lock.hw_lock = NULL;
+	dev->sigdata.lock = dev->lock.hw_lock = NULL;
 	init_waitqueue_head( &dev->lock.lock_queue );
 	dev->queue_count = 0;
 	dev->queue_reserved = 0;
@@ -319,7 +344,6 @@ static int DRM(setup)( drm_device_t *dev )
 	dev->last_context = 0;
 	dev->last_switch = 0;
 	dev->last_checked = 0;
-	init_timer( &dev->timer );
 	init_waitqueue_head( &dev->context_wait );
 
 	dev->ctx_start = 0;
@@ -334,7 +358,8 @@ static int DRM(setup)( drm_device_t *dev )
 
 	DRM_DEBUG( "\n" );
 
-	/* The kernel's context could be created here, but is now created
+	/*
+	 * The kernel's context could be created here, but is now created
 	 * in drm_dma_enqueue.	This is more resource-efficient for
 	 * hardware that does not do DMA, but may mean that
 	 * drm_select_queue fails between the time the interrupt is
@@ -345,6 +370,15 @@ static int DRM(setup)( drm_device_t *dev )
 }
 
 
+/**
+ * Take down the DRM device.
+ *
+ * \param dev DRM device structure.
+ *
+ * Frees every resource in \p dev.
+ *
+ * \sa drm_device and setup().
+ */
 static int DRM(takedown)( drm_device_t *dev )
 {
 	drm_magic_entry_t *pt, *next;
@@ -418,51 +452,49 @@ static int DRM(takedown)( drm_device_t *dev )
 	}
 
 	if( dev->maplist ) {
-		for(list = dev->maplist->head.next;
-		    list != &dev->maplist->head;
-		    list = list_next) {
-			list_next = list->next;
+		list_for_each_safe( list, list_next, &dev->maplist->head ) {
 			r_list = (drm_map_list_t *)list;
-			map = r_list->map;
-			DRM(free)(r_list, sizeof(*r_list), DRM_MEM_MAPS);
-			if(!map) continue;
 
-			switch ( map->type ) {
-			case _DRM_REGISTERS:
-			case _DRM_FRAME_BUFFER:
+			if ( ( map = r_list->map ) ) {
+				switch ( map->type ) {
+				case _DRM_REGISTERS:
+				case _DRM_FRAME_BUFFER:
 #if __REALLY_HAVE_MTRR
-				if ( map->mtrr >= 0 ) {
-					int retcode;
-					retcode = mtrr_del( map->mtrr,
-							    map->offset,
-							    map->size );
-					DRM_DEBUG( "mtrr_del=%d\n", retcode );
-				}
+					if ( map->mtrr >= 0 ) {
+						int retcode;
+						retcode = mtrr_del( map->mtrr,
+								    map->offset,
+								    map->size );
+						DRM_DEBUG( "mtrr_del=%d\n", retcode );
+					}
 #endif
-				DRM(ioremapfree)( map->handle, map->size );
-				break;
-			case _DRM_SHM:
-				vfree(map->handle);
-				break;
+					DRM(ioremapfree)( map->handle, map->size, dev );
+					break;
+				case _DRM_SHM:
+					vfree(map->handle);
+					break;
 
-			case _DRM_AGP:
-				/* Do nothing here, because this is all
-				 * handled in the AGP/GART driver.
-				 */
-				break;
-                       case _DRM_SCATTER_GATHER:
-				/* Handle it, but do nothing, if HAVE_SG
-				 * isn't defined.
-				 */
+				case _DRM_AGP:
+					/* Do nothing here, because this is all
+					 * handled in the AGP/GART driver.
+					 */
+					break;
+				case _DRM_SCATTER_GATHER:
+					/* Handle it, but do nothing, if HAVE_SG
+					 * isn't defined.
+					 */
 #if __HAVE_SG
-				if(dev->sg) {
-					DRM(sg_cleanup)(dev->sg);
-					dev->sg = NULL;
-				}
+					if(dev->sg) {
+						DRM(sg_cleanup)(dev->sg);
+						dev->sg = NULL;
+					}
 #endif
-				break;
+					break;
+				}
+				DRM(free)(map, sizeof(*map), DRM_MEM_MAPS);
 			}
- 			DRM(free)(map, sizeof(*map), DRM_MEM_MAPS);
+			list_del( list );
+			DRM(free)(r_list, sizeof(*r_list), DRM_MEM_MAPS);
  		}
 		DRM(free)(dev->maplist, sizeof(*dev->maplist), DRM_MEM_MAPS);
 		dev->maplist = NULL;
@@ -471,7 +503,9 @@ static int DRM(takedown)( drm_device_t *dev )
 #if __HAVE_DMA_QUEUE || __HAVE_MULTIPLE_DMA_QUEUES
 	if ( dev->queuelist ) {
 		for ( i = 0 ; i < dev->queue_count ; i++ ) {
+#if __HAVE_DMA_WAITLIST
 			DRM(waitlist_destroy)( &dev->queuelist[i]->waitlist );
+#endif
 			if ( dev->queuelist[i] ) {
 				DRM(free)( dev->queuelist[i],
 					  sizeof(*dev->queuelist[0]),
@@ -491,8 +525,8 @@ static int DRM(takedown)( drm_device_t *dev )
 	DRM(dma_takedown)( dev );
 #endif
 	if ( dev->lock.hw_lock ) {
-		dev->lock.hw_lock = NULL; /* SHM removed */
-		dev->lock.pid = 0;
+		dev->sigdata.lock = dev->lock.hw_lock = NULL; /* SHM removed */
+		dev->lock.filp = 0;
 		wake_up_interruptible( &dev->lock.lock_queue );
 	}
 	up( &dev->struct_sem );
@@ -500,8 +534,12 @@ static int DRM(takedown)( drm_device_t *dev )
 	return 0;
 }
 
-/*
+/**
  * Figure out how many instances to initialize.
+ *
+ * \return number of cards found.
+ *
+ * Searches for every PCI card in \c DRIVER_CARD_LIST with matching vendor and device ids.
  */
 static int drm_count_cards(void)
 {
@@ -535,8 +573,18 @@ static int drm_count_cards(void)
 	return num;
 }
 
-/* drm_init is called via init_module at module load time, or via
+/**
+ * Module initialization. Called via init_module at module load time, or via
  * linux/init/main.c (this is not currently supported).
+ *
+ * \return zero on success or a negative number on failure.
+ *
+ * Allocates and initialize an array of drm_device structures, and attempts to
+ * initialize all available devices, using consecutive minors, registering the
+ * stubs and initializing the AGP device.
+ * 
+ * Expands the \c DRIVER_PREINIT and \c DRIVER_POST_INIT macros before and
+ * after the initialization for driver customization.
  */
 static int __init drm_init( void )
 {
@@ -575,6 +623,7 @@ static int __init drm_init( void )
 		dev = &(DRM(device)[i]);
 		memset( (void *)dev, 0, sizeof(*dev) );
 		dev->count_lock = SPIN_LOCK_UNLOCKED;
+		init_timer( &dev->timer );
 		sema_init( &dev->struct_sem, 1 );
 
 		if ((DRM(minor)[i] = DRM(stub_register)(DRIVER_NAME, &DRM(fops),dev)) < 0)
@@ -589,7 +638,7 @@ static int __init drm_init( void )
 			DRM_ERROR( "Cannot initialize the agpgart module.\n" );
 			DRM(stub_unregister)(DRM(minor)[i]);
 			DRM(takedown)( dev );
-			return -ENOMEM;
+			return -EINVAL;
 		}
 #endif
 #if __REALLY_HAVE_MTRR
@@ -624,7 +673,12 @@ static int __init drm_init( void )
 	return 0;
 }
 
-/* drm_cleanup is called via cleanup_module at module unload time.
+/**
+ * Called via cleanup_module() at module unload time.
+ *
+ * Cleans up all DRM device, calling takedown().
+ * 
+ * \sa drm_init().
  */
 static void __exit drm_cleanup( void )
 {
@@ -677,6 +731,17 @@ module_init( drm_init );
 module_exit( drm_cleanup );
 
 
+/**
+ * Get version information
+ *
+ * \param inode device inode.
+ * \param filp file pointer.
+ * \param cmd command.
+ * \param arg user argument, pointing to a drm_version structure.
+ * \return zero on success or negative number on failure.
+ *
+ * Fills in the version information in \p arg.
+ */
 int DRM(version)( struct inode *inode, struct file *filp,
 		  unsigned int cmd, unsigned long arg )
 {
@@ -712,6 +777,17 @@ int DRM(version)( struct inode *inode, struct file *filp,
 	return 0;
 }
 
+/**
+ * Open file.
+ * 
+ * \param inode device inode
+ * \param filp file pointer.
+ * \return zero on success or a negative number on failure.
+ *
+ * Searches the DRM device with the same minor number, calls open_helper(), and
+ * increments the device open count. If the open count was previous at zero,
+ * i.e., it's the first that the device is open, then calls setup().
+ */
 int DRM(open)( struct inode *inode, struct file *filp )
 {
 	drm_device_t *dev = NULL;
@@ -719,7 +795,7 @@ int DRM(open)( struct inode *inode, struct file *filp )
 	int i;
 
 	for (i = 0; i < DRM(numdevs); i++) {
-		if (MINOR(inode->i_rdev) == DRM(minor)[i]) {
+		if (iminor(inode) == DRM(minor)[i]) {
 			dev = &(DRM(device)[i]);
 			break;
 		}
@@ -728,13 +804,8 @@ int DRM(open)( struct inode *inode, struct file *filp )
 		return -ENODEV;
 	}
 
-	DRM_DEBUG( "open_count = %d\n", dev->open_count );
-
 	retcode = DRM(open_helper)( inode, filp, dev );
 	if ( !retcode ) {
-#if LINUX_VERSION_CODE < 0x020333
-		MOD_INC_USE_COUNT; /* Needed before Linux 2.3.51 */
-#endif
 		atomic_inc( &dev->counts[_DRM_STAT_OPENS] );
 		spin_lock( &dev->count_lock );
 		if ( !dev->open_count++ ) {
@@ -747,6 +818,18 @@ int DRM(open)( struct inode *inode, struct file *filp )
 	return retcode;
 }
 
+/**
+ * Release file.
+ *
+ * \param inode device inode
+ * \param filp file pointer.
+ * \return zero on success or a negative number on failure.
+ *
+ * If the hardware lock is held then free it, and take it again for the kernel
+ * context since it's necessary to reclaim buffers. Unlink the file private
+ * data from its list and free it. Decreases the open count and if it reaches
+ * zero calls takedown().
+ */
 int DRM(release)( struct inode *inode, struct file *filp )
 {
 	drm_file_t *priv = filp->private_data;
@@ -764,15 +847,15 @@ int DRM(release)( struct inode *inode, struct file *filp )
 	 * Begin inline drm_release
 	 */
 
-	DRM_DEBUG( "pid = %d, device = 0x%x, open_count = %d\n",
-		   current->pid, dev->device, dev->open_count );
+	DRM_DEBUG( "pid = %d, device = 0x%lx, open_count = %d\n",
+		   current->pid, (long)old_encode_dev(dev->device), dev->open_count );
 
-	if ( dev->lock.hw_lock &&
+	if ( priv->lock_count && dev->lock.hw_lock &&
 	     _DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock) &&
-	     dev->lock.pid == current->pid ) {
-		DRM_DEBUG( "Process %d dead, freeing lock for context %d\n",
-			   current->pid,
-			   _DRM_LOCKING_CONTEXT(dev->lock.hw_lock->lock) );
+	     dev->lock.filp == filp ) {
+		DRM_DEBUG( "File %p released, freeing lock for context %d\n",
+			filp,
+			_DRM_LOCKING_CONTEXT(dev->lock.hw_lock->lock) );
 #if __HAVE_RELEASE
 		DRIVER_RELEASE();
 #endif
@@ -785,9 +868,10 @@ int DRM(release)( struct inode *inode, struct file *filp )
                                    server. */
 	}
 #if __HAVE_RELEASE
-	else if ( dev->lock.hw_lock ) {
+	else if ( priv->lock_count && dev->lock.hw_lock ) {
 		/* The lock is required to reclaim buffers */
 		DECLARE_WAITQUEUE( entry, current );
+
 		add_wait_queue( &dev->lock.lock_queue, &entry );
 		for (;;) {
 			current->state = TASK_INTERRUPTIBLE;
@@ -798,15 +882,12 @@ int DRM(release)( struct inode *inode, struct file *filp )
 			}
 			if ( DRM(lock_take)( &dev->lock.hw_lock->lock,
 					     DRM_KERNEL_CONTEXT ) ) {
-				dev->lock.pid	    = priv->pid;
+				dev->lock.filp	    = filp;
 				dev->lock.lock_time = jiffies;
                                 atomic_inc( &dev->counts[_DRM_STAT_LOCKS] );
 				break;	/* Got lock */
 			}
 				/* Contention */
-#if 0
-			atomic_inc( &dev->total_sleeps );
-#endif
 			schedule();
 			if ( signal_pending( current ) ) {
 				retcode = -ERESTARTSYS;
@@ -822,7 +903,7 @@ int DRM(release)( struct inode *inode, struct file *filp )
 		}
 	}
 #elif __HAVE_DMA
-	DRM(reclaim_buffers)( dev, priv->pid );
+	DRM(reclaim_buffers)( filp );
 #endif
 
 	DRM(fasync)( -1, filp, 0 );
@@ -846,16 +927,13 @@ int DRM(release)( struct inode *inode, struct file *filp )
 		dev->file_last	 = priv->prev;
 	}
 	up( &dev->struct_sem );
-
+	
 	DRM(free)( priv, sizeof(*priv), DRM_MEM_FILES );
 
 	/* ========================================================
 	 * End inline drm_release
 	 */
 
-#if LINUX_VERSION_CODE < 0x020333
-	MOD_DEC_USE_COUNT; /* Needed before Linux 2.3.51 */
-#endif
 	atomic_inc( &dev->counts[_DRM_STAT_CLOSES] );
 	spin_lock( &dev->count_lock );
 	if ( !--dev->open_count ) {
@@ -874,10 +952,21 @@ int DRM(release)( struct inode *inode, struct file *filp )
 	spin_unlock( &dev->count_lock );
 
 	unlock_kernel();
+
 	return retcode;
 }
 
-/* DRM(ioctl) is called whenever a process performs an ioctl on /dev/drm.
+/** 
+ * Called whenever a process performs an ioctl on /dev/drm.
+ *
+ * \param inode device inode.
+ * \param filp file pointer.
+ * \param cmd command.
+ * \param arg user argument.
+ * \return zero on success or negative number on failure.
+ *
+ * Looks up the ioctl function in the ::ioctls table, checking for root
+ * previleges if so required, and dispatches to the respective function.
  */
 int DRM(ioctl)( struct inode *inode, struct file *filp,
 		unsigned int cmd, unsigned long arg )
@@ -893,8 +982,9 @@ int DRM(ioctl)( struct inode *inode, struct file *filp,
 	atomic_inc( &dev->counts[_DRM_STAT_IOCTLS] );
 	++priv->ioctl_count;
 
-	DRM_DEBUG( "pid=%d, cmd=0x%02x, nr=0x%02x, dev 0x%x, auth=%d\n",
-		   current->pid, cmd, nr, dev->device, priv->authenticated );
+	DRM_DEBUG( "pid=%d, cmd=0x%02x, nr=0x%02x, dev 0x%lx, auth=%d\n",
+		   current->pid, cmd, nr, (long)old_encode_dev(dev->device), 
+		   priv->authenticated );
 
 	if ( nr >= DRIVER_IOCTL_COUNT ) {
 		retcode = -EINVAL;
@@ -917,6 +1007,17 @@ int DRM(ioctl)( struct inode *inode, struct file *filp,
 	return retcode;
 }
 
+/** 
+ * Lock ioctl.
+ *
+ * \param inode device inode.
+ * \param filp file pointer.
+ * \param cmd command.
+ * \param arg user argument, pointing to a drm_lock structure.
+ * \return zero on success or negative number on failure.
+ *
+ * Add the current task to the lock wait queue, and attempt to take to lock.
+ */
 int DRM(lock)( struct inode *inode, struct file *filp,
 	       unsigned int cmd, unsigned long arg )
 {
@@ -928,11 +1029,8 @@ int DRM(lock)( struct inode *inode, struct file *filp,
 #if __HAVE_MULTIPLE_DMA_QUEUES
 	drm_queue_t *q;
 #endif
-#if __HAVE_DMA_HISTOGRAM
-        cycles_t start;
 
-        dev->lck_start = start = get_cycles();
-#endif
+	++priv->lock_count;
 
         if ( copy_from_user( &lock, (drm_lock_t *)arg, sizeof(lock) ) )
 		return -EFAULT;
@@ -970,7 +1068,7 @@ int DRM(lock)( struct inode *inode, struct file *filp,
                         }
                         if ( DRM(lock_take)( &dev->lock.hw_lock->lock,
 					     lock.context ) ) {
-                                dev->lock.pid       = current->pid;
+                                dev->lock.filp      = filp;
                                 dev->lock.lock_time = jiffies;
                                 atomic_inc( &dev->counts[_DRM_STAT_LOCKS] );
                                 break;  /* Got lock */
@@ -1012,6 +1110,10 @@ int DRM(lock)( struct inode *inode, struct file *filp,
 			DRIVER_DMA_QUIESCENT();
 		}
 #endif
+		/* __HAVE_KERNEL_CTX_SWITCH isn't used by any of the
+		 * drm modules in the DRI cvs tree, but it is required
+		 * by the Sparc driver.
+		 */
 #if __HAVE_KERNEL_CTX_SWITCH
 		if ( dev->last_context != lock.context ) {
 			DRM(context_switch)(dev, dev->last_context,
@@ -1022,13 +1124,20 @@ int DRM(lock)( struct inode *inode, struct file *filp,
 
         DRM_DEBUG( "%d %s\n", lock.context, ret ? "interrupted" : "has lock" );
 
-#if __HAVE_DMA_HISTOGRAM
-        atomic_inc(&dev->histo.lacq[DRM(histogram_slot)(get_cycles()-start)]);
-#endif
         return ret;
 }
 
-
+/** 
+ * Unlock ioctl.
+ *
+ * \param inode device inode.
+ * \param filp file pointer.
+ * \param cmd command.
+ * \param arg user argument, pointing to a drm_lock structure.
+ * \return zero on success or negative number on failure.
+ *
+ * Transfer and free the lock.
+ */
 int DRM(unlock)( struct inode *inode, struct file *filp,
 		 unsigned int cmd, unsigned long arg )
 {
@@ -1047,12 +1156,16 @@ int DRM(unlock)( struct inode *inode, struct file *filp,
 
 	atomic_inc( &dev->counts[_DRM_STAT_UNLOCKS] );
 
+	/* __HAVE_KERNEL_CTX_SWITCH isn't used by any of the drm
+	 * modules in the DRI cvs tree, but it is required by the
+	 * Sparc driver.
+	 */
 #if __HAVE_KERNEL_CTX_SWITCH
 	/* We no longer really hold it, but if we are the next
 	 * agent to request it then we should just be able to
 	 * take it immediately and not eat the ioctl.
 	 */
-	dev->lock.pid = 0;
+	dev->lock.filp = 0;
 	{
 		__volatile__ unsigned int *plock = &dev->lock.hw_lock->lock;
 		unsigned int old, new, prev, ctx;
@@ -1072,13 +1185,9 @@ int DRM(unlock)( struct inode *inode, struct file *filp,
 	DRM(dma_schedule)( dev, 1 );
 #endif
 
-	/* FIXME: Do we ever really need to check this???
-	 */
-	if ( 1 /* !dev->context_flag */ ) {
-		if ( DRM(lock_free)( dev, &dev->lock.hw_lock->lock,
-				     DRM_KERNEL_CONTEXT ) ) {
-			DRM_ERROR( "\n" );
-		}
+	if ( DRM(lock_free)( dev, &dev->lock.hw_lock->lock,
+			     DRM_KERNEL_CONTEXT ) ) {
+		DRM_ERROR( "\n" );
 	}
 #endif /* !__HAVE_KERNEL_CTX_SWITCH */
 

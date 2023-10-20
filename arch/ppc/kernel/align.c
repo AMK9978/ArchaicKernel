@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.align.c 1.5 05/17/01 18:14:21 cort
- */
-/*
  * align.c - handle alignment exceptions for the Power PC.
  *
  * Copyright (c) 1996 Paul Mackerras <paulus@cs.anu.edu.au>
@@ -28,7 +25,7 @@ struct aligninfo {
 #define	OPCD(inst)	(((inst) & 0xFC000000) >> 26)
 #define	RS(inst)	(((inst) & 0x03E00000) >> 21)
 #define	RA(inst)	(((inst) & 0x001F0000) >> 16)
-#define	IS_DFORM(code)	((code) >= 32 && (code) <= 47)
+#define	IS_XFORM(code)	((code) == 31)
 #endif
 
 #define INVALID	{ 0, 0 }
@@ -64,9 +61,9 @@ static struct aligninfo aligninfo[128] = {
 	{ 4, ST+F+S },		/* 00 0 1010: stfs */
 	{ 8, ST+F },		/* 00 0 1011: stfd */
 	INVALID,		/* 00 0 1100 */
-	INVALID,		/* 00 0 1101 */
+	INVALID,		/* 00 0 1101: ld/ldu/lwa */
 	INVALID,		/* 00 0 1110 */
-	INVALID,		/* 00 0 1111 */
+	INVALID,		/* 00 0 1111: std/stdu */
 	{ 4, LD+U },		/* 00 1 0000: lwzu */
 	INVALID,		/* 00 1 0001 */
 	{ 4, ST+U },		/* 00 1 0010: stwu */
@@ -83,12 +80,12 @@ static struct aligninfo aligninfo[128] = {
 	INVALID,		/* 00 1 1101 */
 	INVALID,		/* 00 1 1110 */
 	INVALID,		/* 00 1 1111 */
-	INVALID,		/* 01 0 0000 */
+	INVALID,		/* 01 0 0000: ldx */
 	INVALID,		/* 01 0 0001 */
-	INVALID,		/* 01 0 0010 */
+	INVALID,		/* 01 0 0010: stdx */
 	INVALID,		/* 01 0 0011 */
 	INVALID,		/* 01 0 0100 */
-	INVALID,		/* 01 0 0101: lwax?? */
+	INVALID,		/* 01 0 0101: lwax */
 	INVALID,		/* 01 0 0110 */
 	INVALID,		/* 01 0 0111 */
 	{ 0, LD+HARD },		/* 01 0 1000: lswx */
@@ -99,12 +96,12 @@ static struct aligninfo aligninfo[128] = {
 	INVALID,		/* 01 0 1101 */
 	INVALID,		/* 01 0 1110 */
 	INVALID,		/* 01 0 1111 */
-	INVALID,		/* 01 1 0000 */
+	INVALID,		/* 01 1 0000: ldux */
 	INVALID,		/* 01 1 0001 */
-	INVALID,		/* 01 1 0010 */
+	INVALID,		/* 01 1 0010: stdux */
 	INVALID,		/* 01 1 0011 */
 	INVALID,		/* 01 1 0100 */
-	INVALID,		/* 01 1 0101: lwaux?? */
+	INVALID,		/* 01 1 0101: lwaux */
 	INVALID,		/* 01 1 0110 */
 	INVALID,		/* 01 1 0111 */
 	INVALID,		/* 01 1 1000 */
@@ -160,9 +157,9 @@ static struct aligninfo aligninfo[128] = {
 	{ 4, ST+F+S },		/* 11 0 1010: stfsx */
 	{ 8, ST+F },		/* 11 0 1011: stfdx */
 	INVALID,		/* 11 0 1100 */
-	INVALID,		/* 11 0 1101 */
+	INVALID,		/* 11 0 1101: lmd */
 	INVALID,		/* 11 0 1110 */
-	INVALID,		/* 11 0 1111 */
+	INVALID,		/* 11 0 1111: stmd */
 	{ 4, LD+U },		/* 11 1 0000: lwzux */
 	INVALID,		/* 11 1 0001 */
 	{ 4, ST+U },		/* 11 1 0010: stwux */
@@ -192,13 +189,15 @@ fix_alignment(struct pt_regs *regs)
 #endif
 	int i, t;
 	int reg, areg;
-	unsigned char *addr;
+	unsigned char __user *addr;
 	union {
 		long l;
 		float f;
 		double d;
 		unsigned char v[8];
 	} data;
+
+	CHECK_FULL_REGS(regs);
 
 #if defined(CONFIG_4xx) || defined(CONFIG_POWER4)
 	/* The 4xx-family processors have no DSISR register,
@@ -212,7 +211,7 @@ fix_alignment(struct pt_regs *regs)
 	reg = RS(instr);
 	areg = RA(instr);
 
-	if (IS_DFORM(opcode)) {
+	if (!IS_XFORM(opcode)) {
 		f1 = 0;
 		f2 = (instr & 0x04000000) >> 26;
 		f3 = (instr & 0x78000000) >> 27;
@@ -255,7 +254,7 @@ fix_alignment(struct pt_regs *regs)
 	 * pt_regs structure is overloaded and is really from the DEAR.
 	 */
 
-	addr = (unsigned char *)regs->dar;
+	addr = (unsigned char __user *)regs->dar;
 
 	/* Verify the address of the operand */
 	if (user_mode(regs)) {

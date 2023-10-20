@@ -16,314 +16,320 @@
  * Michael A. Griffith <grif@acm.org>
  */
 
-#include <linux/config.h>	/* for CONFIG_PROC_FS */
-#define __NO_VERSION__
 #include <linux/module.h>
-
+#include <linux/init.h>
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/proc_fs.h>
 #include <linux/errno.h>
-#include <linux/stat.h>
-#include <linux/blk.h>
-
+#include <linux/blkdev.h>
+#include <linux/seq_file.h>
 #include <asm/uaccess.h>
 
+#include <scsi/scsi_host.h>
 #include "scsi.h"
-#include "hosts.h"
 
-#ifndef TRUE
-#define TRUE  1
-#define FALSE 0
-#endif
+#include "scsi_priv.h"
+#include "scsi_logging.h"
 
-#ifdef CONFIG_PROC_FS
 
-/* generic_proc_info
- * Used if the driver currently has no own support for /proc/scsi
- */
-int generic_proc_info(char *buffer, char **start, off_t offset, int length, 
-		      const char *(*info) (struct Scsi_Host *),
-		      struct Scsi_Host *sh)
-{
-	int len, pos, begin;
+/* 4K page size, but our output routines, use some slack for overruns */
+#define PROC_BLOCK_SIZE (3*1024)
 
-	begin = 0;
-	if (info && sh) {
-		pos = len = sprintf(buffer, "%s\n", info(sh));
-	} else {
-		pos = len = sprintf(buffer,
-			"The driver does not yet support the proc-fs\n");
-	}
-	if (pos < offset) {
-		len = 0;
-		begin = pos;
-	}
-	*start = buffer + (offset - begin);	/* Start of wanted data */
-	len -= (offset - begin);
-	if (len > length)
-		len = length;
+static struct proc_dir_entry *proc_scsi;
 
-	return (len);
-}
+/* Protect sht->present and sht->proc_dir */
+static DECLARE_MUTEX(global_host_template_sem);
 
-/* dispatch_scsi_info is the central dispatcher 
- * It is the interface between the proc-fs and the SCSI subsystem code
- */
 static int proc_scsi_read(char *buffer, char **start, off_t offset,
-	int length, int *eof, void *data)
+			  int length, int *eof, void *data)
 {
-	struct Scsi_Host *hpnt = data;
+	struct Scsi_Host *shost = data;
 	int n;
 
-	if (hpnt->hostt->proc_info == NULL)
-		n = generic_proc_info(buffer, start, offset, length,
-				      hpnt->hostt->info, hpnt);
-	else
-		n = (hpnt->hostt->proc_info(buffer, start, offset,
-					   length, hpnt->host_no, 0));
-	*eof = (n<length);
+	n = shost->hostt->proc_info(shost, buffer, start, offset, length, 0);
+	*eof = (n < length);
+
 	return n;
 }
 
-#define PROC_BLOCK_SIZE (3*1024)     /* 4K page size, but our output routines 
-				      * use some slack for overruns 
-				      */
-
-static int proc_scsi_write(struct file * file, const char * buf,
+static int proc_scsi_write_proc(struct file *file, const char *buf,
                            unsigned long count, void *data)
 {
-	struct Scsi_Host *hpnt = data;
-	ssize_t ret = 0;
-	char * page;
+	struct Scsi_Host *shost = data;
+	ssize_t ret = -ENOMEM;
+	char *page;
 	char *start;
     
-	if (hpnt->hostt->proc_info == NULL)
-		ret = -ENOSYS;
-
 	if (count > PROC_BLOCK_SIZE)
 		return -EOVERFLOW;
 
-	if (!(page = (char *) __get_free_page(GFP_KERNEL)))
-		return -ENOMEM;
-	if(copy_from_user(page, buf, count))
-	{
-		free_page((ulong) page);
-		return -EFAULT;
+	page = (char *)__get_free_page(GFP_KERNEL);
+	if (page) {
+		ret = -EFAULT;
+		if (copy_from_user(page, buf, count))
+			goto out;
+		ret = shost->hostt->proc_info(shost, page, &start, 0, count, 1);
 	}
-
-	ret = hpnt->hostt->proc_info(page, &start, 0, count,
-				     hpnt->host_no, 1);
-
-	free_page((ulong) page);
-	return(ret);
+out:
+	free_page((unsigned long)page);
+	return ret;
 }
 
-void build_proc_dir_entries(Scsi_Host_Template * tpnt)
+void scsi_proc_hostdir_add(struct scsi_host_template *sht)
 {
-	struct Scsi_Host *hpnt;
-	char name[10];	/* see scsi_unregister_host() */
+	if (!sht->proc_info)
+		return;
 
-	tpnt->proc_dir = proc_mkdir(tpnt->proc_name, proc_scsi);
-        if (!tpnt->proc_dir) {
-                printk(KERN_ERR "Unable to proc_mkdir in scsi.c/build_proc_dir_entries");
-                return;
-        }
-	tpnt->proc_dir->owner = tpnt->module;
-
-	hpnt = scsi_hostlist;
-	while (hpnt) {
-		if (tpnt == hpnt->hostt) {
-			struct proc_dir_entry *p;
-			sprintf(name,"%d",hpnt->host_no);
-			p = create_proc_read_entry(name,
-					S_IFREG | S_IRUGO | S_IWUSR,
-					tpnt->proc_dir,
-					proc_scsi_read,
-					(void *)hpnt);
-			if (!p)
-				panic("Not enough memory to register SCSI HBA in /proc/scsi !\n");
-			p->write_proc=proc_scsi_write;
-			p->owner = tpnt->module;
-		}
-		hpnt = hpnt->next;
-	}
-}
-
-/*
- *  parseHandle *parseInit(char *buf, char *cmdList, int cmdNum); 
- *              gets a pointer to a null terminated data buffer
- *              and a list of commands with blanks as delimiter 
- *      in between. 
- *      The commands have to be alphanumerically sorted. 
- *      cmdNum has to contain the number of commands.
- *              On success, a pointer to a handle structure
- *              is returned, NULL on failure
- *
- *      int parseOpt(parseHandle *handle, char **param);
- *              processes the next parameter. On success, the
- *              index of the appropriate command in the cmdList
- *              is returned, starting with zero.
- *              param points to the null terminated parameter string.
- *              On failure, -1 is returned.
- *
- *      The databuffer buf may only contain pairs of commands
- *          options, separated by blanks:
- *              <Command> <Parameter> [<Command> <Parameter>]*
- */
-
-typedef struct {
-	char *buf,		/* command buffer  */
-	*cmdList,		/* command list    */
-	*bufPos,		/* actual position */
-	**cmdPos,		/* cmdList index   */
-	 cmdNum;		/* cmd number      */
-} parseHandle;
-
-inline int parseFree(parseHandle * handle)
-{				/* free memory     */
-	kfree(handle->cmdPos);
-	kfree(handle);
-
-	return -1;
-}
-
-parseHandle *parseInit(char *buf, char *cmdList, int cmdNum)
-{
-	char *ptr;		/* temp pointer    */
-	parseHandle *handle;	/* new handle      */
-
-	if (!buf || !cmdList)	/* bad input ?     */
-		return NULL;
-	handle = (parseHandle *) kmalloc(sizeof(parseHandle), GFP_KERNEL);
-	if (!handle)
-		return NULL;	/* out of memory   */
-	handle->cmdPos = (char **) kmalloc(sizeof(int) * cmdNum, GFP_KERNEL);
-	if (!handle->cmdPos) {
-		kfree(handle);
-		return NULL;	/* out of memory   */
-	}
-	handle->buf = handle->bufPos = buf;	/* init handle     */
-	handle->cmdList = cmdList;
-	handle->cmdNum = cmdNum;
-
-	handle->cmdPos[cmdNum = 0] = cmdList;
-	for (ptr = cmdList; *ptr; ptr++) {	/* scan command string */
-		if (*ptr == ' ') {	/* and insert zeroes   */
-			*ptr++ = 0;
-			handle->cmdPos[++cmdNum] = ptr++;
-		}
-	}
-	return handle;
-}
-
-int parseOpt(parseHandle * handle, char **param)
-{
-	int cmdIndex = 0, cmdLen = 0;
-	char *startPos;
-
-	if (!handle)		/* invalid handle  */
-		return (parseFree(handle));
-	/* skip spaces     */
-	for (; *(handle->bufPos) && *(handle->bufPos) == ' '; handle->bufPos++);
-	if (!*(handle->bufPos))
-		return (parseFree(handle));	/* end of data     */
-
-	startPos = handle->bufPos;	/* store cmd start */
-	for (; handle->cmdPos[cmdIndex][cmdLen] && *(handle->bufPos); handle->bufPos++) {	/* no string end?  */
-		for (;;) {
-			if (*(handle->bufPos) == handle->cmdPos[cmdIndex][cmdLen])
-				break;	/* char matches ?  */
-			else if (memcmp(startPos, (char *) (handle->cmdPos[++cmdIndex]), cmdLen))
-				return (parseFree(handle));	/* unknown command */
-
-			if (cmdIndex >= handle->cmdNum)
-				return (parseFree(handle));	/* unknown command */
-		}
-
-		cmdLen++;	/* next char       */
-	}
-
-	/* Get param. First skip all blanks, then insert zero after param  */
-
-	for (; *(handle->bufPos) && *(handle->bufPos) == ' '; handle->bufPos++);
-	*param = handle->bufPos;
-
-	for (; *(handle->bufPos) && *(handle->bufPos) != ' '; handle->bufPos++);
-	*(handle->bufPos++) = 0;
-
-	return (cmdIndex);
-}
-
-void proc_print_scsidevice(Scsi_Device * scd, char *buffer, int *size, int len)
-{
-
-	int x, y = *size;
-	extern const char *const scsi_device_types[MAX_SCSI_DEVICE_CODE];
-
-	y = sprintf(buffer + len,
-	     "Host: scsi%d Channel: %02d Id: %02d Lun: %02d\n  Vendor: ",
-		    scd->host->host_no, scd->channel, scd->id, scd->lun);
-	for (x = 0; x < 8; x++) {
-		if (scd->vendor[x] >= 0x20)
-			y += sprintf(buffer + len + y, "%c", scd->vendor[x]);
+	down(&global_host_template_sem);
+	if (!sht->present++) {
+		sht->proc_dir = proc_mkdir(sht->proc_name, proc_scsi);
+        	if (!sht->proc_dir)
+			printk(KERN_ERR "%s: proc_mkdir failed for %s\n",
+			       __FUNCTION__, sht->proc_name);
 		else
-			y += sprintf(buffer + len + y, " ");
+			sht->proc_dir->owner = sht->module;
 	}
-	y += sprintf(buffer + len + y, " Model: ");
-	for (x = 0; x < 16; x++) {
-		if (scd->model[x] >= 0x20)
-			y += sprintf(buffer + len + y, "%c", scd->model[x]);
-		else
-			y += sprintf(buffer + len + y, " ");
-	}
-	y += sprintf(buffer + len + y, " Rev: ");
-	for (x = 0; x < 4; x++) {
-		if (scd->rev[x] >= 0x20)
-			y += sprintf(buffer + len + y, "%c", scd->rev[x]);
-		else
-			y += sprintf(buffer + len + y, " ");
-	}
-	y += sprintf(buffer + len + y, "\n");
+	up(&global_host_template_sem);
+}
 
-	y += sprintf(buffer + len + y, "  Type:   %s ",
-		     scd->type < MAX_SCSI_DEVICE_CODE ?
-	       scsi_device_types[(int) scd->type] : "Unknown          ");
-	y += sprintf(buffer + len + y, "               ANSI"
-		     " SCSI revision: %02x", (scd->scsi_level - 1) ? scd->scsi_level - 1 : 1);
-	if (scd->scsi_level == 2)
-		y += sprintf(buffer + len + y, " CCS\n");
+void scsi_proc_hostdir_rm(struct scsi_host_template *sht)
+{
+	if (!sht->proc_info)
+		return;
+
+	down(&global_host_template_sem);
+	if (!--sht->present && sht->proc_dir) {
+		remove_proc_entry(sht->proc_name, proc_scsi);
+		sht->proc_dir = NULL;
+	}
+	up(&global_host_template_sem);
+}
+
+void scsi_proc_host_add(struct Scsi_Host *shost)
+{
+	struct scsi_host_template *sht = shost->hostt;
+	struct proc_dir_entry *p;
+	char name[10];
+
+	if (!sht->proc_dir)
+		return;
+
+	sprintf(name,"%d", shost->host_no);
+	p = create_proc_read_entry(name, S_IFREG | S_IRUGO | S_IWUSR,
+			sht->proc_dir, proc_scsi_read, shost);
+	if (!p) {
+		printk(KERN_ERR "%s: Failed to register host %d in"
+		       "%s\n", __FUNCTION__, shost->host_no,
+		       sht->proc_name);
+		return;
+	} 
+
+	p->write_proc = proc_scsi_write_proc;
+	p->owner = sht->module;
+}
+
+void scsi_proc_host_rm(struct Scsi_Host *shost)
+{
+	char name[10];
+
+	if (!shost->hostt->proc_dir)
+		return;
+
+	sprintf(name,"%d", shost->host_no);
+	remove_proc_entry(name, shost->hostt->proc_dir);
+}
+
+static int proc_print_scsidevice(struct device *dev, void *data)
+{
+	struct scsi_device *sdev = to_scsi_device(dev);
+	struct seq_file *s = data;
+	int i;
+
+	seq_printf(s,
+		"Host: scsi%d Channel: %02d Id: %02d Lun: %02d\n  Vendor: ",
+		sdev->host->host_no, sdev->channel, sdev->id, sdev->lun);
+	for (i = 0; i < 8; i++) {
+		if (sdev->vendor[i] >= 0x20)
+			seq_printf(s, "%c", sdev->vendor[i]);
+		else
+			seq_printf(s, " ");
+	}
+
+	seq_printf(s, " Model: ");
+	for (i = 0; i < 16; i++) {
+		if (sdev->model[i] >= 0x20)
+			seq_printf(s, "%c", sdev->model[i]);
+		else
+			seq_printf(s, " ");
+	}
+
+	seq_printf(s, " Rev: ");
+	for (i = 0; i < 4; i++) {
+		if (sdev->rev[i] >= 0x20)
+			seq_printf(s, "%c", sdev->rev[i]);
+		else
+			seq_printf(s, " ");
+	}
+
+	seq_printf(s, "\n");
+
+	seq_printf(s, "  Type:   %s ",
+		     sdev->type < MAX_SCSI_DEVICE_CODE ?
+	       scsi_device_types[(int) sdev->type] : "Unknown          ");
+	seq_printf(s, "               ANSI"
+		     " SCSI revision: %02x", (sdev->scsi_level - 1) ?
+		     sdev->scsi_level - 1 : 1);
+	if (sdev->scsi_level == 2)
+		seq_printf(s, " CCS\n");
 	else
-		y += sprintf(buffer + len + y, "\n");
+		seq_printf(s, "\n");
 
-	*size = y;
-	return;
+	return 0;
 }
 
-#else				/* if !CONFIG_PROC_FS */
-
-void proc_print_scsidevice(Scsi_Device * scd, char *buffer, int *size, int len)
+static int scsi_add_single_device(uint host, uint channel, uint id, uint lun)
 {
+	struct Scsi_Host *shost;
+	int error = -ENXIO;
+
+	shost = scsi_host_lookup(host);
+	if (IS_ERR(shost))
+		return PTR_ERR(shost);
+
+	error = scsi_scan_host_selected(shost, channel, id, lun, 1);
+	scsi_host_put(shost);
+	return error;
 }
 
-#endif				/* CONFIG_PROC_FS */
+static int scsi_remove_single_device(uint host, uint channel, uint id, uint lun)
+{
+	struct scsi_device *sdev;
+	struct Scsi_Host *shost;
+	int error = -ENXIO;
 
-/*
- * Overrides for Emacs so that we get a uniform tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-indent-level: 4
- * c-brace-imaginary-offset: 0
- * c-brace-offset: -4
- * c-argdecl-indent: 4
- * c-label-offset: -4
- * c-continued-statement-offset: 4
- * c-continued-brace-offset: 0
- * indent-tabs-mode: nil
- * tab-width: 8
- * End:
- */
+	shost = scsi_host_lookup(host);
+	if (IS_ERR(shost))
+		return PTR_ERR(shost);
+	sdev = scsi_device_lookup(shost, channel, id, lun);
+	if (sdev) {
+		scsi_remove_device(sdev);
+		scsi_device_put(sdev);
+		error = 0;
+	}
+
+	scsi_host_put(shost);
+	return error;
+}
+
+static ssize_t proc_scsi_write(struct file *file, const char __user *buf,
+			       size_t length, loff_t *ppos)
+{
+	int host, channel, id, lun;
+	char *buffer, *p;
+	int err;
+
+	if (!buf || length > PAGE_SIZE)
+		return -EINVAL;
+
+	buffer = (char *)__get_free_page(GFP_KERNEL);
+	if (!buffer)
+		return -ENOMEM;
+
+	err = -EFAULT;
+	if (copy_from_user(buffer, buf, length))
+		goto out;
+
+	err = -EINVAL;
+	if (length < PAGE_SIZE)
+		buffer[length] = '\0';
+	else if (buffer[PAGE_SIZE-1])
+		goto out;
+
+	/*
+	 * Usage: echo "scsi add-single-device 0 1 2 3" >/proc/scsi/scsi
+	 * with  "0 1 2 3" replaced by your "Host Channel Id Lun".
+	 */
+	if (!strncmp("scsi add-single-device", buffer, 22)) {
+		p = buffer + 23;
+
+		host = simple_strtoul(p, &p, 0);
+		channel = simple_strtoul(p + 1, &p, 0);
+		id = simple_strtoul(p + 1, &p, 0);
+		lun = simple_strtoul(p + 1, &p, 0);
+
+		err = scsi_add_single_device(host, channel, id, lun);
+		if (err >= 0)
+			err = length;
+
+	/*
+	 * Usage: echo "scsi remove-single-device 0 1 2 3" >/proc/scsi/scsi
+	 * with  "0 1 2 3" replaced by your "Host Channel Id Lun".
+	 */
+	} else if (!strncmp("scsi remove-single-device", buffer, 25)) {
+		p = buffer + 26;
+
+		host = simple_strtoul(p, &p, 0);
+		channel = simple_strtoul(p + 1, &p, 0);
+		id = simple_strtoul(p + 1, &p, 0);
+		lun = simple_strtoul(p + 1, &p, 0);
+
+		err = scsi_remove_single_device(host, channel, id, lun);
+	}
+
+ out:
+	free_page((unsigned long)buffer);
+	return err;
+}
+
+static int proc_scsi_show(struct seq_file *s, void *p)
+{
+	seq_printf(s, "Attached devices:\n");
+	bus_for_each_dev(&scsi_bus_type, NULL, s, proc_print_scsidevice);
+	return 0;
+}
+
+static int proc_scsi_open(struct inode *inode, struct file *file)
+{
+	/*
+	 * We don't really needs this for the write case but it doesn't
+	 * harm either.
+	 */
+	return single_open(file, proc_scsi_show, NULL);
+}
+
+static struct file_operations proc_scsi_operations = {
+	.open		= proc_scsi_open,
+	.read		= seq_read,
+	.write		= proc_scsi_write,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+int __init scsi_init_procfs(void)
+{
+	struct proc_dir_entry *pde;
+
+	proc_scsi = proc_mkdir("scsi", 0);
+	if (!proc_scsi)
+		goto err1;
+
+	pde = create_proc_entry("scsi/scsi", 0, NULL);
+	if (!pde)
+		goto err2;
+	pde->proc_fops = &proc_scsi_operations;
+
+	return 0;
+
+err2:
+	remove_proc_entry("scsi", 0);
+err1:
+	return -ENOMEM;
+}
+
+void scsi_exit_procfs(void)
+{
+	remove_proc_entry("scsi/scsi", 0);
+	remove_proc_entry("scsi", 0);
+}

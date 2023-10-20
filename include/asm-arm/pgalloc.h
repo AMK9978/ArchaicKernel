@@ -10,132 +10,123 @@
 #ifndef _ASMARM_PGALLOC_H
 #define _ASMARM_PGALLOC_H
 
-#include <linux/config.h>
-
 #include <asm/processor.h>
-
-/*
- * Get the cache handling stuff now.
- */
-#include <asm/proc/cache.h>
-
-/*
- * ARM processors do not cache TLB tables in RAM.
- */
-#define flush_tlb_pgtables(mm,start,end)	do { } while (0)
-
-/*
- * Processor specific parts...
- */
-#include <asm/proc/pgalloc.h>
-
-/*
- * Page table cache stuff
- */
-#ifndef CONFIG_NO_PGT_CACHE
-
-#ifdef CONFIG_SMP
-#error Pgtable caches have to be per-CPU, so that no locking is needed.
-#endif	/* CONFIG_SMP */
-
-extern struct pgtable_cache_struct {
-	unsigned long *pgd_cache;
-	unsigned long *pte_cache;
-	unsigned long pgtable_cache_sz;
-} quicklists;
-
-#define pgd_quicklist		(quicklists.pgd_cache)
-#define pmd_quicklist		((unsigned long *)0)
-#define pte_quicklist		(quicklists.pte_cache)
-#define pgtable_cache_size	(quicklists.pgtable_cache_sz)
-
-/* used for quicklists */
-#define __pgd_next(pgd) (((unsigned long *)pgd)[1])
-#define __pte_next(pte)	(((unsigned long *)pte)[0])
-
-static inline pgd_t *get_pgd_fast(void)
-{
-	unsigned long *ret;
-
-	if ((ret = pgd_quicklist) != NULL) {
-		pgd_quicklist = (unsigned long *)__pgd_next(ret);
-		ret[1] = ret[2];
-		clean_dcache_entry(ret + 1);
-		pgtable_cache_size--;
-	}
-	return (pgd_t *)ret;
-}
-
-static inline void free_pgd_fast(pgd_t *pgd)
-{
-	__pgd_next(pgd) = (unsigned long) pgd_quicklist;
-	pgd_quicklist = (unsigned long *) pgd;
-	pgtable_cache_size++;
-}
-
-static inline pte_t *pte_alloc_one_fast(struct mm_struct *mm, unsigned long address)
-{
-	unsigned long *ret;
-
-	if((ret = pte_quicklist) != NULL) {
-		pte_quicklist = (unsigned long *)__pte_next(ret);
-		ret[0] = 0;
-		clean_dcache_entry(ret);
-		pgtable_cache_size--;
-	}
-	return (pte_t *)ret;
-}
-
-static inline void free_pte_fast(pte_t *pte)
-{
-	__pte_next(pte) = (unsigned long) pte_quicklist;
-	pte_quicklist = (unsigned long *) pte;
-	pgtable_cache_size++;
-}
-
-#else	/* CONFIG_NO_PGT_CACHE */
-
-#define pgd_quicklist			((unsigned long *)0)
-#define pmd_quicklist			((unsigned long *)0)
-#define pte_quicklist			((unsigned long *)0)
-
-#define get_pgd_fast()			((pgd_t *)0)
-#define pte_alloc_one_fast(mm,addr)	((pte_t *)0)
-
-#define free_pgd_fast(pgd)		free_pgd_slow(pgd)
-#define free_pte_fast(pte)		pte_free_slow(pte)
-
-#endif	/* CONFIG_NO_PGT_CACHE */
-
-#define pte_free(pte)			free_pte_fast(pte)
-
+#include <asm/cacheflush.h>
+#include <asm/tlbflush.h>
 
 /*
  * Since we have only two-level page tables, these are trivial
  */
-#define pmd_alloc_one_fast(mm,addr)	({ BUG(); ((pmd_t *)1); })
 #define pmd_alloc_one(mm,addr)		({ BUG(); ((pmd_t *)2); })
-#define pmd_free_slow(pmd)		do { } while (0)
-#define pmd_free_fast(pmd)		do { } while (0)
 #define pmd_free(pmd)			do { } while (0)
 #define pgd_populate(mm,pmd,pte)	BUG()
 
 extern pgd_t *get_pgd_slow(struct mm_struct *mm);
 extern void free_pgd_slow(pgd_t *pgd);
 
-static inline pgd_t *pgd_alloc(struct mm_struct *mm)
+#define pgd_alloc(mm)			get_pgd_slow(mm)
+#define pgd_free(pgd)			free_pgd_slow(pgd)
+
+#define check_pgt_cache()		do { } while (0)
+
+/*
+ * Allocate one PTE table.
+ *
+ * This actually allocates two hardware PTE tables, but we wrap this up
+ * into one table thus:
+ *
+ *  +------------+
+ *  |  h/w pt 0  |
+ *  +------------+
+ *  |  h/w pt 1  |
+ *  +------------+
+ *  | Linux pt 0 |
+ *  +------------+
+ *  | Linux pt 1 |
+ *  +------------+
+ */
+static inline pte_t *
+pte_alloc_one_kernel(struct mm_struct *mm, unsigned long addr)
 {
-	pgd_t *pgd;
+	pte_t *pte;
 
-	pgd = get_pgd_fast();
-	if (!pgd)
-		pgd = get_pgd_slow(mm);
+	pte = (pte_t *)__get_free_page(GFP_KERNEL|__GFP_REPEAT);
+	if (pte) {
+		clear_page(pte);
+		clean_dcache_area(pte, sizeof(pte_t) * PTRS_PER_PTE);
+		pte += PTRS_PER_PTE;
+	}
 
-	return pgd;
+	return pte;
 }
 
-#define pgd_free(pgd)			free_pgd_fast(pgd)
+static inline struct page *
+pte_alloc_one(struct mm_struct *mm, unsigned long addr)
+{
+	struct page *pte;
 
-extern int do_check_pgt_cache(int, int);
+	pte = alloc_pages(GFP_KERNEL|__GFP_REPEAT, 0);
+	if (pte) {
+		void *page = page_address(pte);
+		clear_page(page);
+		clean_dcache_area(page, sizeof(pte_t) * PTRS_PER_PTE);
+	}
+
+	return pte;
+}
+
+/*
+ * Free one PTE table.
+ */
+static inline void pte_free_kernel(pte_t *pte)
+{
+	if (pte) {
+		pte -= PTRS_PER_PTE;
+		free_page((unsigned long)pte);
+	}
+}
+
+static inline void pte_free(struct page *pte)
+{
+	__free_page(pte);
+}
+
+/*
+ * Populate the pmdp entry with a pointer to the pte.  This pmd is part
+ * of the mm address space.
+ *
+ * Ensure that we always set both PMD entries.
+ */
+static inline void
+pmd_populate_kernel(struct mm_struct *mm, pmd_t *pmdp, pte_t *ptep)
+{
+	unsigned long pte_ptr = (unsigned long)ptep;
+	unsigned long pmdval;
+
+	BUG_ON(mm != &init_mm);
+
+	/*
+	 * The pmd must be loaded with the physical
+	 * address of the PTE table
+	 */
+	pte_ptr -= PTRS_PER_PTE * sizeof(void *);
+	pmdval = __pa(pte_ptr) | _PAGE_KERNEL_TABLE;
+	pmdp[0] = __pmd(pmdval);
+	pmdp[1] = __pmd(pmdval + 256 * sizeof(pte_t));
+	flush_pmd_entry(pmdp);
+}
+
+static inline void
+pmd_populate(struct mm_struct *mm, pmd_t *pmdp, struct page *ptep)
+{
+	unsigned long pmdval;
+
+	BUG_ON(mm == &init_mm);
+
+	pmdval = page_to_pfn(ptep) << PAGE_SHIFT | _PAGE_USER_TABLE;
+	pmdp[0] = __pmd(pmdval);
+	pmdp[1] = __pmd(pmdval + 256 * sizeof(pte_t));
+	flush_pmd_entry(pmdp);
+}
 
 #endif

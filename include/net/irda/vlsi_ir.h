@@ -3,9 +3,9 @@
  *
  *	vlsi_ir.h:	VLSI82C147 PCI IrDA controller driver for Linux
  *
- *	Version:	0.3, Sep 30, 2001
+ *	Version:	0.5
  *
- *	Copyright (c) 2001 Martin Diehl
+ *	Copyright (c) 2001-2003 Martin Diehl
  *
  *	This program is free software; you can redistribute it and/or 
  *	modify it under the terms of the GNU General Public License as 
@@ -26,6 +26,72 @@
 
 #ifndef IRDA_VLSI_FIR_H
 #define IRDA_VLSI_FIR_H
+
+/* ================================================================
+ * compatibility stuff
+ */
+
+/* definitions not present in pci_ids.h */
+
+#ifndef PCI_CLASS_WIRELESS_IRDA
+#define PCI_CLASS_WIRELESS_IRDA		0x0d00
+#endif
+
+#ifndef PCI_CLASS_SUBCLASS_MASK
+#define PCI_CLASS_SUBCLASS_MASK		0xffff
+#endif
+
+/* missing pci-dma api call to give streaming dma buffer back to hw
+ * patch was floating on lkml around 2.5.2x and might be present later.
+ * Defining it this way is ok, since the vlsi-ir is only
+ * used on two oldish x86-based notebooks which are cache-coherent
+ * (and flush_write_buffers also handles PPro errata and C3 OOstore)
+ */
+#ifdef CONFIG_X86
+#include <asm-i386/io.h>
+#define pci_dma_prep_single(dev, addr, size, direction)	flush_write_buffers()
+#else
+#error missing pci dma api call
+#endif
+
+/* in recent 2.5 interrupt handlers have non-void return value */
+#ifndef IRQ_RETVAL
+typedef void irqreturn_t;
+#define IRQ_NONE
+#define IRQ_HANDLED
+#define IRQ_RETVAL(x)
+#endif
+
+/* some stuff need to check kernelversion. Not all 2.5 stuff was present
+ * in early 2.5.x - the test is merely to separate 2.4 from 2.5
+ */
+#include <linux/version.h>
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0)
+
+/* PDE() introduced in 2.5.4 */
+#ifdef CONFIG_PROC_FS
+#define PDE(inode) ((inode)->u.generic_ip)
+#endif
+
+/* irda crc16 calculation exported in 2.5.42 */
+#define irda_calc_crc16(fcs,buf,len)	(GOOD_FCS)
+
+/* we use this for unified pci device name access */
+#define PCIDEV_NAME(pdev)	((pdev)->name)
+
+#else /* 2.5 or later */
+
+/* recent 2.5/2.6 stores pci device names at varying places ;-) */
+#ifdef CONFIG_PCI_NAMES
+/* human readable name */
+#define PCIDEV_NAME(pdev)	((pdev)->pretty_name)
+#else
+/* whatever we get from the associated struct device - bus:slot:dev.fn id */
+#define PCIDEV_NAME(pdev)	(pci_name(pdev))
+#endif
+
+#endif
 
 /* ================================================================ */
 
@@ -58,20 +124,20 @@ enum vlsi_pci_clkctl {
 
 	/* PLL control */
 
-	CLKCTL_NO_PD		= 0x04,		/* PD# (inverted power down) signal,
-						 * i.e. PLL is powered, if NO_PD set */
+	CLKCTL_PD_INV		= 0x04,		/* PD#: inverted power down signal,
+						 * i.e. PLL is powered, if PD_INV set */
 	CLKCTL_LOCK		= 0x40,		/* (ro) set, if PLL is locked */
 
 	/* clock source selection */
 
-	CLKCTL_EXTCLK		= 0x20,		/* set to select external clock input */
-	CLKCTL_XCKSEL		= 0x10,		/* set to indicate 40MHz EXTCLK, not 48MHz */
+	CLKCTL_EXTCLK		= 0x20,		/* set to select external clock input, not PLL */
+	CLKCTL_XCKSEL		= 0x10,		/* set to indicate EXTCLK is 40MHz, not 48MHz */
 
 	/* IrDA block control */
 
 	CLKCTL_CLKSTP		= 0x80,		/* set to disconnect from selected clock source */
 	CLKCTL_WAKE		= 0x08		/* set to enable wakeup feature: whenever IR activity
-						 * is detected, NO_PD gets set and CLKSTP cleared */
+						 * is detected, PD_INV gets set(?) and CLKSTP cleared */
 };
 
 /* ------------------------------------------ */
@@ -82,10 +148,9 @@ enum vlsi_pci_clkctl {
 #define DMA_MASK_MSTRPAGE	0x00ffffff
 #define MSTRPAGE_VALUE		(DMA_MASK_MSTRPAGE >> 24)
 
-
 	/* PCI busmastering is somewhat special for this guy - in short:
 	 *
-	 * We select to operate using MSTRPAGE=0 fixed, use ISA DMA
+	 * We select to operate using fixed MSTRPAGE=0, use ISA DMA
 	 * address restrictions to make the PCI BM api aware of this,
 	 * but ensure the hardware is dealing with real 32bit access.
 	 *
@@ -126,7 +191,7 @@ enum vlsi_pci_clkctl {
  *	- IRMISC_UARTSEL configured
  *	- IRCFG_MASTER must be cleared
  *	- IRCFG_SIR must be set
- *	- IRENABLE_IREN must be asserted 0->1 (and hence IRENABLE_SIR_ON)
+ *	- IRENABLE_PHYANDCLOCK must be asserted 0->1 (and hence IRENABLE_SIR_ON)
  */
 
 enum vlsi_pci_irmisc {
@@ -150,7 +215,6 @@ enum vlsi_pci_irmisc {
 	IRMISC_UARTSEL_3e8	= 0x02,
 	IRMISC_UARTSEL_2e8	= 0x03
 };
-
 
 /* ================================================================ */
 
@@ -287,7 +351,7 @@ enum vlsi_pio_irintr {
 /* notes:
  *	- not more than one SIR/MIR/FIR bit must be set at any time
  *	- SIR, MIR, FIR and CRC16 select the configuration which will
- *	  be applied on next 0->1 transition of IRENABLE_IREN (see below).
+ *	  be applied on next 0->1 transition of IRENABLE_PHYANDCLOCK (see below).
  *	- besides allowing the PCI interface to execute busmaster cycles
  *	  and therefore the ring SM to operate, the MSTR bit has side-effects:
  *	  when MSTR is cleared, the RINGPTR's get reset and the legacy UART mode
@@ -338,7 +402,7 @@ enum vlsi_pio_ircfg {
  */
 
 enum vlsi_pio_irenable {
-	IRENABLE_IREN		= 0x8000,  /* enable IR phy and gate the mode config (rw) */
+	IRENABLE_PHYANDCLOCK	= 0x8000,  /* enable IR phy and gate the mode config (rw) */
 	IRENABLE_CFGER		= 0x4000,  /* mode configuration error (ro) */
 	IRENABLE_FIR_ON		= 0x2000,  /* FIR on status (ro) */
 	IRENABLE_MIR_ON		= 0x1000,  /* MIR on status (ro) */
@@ -350,25 +414,20 @@ enum vlsi_pio_irenable {
 
 #define	  IRENABLE_MASK	    0xff00  /* Read mask */
 
-
 /* ------------------------------------------ */
 
 /* VLSI_PIO_PHYCTL: IR Physical Layer Current Control Register (u16, ro) */
 
-
 /* read-back of the currently applied physical layer status.
- * applied from VLSI_PIO_NPHYCTL at rising edge of IRENABLE_IREN
+ * applied from VLSI_PIO_NPHYCTL at rising edge of IRENABLE_PHYANDCLOCK
  * contents identical to VLSI_PIO_NPHYCTL (see below)
  */
 
-
-
 /* ------------------------------------------ */
-
 
 /* VLSI_PIO_NPHYCTL: IR Physical Layer Next Control Register (u16, rw) */
 
-/* latched during IRENABLE_IREN=0 and applied at 0-1 transition
+/* latched during IRENABLE_PHYANDCLOCK=0 and applied at 0-1 transition
  *
  * consists of BAUD[15:10], PLSWID[9:5] and PREAMB[4:0] bits defined as follows:
  *
@@ -376,16 +435,16 @@ enum vlsi_pio_irenable {
  *		PLSWID = (pulsetime * freq / (BAUD+1)) - 1
  *			where pulsetime is the requested IrPHY pulse width
  *			and freq is 8(16)MHz for 40(48)MHz primary input clock
- *		PREAMB: dont care for SIR
+ *		PREAMB: don't care for SIR
  *
  *		The nominal SIR pulse width is 3/16 bit time so we have PLSWID=12
  *		fixed for all SIR speeds at 40MHz input clock (PLSWID=24 at 48MHz).
  *		IrPHY also allows shorter pulses down to the nominal pulse duration
  *		at 115.2kbaud (minus some tolerance) which is 1.41 usec.
- *		Using the expression PLSWID = 12/(BAUD+1)-1 (multiplied by to for 48MHz)
+ *		Using the expression PLSWID = 12/(BAUD+1)-1 (multiplied by two for 48MHz)
  *		we get the minimum acceptable PLSWID values according to the VLSI
  *		specification, which provides 1.5 usec pulse width for all speeds (except
- *		for 2.4kbaud getting 6usec). This is well inside IrPHY v1.3 specs and
+ *		for 2.4kbaud getting 6usec). This is fine with IrPHY v1.3 specs and
  *		reduces the transceiver power which drains the battery. At 9.6kbaud for
  *		example this amounts to more than 90% battery power saving!
  *
@@ -395,11 +454,25 @@ enum vlsi_pio_irenable {
  *		PREAMB = 1
  *
  * FIR-mode:	BAUD = 0
- *		PLSWID: dont care
+ *		PLSWID: don't care
  *		PREAMB = 15
  */
 
-#define BWP_TO_PHYCTL(B,W,P)	((((B)&0x3f)<<10) | (((W)&0x1f)<<5) | (((P)&0x1f)<<0))
+#define PHYCTL_BAUD_SHIFT	10
+#define PHYCTL_BAUD_MASK	0xfc00
+#define PHYCTL_PLSWID_SHIFT	5
+#define PHYCTL_PLSWID_MASK	0x03e0
+#define PHYCTL_PREAMB_SHIFT	0
+#define PHYCTL_PREAMB_MASK	0x001f
+
+#define PHYCTL_TO_BAUD(bwp)	(((bwp)&PHYCTL_BAUD_MASK)>>PHYCTL_BAUD_SHIFT)
+#define PHYCTL_TO_PLSWID(bwp)	(((bwp)&PHYCTL_PLSWID_MASK)>>PHYCTL_PLSWID_SHIFT)
+#define PHYCTL_TO_PREAMB(bwp)	(((bwp)&PHYCTL_PREAMB_MASK)>>PHYCTL_PREAMB_SHIFT)
+
+#define BWP_TO_PHYCTL(b,w,p)	((((b)<<PHYCTL_BAUD_SHIFT)&PHYCTL_BAUD_MASK) \
+				 | (((w)<<PHYCTL_PLSWID_SHIFT)&PHYCTL_PLSWID_MASK) \
+				 | (((p)<<PHYCTL_PREAMB_SHIFT)&PHYCTL_PREAMB_MASK))
+
 #define BAUD_BITS(br)		((115200/(br))-1)
 
 static inline unsigned
@@ -416,7 +489,6 @@ calc_width_bits(unsigned baudrate, unsigned widthselect, unsigned clockselect)
 
 	return (tmp>0) ? (tmp-1) : 0;
 }
-
 
 #define PHYCTL_SIR(br,ws,cs)	BWP_TO_PHYCTL(BAUD_BITS(br),calc_width_bits((br),(ws),(cs)),0)
 #define PHYCTL_MIR(cs)		BWP_TO_PHYCTL(0,((cs)?9:10),1)
@@ -445,42 +517,61 @@ calc_width_bits(unsigned baudrate, unsigned widthselect, unsigned clockselect)
 
 /* VLSI_PIO_MAXPKT: Maximum Packet Length register (u16, rw) */
 
-/* specifies the maximum legth (up to 4k - or (4k-1)? - bytes), which a
- * received frame may have - i.e. the size of the corresponding
- * receive buffers. For simplicity we use the same length for
- * receive and submit buffers and increase transfer buffer size
- * byond IrDA-MTU = 2048 so we have sufficient space left when
- * packet size increases during wrapping due to XBOFs and CE's.
- * Even for receiving unwrapped frames we need >MAX_PACKET_LEN
- * space since the controller appends FCS/CRC (2 or 4 bytes)
- * so we use 2*IrDA-MTU for both directions and cover even the
- * worst case, where all data bytes have to be escaped when wrapping.
- * well, this wastes some memory - anyway, later we will
- * either map skb's directly or use pci_pool allocator...
+/* maximum acceptable length for received packets */
+
+/* hw imposed limitation - register uses only [11:0] */
+#define MAX_PACKET_LENGTH	0x0fff
+
+/* IrLAP I-field (apparently not defined elsewhere) */
+#define IRDA_MTU		2048
+
+/* complete packet consists of A(1)+C(1)+I(<=IRDA_MTU) */
+#define IRLAP_SKB_ALLOCSIZE	(1+1+IRDA_MTU)
+
+/* the buffers we use to exchange frames with the hardware need to be
+ * larger than IRLAP_SKB_ALLOCSIZE because we may have up to 4 bytes FCS
+ * appended and, in SIR mode, a lot of frame wrapping bytes. The worst
+ * case appears to be a SIR packet with I-size==IRDA_MTU and all bytes
+ * requiring to be escaped to provide transparency. Furthermore, the peer
+ * might ask for quite a number of additional XBOFs:
+ *	up to 115+48 XBOFS		 163
+ *	regular BOF			   1
+ *	A-field				   1
+ *	C-field				   1
+ *	I-field, IRDA_MTU, all escaped	4096
+ *	FCS (16 bit at SIR, escaped)	   4
+ *	EOF				   1
+ * AFAICS nothing in IrLAP guarantees A/C field not to need escaping
+ * (f.e. 0xc0/0xc1 - i.e. BOF/EOF - are legal values there) so in the
+ * worst case we have 4269 bytes total frame size.
+ * However, the VLSI uses 12 bits only for all buffer length values,
+ * which limits the maximum useable buffer size <= 4095.
+ * Note this is not a limitation in the receive case because we use
+ * the SIR filtering mode where the hw unwraps the frame and only the
+ * bare packet+fcs is stored into the buffer - in contrast to the SIR
+ * tx case where we have to pass frame-wrapped packets to the hw.
+ * If this would ever become an issue in real life, the only workaround
+ * I see would be using the legacy UART emulation in SIR mode.
  */
- 
-#define IRDA_MTU	2048		/* seems to be undefined elsewhere */
- 
-#define XFER_BUF_SIZE		(2*IRDA_MTU)
 
-#define MAX_PACKET_LENGTH	(XFER_BUF_SIZE-1) /* register uses only [11:0] */
-
+#define XFER_BUF_SIZE		MAX_PACKET_LENGTH
 
 /* ------------------------------------------ */
 
-
 /* VLSI_PIO_RCVBCNT: Receive Byte Count Register (u16, ro) */
 
-/* recive packet counter gets incremented on every non-filtered
+/* receive packet counter gets incremented on every non-filtered
  * byte which was put in the receive fifo and reset for each
  * new packet. Used to decide whether we are just in the middle
  * of receiving
  */
 
+/* better apply the [11:0] mask when reading, as some docs say the
+ * reserved [15:12] would return 1 when reading - which is wrong AFAICS
+ */
 #define RCVBCNT_MASK	0x0fff
 
-/* ================================================================ */
-
+/******************************************************************/
 
 /* descriptors for rx/tx ring
  *
@@ -494,10 +585,10 @@ calc_width_bits(unsigned baudrate, unsigned widthselect, unsigned clockselect)
  *
  * Attention: Writing addr overwrites status!
  *
- * ### FIXME: we depend on endianess here
+ * ### FIXME: depends on endianess (but there ain't no non-i586 ob800 ;-)
  */
 
-struct ring_descr {
+struct ring_descr_hw {
 	volatile u16	rd_count;	/* tx/rx count [11:0] */
 	u16		reserved;
 	union {
@@ -505,60 +596,169 @@ struct ring_descr {
 		struct {
 			u8		addr_res[3];
 			volatile u8	status;		/* descriptor status */
-		} rd_s;
-	} rd_u;
-};
+		} rd_s __attribute__((packed));
+	} rd_u __attribute((packed));
+} __attribute__ ((packed));
 
 #define rd_addr		rd_u.addr
 #define rd_status	rd_u.rd_s.status
 
-
 /* ring descriptor status bits */
 
-#define RD_STAT_ACTIVE		0x80	/* descriptor owned by hw (both TX,RX) */
+#define RD_ACTIVE		0x80	/* descriptor owned by hw (both TX,RX) */
 
 /* TX ring descriptor status */
 
-#define	TX_STAT_DISCRC		0x40	/* do not send CRC (for SIR) */
-#define	TX_STAT_BADCRC		0x20	/* force a bad CRC */
-#define	TX_STAT_PULSE		0x10	/* send indication pulse after this frame (MIR/FIR) */
-#define	TX_STAT_FRCEUND		0x08	/* force underrun */
-#define	TX_STAT_CLRENTX		0x04	/* clear ENTX after this frame */
-#define	TX_STAT_UNDRN		0x01	/* TX fifo underrun (probably PCI problem) */
+#define	RD_TX_DISCRC		0x40	/* do not send CRC (for SIR) */
+#define	RD_TX_BADCRC		0x20	/* force a bad CRC */
+#define	RD_TX_PULSE		0x10	/* send indication pulse after this frame (MIR/FIR) */
+#define	RD_TX_FRCEUND		0x08	/* force underrun */
+#define	RD_TX_CLRENTX		0x04	/* clear ENTX after this frame */
+#define	RD_TX_UNDRN		0x01	/* TX fifo underrun (probably PCI problem) */
 
 /* RX ring descriptor status */
 
-#define RX_STAT_PHYERR		0x40	/* physical encoding error */
-#define RX_STAT_CRCERR		0x20	/* CRC error (MIR/FIR) */
-#define RX_STAT_LENGTH		0x10	/* frame exceeds buffer length */
-#define RX_STAT_OVER		0x08	/* RX fifo overrun (probably PCI problem) */
-#define RX_STAT_SIRBAD		0x04	/* EOF missing: BOF follows BOF (SIR, filtered) */
+#define RD_RX_PHYERR		0x40	/* physical encoding error */
+#define RD_RX_CRCERR		0x20	/* CRC error (MIR/FIR) */
+#define RD_RX_LENGTH		0x10	/* frame exceeds buffer length */
+#define RD_RX_OVER		0x08	/* RX fifo overrun (probably PCI problem) */
+#define RD_RX_SIRBAD		0x04	/* EOF missing: BOF follows BOF (SIR, filtered) */
 
+#define RD_RX_ERROR		0x7c	/* any error in received frame */
 
-#define RX_STAT_ERROR		0x7c	/* any error in frame */
+/* the memory required to hold the 2 descriptor rings */
+#define HW_RING_AREA_SIZE	(2 * MAX_RING_DESCR * sizeof(struct ring_descr_hw))
 
+/******************************************************************/
 
-/* ------------------------------------------ */
-
-/* contains the objects we've put into the ring descriptors
- * static buffers for now - probably skb's later
+/* sw-ring descriptors consists of a bus-mapped transfer buffer with
+ * associated skb and a pointer to the hw entry descriptor
  */
 
-struct ring_entry {
-	struct sk_buff	*skb;
-	void		*data;
+struct ring_descr {
+	struct ring_descr_hw	*hw;
+	struct sk_buff		*skb;
+	void			*buf;
 };
 
+/* wrappers for operations on hw-exposed ring descriptors
+ * access to the hw-part of the descriptors must use these.
+ */
+
+static inline int rd_is_active(struct ring_descr *rd)
+{
+	return ((rd->hw->rd_status & RD_ACTIVE) != 0);
+}
+
+static inline void rd_activate(struct ring_descr *rd)
+{
+	rd->hw->rd_status |= RD_ACTIVE;
+}
+
+static inline void rd_set_status(struct ring_descr *rd, u8 s)
+{
+	rd->hw->rd_status = s;	 /* may pass ownership to the hardware */
+}
+
+static inline void rd_set_addr_status(struct ring_descr *rd, dma_addr_t a, u8 s)
+{
+	/* order is important for two reasons:
+	 *  - overlayed: writing addr overwrites status
+	 *  - we want to write status last so we have valid address in
+	 *    case status has RD_ACTIVE set
+	 */
+
+	if ((a & ~DMA_MASK_MSTRPAGE)>>24 != MSTRPAGE_VALUE) {
+		ERROR("%s: pci busaddr inconsistency!\n", __FUNCTION__);
+		dump_stack();
+		return;
+	}
+
+	a &= DMA_MASK_MSTRPAGE;  /* clear highbyte to make sure we won't write
+				  * to status - just in case MSTRPAGE_VALUE!=0
+				  */
+	rd->hw->rd_addr = cpu_to_le32(a);
+	wmb();
+	rd_set_status(rd, s);	 /* may pass ownership to the hardware */
+}
+
+static inline void rd_set_count(struct ring_descr *rd, u16 c)
+{
+	rd->hw->rd_count = cpu_to_le16(c);
+}
+
+static inline u8 rd_get_status(struct ring_descr *rd)
+{
+	return rd->hw->rd_status;
+}
+
+static inline dma_addr_t rd_get_addr(struct ring_descr *rd)
+{
+	dma_addr_t	a;
+
+	a = le32_to_cpu(rd->hw->rd_addr);
+	return (a & DMA_MASK_MSTRPAGE) | (MSTRPAGE_VALUE << 24);
+}
+
+static inline u16 rd_get_count(struct ring_descr *rd)
+{
+	return le16_to_cpu(rd->hw->rd_count);
+}
+
+/******************************************************************/
+
+/* sw descriptor rings for rx, tx:
+ *
+ * operations follow producer-consumer paradigm, with the hw
+ * in the middle doing the processing.
+ * ring size must be power of two.
+ *
+ * producer advances r->tail after inserting for processing
+ * consumer advances r->head after removing processed rd
+ * ring is empty if head==tail / full if (tail+1)==head
+ */
 
 struct vlsi_ring {
+	struct pci_dev		*pdev;
+	int			dir;
+	unsigned		len;
 	unsigned		size;
 	unsigned		mask;
-	unsigned		head, tail;
-	struct ring_descr	*hw;
-	struct ring_entry	buf[MAX_RING_DESCR];
+	atomic_t		head, tail;
+	struct ring_descr	*rd;
 };
 
-/* ------------------------------------------ */
+/* ring processing helpers */
+
+static inline struct ring_descr *ring_last(struct vlsi_ring *r)
+{
+	int t;
+
+	t = atomic_read(&r->tail) & r->mask;
+	return (((t+1) & r->mask) == (atomic_read(&r->head) & r->mask)) ? NULL : &r->rd[t];
+}
+
+static inline struct ring_descr *ring_put(struct vlsi_ring *r)
+{
+	atomic_inc(&r->tail);
+	return ring_last(r);
+}
+
+static inline struct ring_descr *ring_first(struct vlsi_ring *r)
+{
+	int h;
+
+	h = atomic_read(&r->head) & r->mask;
+	return (h == (atomic_read(&r->tail) & r->mask)) ? NULL : &r->rd[h];
+}
+
+static inline struct ring_descr *ring_get(struct vlsi_ring *r)
+{
+	atomic_inc(&r->head);
+	return ring_first(r);
+}
+
+/******************************************************************/
 
 /* our private compound VLSI-PCI-IRDA device information */
 
@@ -575,13 +775,36 @@ typedef struct vlsi_irda_dev {
 
 	dma_addr_t		busaddr;
 	void			*virtaddr;
-	struct vlsi_ring	tx_ring, rx_ring;
+	struct vlsi_ring	*tx_ring, *rx_ring;
 
 	struct timeval		last_rx;
 
 	spinlock_t		lock;
-	
+	struct semaphore	sem;
+
+	u32			cfg_space[64/sizeof(u32)];
+	u8			resume_ok;	
+	struct proc_dir_entry	*proc_entry;
+
 } vlsi_irda_dev_t;
+
+/********************************************************/
+
+/* the remapped error flags we use for returning from frame
+ * post-processing in vlsi_process_tx/rx() after it was completed
+ * by the hardware. These functions either return the >=0 number
+ * of transfered bytes in case of success or the negative (-)
+ * of the or'ed error flags.
+ */
+
+#define VLSI_TX_DROP		0x0001
+#define VLSI_TX_FIFO		0x0002
+
+#define VLSI_RX_DROP		0x0100
+#define VLSI_RX_OVER		0x0200
+#define VLSI_RX_LENGTH  	0x0400
+#define VLSI_RX_FRAME		0x0800
+#define VLSI_RX_CRC		0x1000
 
 /********************************************************/
 

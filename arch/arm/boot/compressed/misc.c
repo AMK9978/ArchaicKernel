@@ -18,9 +18,10 @@
 
 unsigned int __machine_arch_type;
 
+#include <linux/kernel.h>
+
 #include <asm/uaccess.h>
 #include <asm/arch/uncompress.h>
-#include <asm/proc/uncompress.h>
 
 #ifdef STANDALONE_DEBUG
 #define puts printf
@@ -190,8 +191,8 @@ static void *malloc(int size)
 {
 	void *p;
 
-	if (size <0) error("Malloc error\n");
-	if (free_mem_ptr <= 0) error("Memory error\n");
+	if (size <0) error("Malloc error");
+	if (free_mem_ptr <= 0) error("Memory error");
 
 	free_mem_ptr = (free_mem_ptr + 3) & ~3;	/* Align */
 
@@ -235,7 +236,7 @@ static void gzip_release(void **ptr)
 int fill_inbuf(void)
 {
 	if (insize != 0)
-		error("ran out of input data\n");
+		error("ran out of input data");
 
 	inbuf = input_data;
 	insize = &input_data_end[0] - &input_data[0];
@@ -269,8 +270,6 @@ void flush_window(void)
 
 static void error(char *x)
 {
-	int ptr;
-
 	puts("\n\n");
 	puts(x);
 	puts("\n\n -- System halted");
@@ -289,7 +288,6 @@ decompress_kernel(ulg output_start, ulg free_mem_ptr_p, ulg free_mem_ptr_end_p,
 	free_mem_ptr_end	= free_mem_ptr_end_p;
 	__machine_arch_type	= arch_id;
 
-	proc_decomp_setup();
 	arch_decomp_setup();
 
 	makecrc();

@@ -2,12 +2,19 @@
 #define _ASM_IA64_ASMMACRO_H
 
 /*
- * Copyright (C) 2000-2001 Hewlett-Packard Co
- * Copyright (C) 2000-2001 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 2000-2001, 2003 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
+
+#include <linux/config.h>
 
 #define ENTRY(name)				\
 	.align 32;				\
+	.proc name;				\
+name:
+
+#define ENTRY_MIN_ALIGN(name)			\
+	.align 16;				\
 	.proc name;				\
 name:
 
@@ -36,20 +43,50 @@ name:
 	.section "__ex_table", "a"		// declare section & section attributes
 	.previous
 
-#if __GNUC__ >= 3
-# define EX(y,x...)					\
-	.xdata4 "__ex_table", @gprel(99f), @gprel(y);	\
+# define EX(y,x...)				\
+	.xdata4 "__ex_table", 99f-., y-.;	\
   [99:]	x
-# define EXCLR(y,x...)					\
-	.xdata4 "__ex_table", @gprel(99f), @gprel(y)+4;	\
+# define EXCLR(y,x...)				\
+	.xdata4 "__ex_table", 99f-., y-.+4;	\
   [99:]	x
+
+/*
+ * Mark instructions that need a load of a virtual address patched to be
+ * a load of a physical address.  We use this either in critical performance
+ * path (ivt.S - TLB miss processing) or in places where it might not be
+ * safe to use a "tpa" instruction (mca_asm.S - error recovery).
+ */
+	.section ".data.patch.vtop", "a"	// declare section & section attributes
+	.previous
+
+#define	LOAD_PHYSICAL(pr, reg, obj)		\
+[1:](pr)movl reg = obj;				\
+	.xdata4 ".data.patch.vtop", 1b-.
+
+/*
+ * For now, we always put in the McKinley E9 workaround.  On CPUs that don't need it,
+ * we'll patch out the work-around bundles with NOPs, so their impact is minimal.
+ */
+#define DO_MCKINLEY_E9_WORKAROUND
+
+#ifdef DO_MCKINLEY_E9_WORKAROUND
+	.section ".data.patch.mckinley_e9", "a"
+	.previous
+/* workaround for Itanium 2 Errata 9: */
+# define FSYS_RETURN					\
+	.xdata4 ".data.patch.mckinley_e9", 1f-.;	\
+1:{ .mib;						\
+	nop.m 0;					\
+	mov r16=ar.pfs;					\
+	br.call.sptk.many b7=2f;;			\
+  };							\
+2:{ .mib;						\
+	nop.m 0;					\
+	mov ar.pfs=r16;					\
+	br.ret.sptk.many b6;;				\
+  }
 #else
-# define EX(y,x...)					\
-	.xdata4 "__ex_table", @gprel(99f), @gprel(y);	\
-  99:	x
-# define EXCLR(y,x...)					\
-	.xdata4 "__ex_table", @gprel(99f), @gprel(y)+4;	\
-  99:	x
+# define FSYS_RETURN	br.ret.sptk.many b6
 #endif
 
 #endif /* _ASM_IA64_ASMMACRO_H */

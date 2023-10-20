@@ -1,5 +1,4 @@
-/* $Id: types.h,v 1.3 1999/08/18 23:37:50 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -10,7 +9,16 @@
 #ifndef _ASM_TYPES_H
 #define _ASM_TYPES_H
 
+#include <linux/config.h>
+
+#ifndef __ASSEMBLY__
+
+#ifdef CONFIG_MIPS32
 typedef unsigned short umode_t;
+#endif
+#ifdef CONFIG_MIPS64
+typedef unsigned int umode_t;
+#endif
 
 /*
  * __xx is ok: it doesn't pollute the POSIX namespace. Use these in the
@@ -32,18 +40,24 @@ typedef __signed__ long __s64;
 typedef unsigned long __u64;
 
 #else
- 
+
 #if defined(__GNUC__) && !defined(__STRICT_ANSI__)
 typedef __signed__ long long __s64;
 typedef unsigned long long __u64;
 #endif
- 
+
 #endif
+
+#endif /* __ASSEMBLY__ */
 
 /*
  * These aren't exported outside the kernel to avoid name space clashes
  */
 #ifdef __KERNEL__
+
+#define BITS_PER_LONG _MIPS_SZLONG
+
+#ifndef __ASSEMBLY__
 
 typedef __signed char s8;
 typedef unsigned char u8;
@@ -68,9 +82,29 @@ typedef unsigned long long u64;
 
 #endif
 
-#define BITS_PER_LONG _MIPS_SZLONG
+#if (defined(CONFIG_HIGHMEM) && defined(CONFIG_64BIT_PHYS_ADDR)) \
+    || defined(CONFIG_MIPS64)
+typedef u64 dma_addr_t;
+#else
+typedef u32 dma_addr_t;
+#endif
+typedef u64 dma64_addr_t;
 
-typedef unsigned long dma_addr_t;
+/*
+ * Don't use phys_t.  You've been warned.
+ */
+#ifdef CONFIG_64BIT_PHYS_ADDR
+typedef unsigned long long phys_t;
+#else
+typedef unsigned long phys_t;
+#endif
+
+#ifdef CONFIG_LBD
+typedef u64 sector_t;
+#define HAVE_SECTOR_T
+#endif
+
+#endif /* __ASSEMBLY__ */
 
 #endif /* __KERNEL__ */
 

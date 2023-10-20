@@ -1,4 +1,4 @@
-/* $Id: pci_sabre.c,v 1.40 2001/10/11 00:44:38 davem Exp $
+/* $Id: pci_sabre.c,v 1.42 2002/01/23 11:27:32 davem Exp $
  * pci_sabre.c: Sabre specific PCI controller support.
  *
  * Copyright (C) 1997, 1998, 1999 David S. Miller (davem@caipfs.rutgers.edu)
@@ -11,12 +11,14 @@
 #include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/interrupt.h>
 
 #include <asm/apb.h>
 #include <asm/pbm.h>
 #include <asm/iommu.h>
 #include <asm/irq.h>
 #include <asm/smp.h>
+#include <asm/oplib.h>
 
 #include "pci_impl.h"
 #include "iommu_common.h"
@@ -219,6 +221,7 @@
 	 ((unsigned long)(REG)))
 
 static int hummingbird_p;
+static struct pci_bus *sabre_root_bus;
 
 static void *sabre_pci_config_mkaddr(struct pci_pbm_info *pbm,
 				     unsigned char bus,
@@ -258,160 +261,26 @@ static int __sabre_out_of_range(struct pci_pbm_info *pbm,
 		 PCI_SLOT(devfn) > 8));
 }
 
-static int __sabre_read_byte(struct pci_dev *dev, int where, u8 *value)
+static int __sabre_read_pci_cfg(struct pci_bus *bus_dev, unsigned int devfn,
+				int where, int size, u32 *value)
 {
-	struct pci_pbm_info *pbm = pci_bus2pbm[dev->bus->number];
-	unsigned char bus = dev->bus->number;
-	unsigned int devfn = dev->devfn;
-	u8 *addr;
-
-	*value = 0xff;
-	addr = sabre_pci_config_mkaddr(pbm, bus, devfn, where);
-	if (!addr)
-		return PCIBIOS_SUCCESSFUL;
-
-	if (__sabre_out_of_range(pbm, bus, devfn))
-		return PCIBIOS_SUCCESSFUL;
-	pci_config_read8(addr, value);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int __sabre_read_word(struct pci_dev *dev, int where, u16 *value)
-{
-	struct pci_pbm_info *pbm = pci_bus2pbm[dev->bus->number];
-	unsigned char bus = dev->bus->number;
-	unsigned int devfn = dev->devfn;
-	u16 *addr;
-
-	*value = 0xffff;
-	addr = sabre_pci_config_mkaddr(pbm, bus, devfn, where);
-	if (!addr)
-		return PCIBIOS_SUCCESSFUL;
-
-	if (__sabre_out_of_range(pbm, bus, devfn))
-		return PCIBIOS_SUCCESSFUL;
-
-	if (where & 0x01) {
-		printk("pcibios_read_config_word: misaligned reg [%x]\n",
-		       where);
-		return PCIBIOS_SUCCESSFUL;
-	}
-	pci_config_read16(addr, value);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int __sabre_read_dword(struct pci_dev *dev, int where, u32 *value)
-{
-	struct pci_pbm_info *pbm = pci_bus2pbm[dev->bus->number];
-	unsigned char bus = dev->bus->number;
-	unsigned int devfn = dev->devfn;
+	struct pci_pbm_info *pbm = bus_dev->sysdata;
+	unsigned char bus = bus_dev->number;
 	u32 *addr;
+	u16 tmp16;
+	u8 tmp8;
 
-	*value = 0xffffffff;
-	addr = sabre_pci_config_mkaddr(pbm, bus, devfn, where);
-	if (!addr)
-		return PCIBIOS_SUCCESSFUL;
-
-	if (__sabre_out_of_range(pbm, bus, devfn))
-		return PCIBIOS_SUCCESSFUL;
-
-	if (where & 0x03) {
-		printk("pcibios_read_config_dword: misaligned reg [%x]\n",
-		       where);
-		return PCIBIOS_SUCCESSFUL;
-	}
-	pci_config_read32(addr, value);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int sabre_read_byte(struct pci_dev *dev, int where, u8 *value)
-{
-	if (dev->bus->number)
-		return __sabre_read_byte(dev, where, value);
-
-	if (sabre_out_of_range(dev->devfn)) {
+	switch (size) {
+	case 1:
 		*value = 0xff;
-		return PCIBIOS_SUCCESSFUL;
-	}
-
-	if (where < 8) {
-		u16 tmp;
-
-		__sabre_read_word(dev, where & ~1, &tmp);
-		if (where & 1)
-			*value = tmp >> 8;
-		else
-			*value = tmp & 0xff;
-		return PCIBIOS_SUCCESSFUL;
-	} else
-		return __sabre_read_byte(dev, where, value);
-}
-
-static int sabre_read_word(struct pci_dev *dev, int where, u16 *value)
-{
-	if (dev->bus->number)
-		return __sabre_read_word(dev, where, value);
-
-	if (sabre_out_of_range(dev->devfn)) {
+		break;
+	case 2:
 		*value = 0xffff;
-		return PCIBIOS_SUCCESSFUL;
-	}
-
-	if (where < 8)
-		return __sabre_read_word(dev, where, value);
-	else {
-		u8 tmp;
-
-		__sabre_read_byte(dev, where, &tmp);
-		*value = tmp;
-		__sabre_read_byte(dev, where + 1, &tmp);
-		*value |= tmp << 8;
-		return PCIBIOS_SUCCESSFUL;
-	}
-}
-
-static int sabre_read_dword(struct pci_dev *dev, int where, u32 *value)
-{
-	u16 tmp;
-
-	if (dev->bus->number)
-		return __sabre_read_dword(dev, where, value);
-
-	if (sabre_out_of_range(dev->devfn)) {
+		break;
+	case 4:
 		*value = 0xffffffff;
-		return PCIBIOS_SUCCESSFUL;
+		break;
 	}
-
-	sabre_read_word(dev, where, &tmp);
-	*value = tmp;
-	sabre_read_word(dev, where + 2, &tmp);
-	*value |= tmp << 16;
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int __sabre_write_byte(struct pci_dev *dev, int where, u8 value)
-{
-	struct pci_pbm_info *pbm = pci_bus2pbm[dev->bus->number];
-	unsigned char bus = dev->bus->number;
-	unsigned int devfn = dev->devfn;
-	u8 *addr;
-
-	addr = sabre_pci_config_mkaddr(pbm, bus, devfn, where);
-	if (!addr)
-		return PCIBIOS_SUCCESSFUL;
-
-	if (__sabre_out_of_range(pbm, bus, devfn))
-		return PCIBIOS_SUCCESSFUL;
-	pci_config_write8(addr, value);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int __sabre_write_word(struct pci_dev *dev, int where, u16 value)
-{
-	struct pci_pbm_info *pbm = pci_bus2pbm[dev->bus->number];
-	unsigned char bus = dev->bus->number;
-	unsigned int devfn = dev->devfn;
-	u16 *addr;
 
 	addr = sabre_pci_config_mkaddr(pbm, bus, devfn, where);
 	if (!addr)
@@ -420,20 +289,109 @@ static int __sabre_write_word(struct pci_dev *dev, int where, u16 value)
 	if (__sabre_out_of_range(pbm, bus, devfn))
 		return PCIBIOS_SUCCESSFUL;
 
-	if (where & 0x01) {
-		printk("pcibios_write_config_word: misaligned reg [%x]\n",
-		       where);
-		return PCIBIOS_SUCCESSFUL;
+	switch (size) {
+	case 1:
+		pci_config_read8((u8 *) addr, &tmp8);
+		*value = tmp8;
+		break;
+
+	case 2:
+		if (where & 0x01) {
+			printk("pci_read_config_word: misaligned reg [%x]\n",
+			       where);
+			return PCIBIOS_SUCCESSFUL;
+		}
+		pci_config_read16((u16 *) addr, &tmp16);
+		*value = tmp16;
+		break;
+
+	case 4:
+		if (where & 0x03) {
+			printk("pci_read_config_dword: misaligned reg [%x]\n",
+			       where);
+			return PCIBIOS_SUCCESSFUL;
+		}
+		pci_config_read32(addr, value);
+		break;
 	}
-	pci_config_write16(addr, value);
+
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static int __sabre_write_dword(struct pci_dev *dev, int where, u32 value)
+static int sabre_read_pci_cfg(struct pci_bus *bus, unsigned int devfn,
+			      int where, int size, u32 *value)
 {
-	struct pci_pbm_info *pbm = pci_bus2pbm[dev->bus->number];
-	unsigned char bus = dev->bus->number;
-	unsigned int devfn = dev->devfn;
+	if (bus->number)
+		return __sabre_read_pci_cfg(bus, devfn, where, size, value);
+
+	if (sabre_out_of_range(devfn)) {
+		switch (size) {
+		case 1:
+			*value = 0xff;
+			break;
+		case 2:
+			*value = 0xffff;
+			break;
+		case 4:
+			*value = 0xffffffff;
+			break;
+		}
+		return PCIBIOS_SUCCESSFUL;
+	}
+
+	switch (size) {
+	case 1:
+		if (where < 8) {
+			u32 tmp32;
+			u16 tmp16;
+
+			__sabre_read_pci_cfg(bus, devfn, where & ~1, 2, &tmp32);
+			tmp16 = (u16) tmp32;
+			if (where & 1)
+				*value = tmp16 >> 8;
+			else
+				*value = tmp16 & 0xff;
+		} else
+			return __sabre_read_pci_cfg(bus, devfn, where, 1, value);
+		break;
+
+	case 2:
+		if (where < 8)
+			return __sabre_read_pci_cfg(bus, devfn, where, 2, value);
+		else {
+			u32 tmp32;
+			u8 tmp8;
+
+			__sabre_read_pci_cfg(bus, devfn, where, 1, &tmp32);
+			tmp8 = (u8) tmp32;
+			*value = tmp8;
+			__sabre_read_pci_cfg(bus, devfn, where + 1, 1, &tmp32);
+			tmp8 = (u8) tmp32;
+			*value |= tmp8 << 8;
+		}
+		break;
+
+	case 4: {
+		u32 tmp32;
+		u16 tmp16;
+
+		sabre_read_pci_cfg(bus, devfn, where, 2, &tmp32);
+		tmp16 = (u16) tmp32;
+		*value = tmp16;
+		sabre_read_pci_cfg(bus, devfn, where + 2, 2, &tmp32);
+		tmp16 = (u16) tmp32;
+		*value |= tmp16 << 16;
+		break;
+	}
+	}
+	return PCIBIOS_SUCCESSFUL;
+}
+
+static int __sabre_write_pci_cfg(struct pci_bus *bus_dev, unsigned int devfn,
+				 int where, int size, u32 value)
+{
+	struct pci_pbm_info *pbm = bus_dev->sysdata;
+	unsigned char bus = bus_dev->number;
 	u32 *addr;
 
 	addr = sabre_pci_config_mkaddr(pbm, bus, devfn, where);
@@ -443,76 +401,81 @@ static int __sabre_write_dword(struct pci_dev *dev, int where, u32 value)
 	if (__sabre_out_of_range(pbm, bus, devfn))
 		return PCIBIOS_SUCCESSFUL;
 
-	if (where & 0x03) {
-		printk("pcibios_write_config_dword: misaligned reg [%x]\n",
-		       where);
-		return PCIBIOS_SUCCESSFUL;
+	switch (size) {
+	case 1:
+		pci_config_write8((u8 *) addr, value);
+		break;
+
+	case 2:
+		if (where & 0x01) {
+			printk("pci_write_config_word: misaligned reg [%x]\n",
+			       where);
+			return PCIBIOS_SUCCESSFUL;
+		}
+		pci_config_write16((u16 *) addr, value);
+		break;
+
+	case 4:
+		if (where & 0x03) {
+			printk("pci_write_config_dword: misaligned reg [%x]\n",
+			       where);
+			return PCIBIOS_SUCCESSFUL;
+		}
+		pci_config_write32(addr, value);
+		break;
 	}
-	pci_config_write32(addr, value);
+
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static int sabre_write_byte(struct pci_dev *dev, int where, u8 value)
+static int sabre_write_pci_cfg(struct pci_bus *bus, unsigned int devfn,
+			       int where, int size, u32 value)
 {
-	if (dev->bus->number)
-		return __sabre_write_byte(dev, where, value);
+	if (bus->number)
+		return __sabre_write_pci_cfg(bus, devfn, where, size, value);
 
-	if (sabre_out_of_range(dev->devfn))
+	if (sabre_out_of_range(devfn))
 		return PCIBIOS_SUCCESSFUL;
 
-	if (where < 8) {
-		u16 tmp;
+	switch (size) {
+	case 1:
+		if (where < 8) {
+			u32 tmp32;
+			u16 tmp16;
 
-		__sabre_read_word(dev, where & ~1, &tmp);
-		if (where & 1) {
-			value &= 0x00ff;
-			value |= tmp << 8;
-		} else {
-			value &= 0xff00;
-			value |= tmp;
+			__sabre_read_pci_cfg(bus, devfn, where & ~1, 2, &tmp32);
+			tmp16 = (u16) tmp32;
+			if (where & 1) {
+				value &= 0x00ff;
+				value |= tmp16 << 8;
+			} else {
+				value &= 0xff00;
+				value |= tmp16;
+			}
+			tmp32 = (u32) tmp16;
+			return __sabre_write_pci_cfg(bus, devfn, where & ~1, 2, tmp32);
+		} else
+			return __sabre_write_pci_cfg(bus, devfn, where, 1, value);
+		break;
+	case 2:
+		if (where < 8)
+			return __sabre_write_pci_cfg(bus, devfn, where, 2, value);
+		else {
+			__sabre_write_pci_cfg(bus, devfn, where, 1, value & 0xff);
+			__sabre_write_pci_cfg(bus, devfn, where + 1, 1, value >> 8);
 		}
-		return __sabre_write_word(dev, where & ~1, tmp);
-	} else
-		return __sabre_write_byte(dev, where, value);
-}
-
-static int sabre_write_word(struct pci_dev *dev, int where, u16 value)
-{
-	if (dev->bus->number)
-		return __sabre_write_word(dev, where, value);
-
-	if (sabre_out_of_range(dev->devfn))
-		return PCIBIOS_SUCCESSFUL;
-
-	if (where < 8)
-		return __sabre_write_word(dev, where, value);
-	else {
-		__sabre_write_byte(dev, where, value & 0xff);
-		__sabre_write_byte(dev, where + 1, value >> 8);
-		return PCIBIOS_SUCCESSFUL;
+		break;
+	case 4:
+		sabre_write_pci_cfg(bus, devfn, where, 2, value & 0xffff);
+		sabre_write_pci_cfg(bus, devfn, where + 2, 2, value >> 16);
+		break;
 	}
-}
-
-static int sabre_write_dword(struct pci_dev *dev, int where, u32 value)
-{
-	if (dev->bus->number)
-		return __sabre_write_dword(dev, where, value);
-
-	if (sabre_out_of_range(dev->devfn))
-		return PCIBIOS_SUCCESSFUL;
-
-	sabre_write_word(dev, where, value & 0xffff);
-	sabre_write_word(dev, where + 2, value >> 16);
 	return PCIBIOS_SUCCESSFUL;
 }
 
 static struct pci_ops sabre_ops = {
-	sabre_read_byte,
-	sabre_read_word,
-	sabre_read_dword,
-	sabre_write_byte,
-	sabre_write_word,
-	sabre_write_dword
+	.read =		sabre_read_pci_cfg,
+	.write =	sabre_write_pci_cfg,
 };
 
 static unsigned long sabre_pcislot_imap_offset(unsigned long ino)
@@ -564,15 +527,15 @@ static unsigned char sabre_pil_table[] = {
 /*0x14*/0, 0, 0, 0,	/* PCI B slot 1  Int A, B, C, D */
 /*0x18*/0, 0, 0, 0,	/* PCI B slot 2  Int A, B, C, D */
 /*0x1c*/0, 0, 0, 0,	/* PCI B slot 3  Int A, B, C, D */
-/*0x20*/3,		/* SCSI				*/
+/*0x20*/4,		/* SCSI				*/
 /*0x21*/5,		/* Ethernet			*/
 /*0x22*/8,		/* Parallel Port		*/
 /*0x23*/13,		/* Audio Record			*/
 /*0x24*/14,		/* Audio Playback		*/
 /*0x25*/15,		/* PowerFail			*/
-/*0x26*/3,		/* second SCSI			*/
+/*0x26*/4,		/* second SCSI			*/
 /*0x27*/11,		/* Floppy			*/
-/*0x28*/2,		/* Spare Hardware		*/
+/*0x28*/4,		/* Spare Hardware		*/
 /*0x29*/9,		/* Keyboard			*/
 /*0x2a*/4,		/* Mouse			*/
 /*0x2b*/12,		/* Serial			*/
@@ -582,16 +545,21 @@ static unsigned char sabre_pil_table[] = {
 /*0x2f*/15,		/* Correctable ECC		*/
 /*0x30*/15,		/* PCI Bus A Error		*/
 /*0x31*/15,		/* PCI Bus B Error		*/
-/*0x32*/1,		/* Power Management		*/
+/*0x32*/15,		/* Power Management		*/
 };
 
 static int __init sabre_ino_to_pil(struct pci_dev *pdev, unsigned int ino)
 {
 	int ret;
 
+	if (pdev &&
+	    pdev->vendor == PCI_VENDOR_ID_SUN &&
+	    pdev->device == PCI_DEVICE_ID_SUN_RIO_USB)
+		return 9;
+
 	ret = sabre_pil_table[ino];
 	if (ret == 0 && pdev == NULL) {
-		ret = 1;
+		ret = 4;
 	} else if (ret == 0) {
 		switch ((pdev->class >> 16) & 0xff) {
 		case PCI_BASE_CLASS_STORAGE:
@@ -609,11 +577,12 @@ static int __init sabre_ino_to_pil(struct pci_dev *pdev, unsigned int ino)
 		case PCI_BASE_CLASS_MULTIMEDIA:
 		case PCI_BASE_CLASS_MEMORY:
 		case PCI_BASE_CLASS_BRIDGE:
+		case PCI_BASE_CLASS_SERIAL:
 			ret = 10;
 			break;
 
 		default:
-			ret = 1;
+			ret = 4;
 			break;
 		};
 	}
@@ -624,7 +593,6 @@ static unsigned int __init sabre_irq_build(struct pci_pbm_info *pbm,
 					   struct pci_dev *pdev,
 					   unsigned int ino)
 {
-	struct pci_controller_info *p = pbm->parent;
 	struct ino_bucket *bucket;
 	unsigned long imap, iclr;
 	unsigned long imap_off, iclr_off;
@@ -645,11 +613,15 @@ static unsigned int __init sabre_irq_build(struct pci_pbm_info *pbm,
 
 	/* Now build the IRQ bucket. */
 	pil = sabre_ino_to_pil(pdev, ino);
-	imap = p->controller_regs + imap_off;
+
+	if (PIL_RESERVED(pil))
+		BUG();
+
+	imap = pbm->controller_regs + imap_off;
 	imap += 4;
 
 	iclr_off = sabre_iclr_offset(ino);
-	iclr = p->controller_regs + iclr_off;
+	iclr = pbm->controller_regs + iclr_off;
 	iclr += 4;
 
 	if ((ino & 0x20) == 0)
@@ -727,7 +699,7 @@ static void sabre_check_iommu_error(struct pci_controller_info *p,
 		sabre_write(iommu->iommu_control,
 			    (control | SABRE_IOMMUCTRL_DENAB));
 		for (i = 0; i < 16; i++) {
-			unsigned long base = p->controller_regs;
+			unsigned long base = p->pbm_A.controller_regs;
 
 			iommu_tag[i] =
 				sabre_read(base + SABRE_IOMMU_TAG + (i * 8UL));
@@ -773,11 +745,11 @@ static void sabre_check_iommu_error(struct pci_controller_info *p,
 	spin_unlock_irqrestore(&iommu->lock, flags);
 }
 
-static void sabre_ue_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t sabre_ue_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct pci_controller_info *p = dev_id;
-	unsigned long afsr_reg = p->controller_regs + SABRE_UE_AFSR;
-	unsigned long afar_reg = p->controller_regs + SABRE_UECE_AFAR;
+	unsigned long afsr_reg = p->pbm_A.controller_regs + SABRE_UE_AFSR;
+	unsigned long afar_reg = p->pbm_A.controller_regs + SABRE_UECE_AFAR;
 	unsigned long afsr, afar, error_bits;
 	int reported;
 
@@ -791,7 +763,7 @@ static void sabre_ue_intr(int irq, void *dev_id, struct pt_regs *regs)
 		 SABRE_UEAFSR_SDRD | SABRE_UEAFSR_SDWR |
 		 SABRE_UEAFSR_SDTE | SABRE_UEAFSR_PDTE);
 	if (!error_bits)
-		return;
+		return IRQ_NONE;
 	sabre_write(afsr_reg, error_bits);
 
 	/* Log the error. */
@@ -829,13 +801,15 @@ static void sabre_ue_intr(int irq, void *dev_id, struct pt_regs *regs)
 
 	/* Interrogate IOMMU for error status. */
 	sabre_check_iommu_error(p, afsr, afar);
+
+	return IRQ_HANDLED;
 }
 
-static void sabre_ce_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t sabre_ce_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct pci_controller_info *p = dev_id;
-	unsigned long afsr_reg = p->controller_regs + SABRE_CE_AFSR;
-	unsigned long afar_reg = p->controller_regs + SABRE_UECE_AFAR;
+	unsigned long afsr_reg = p->pbm_A.controller_regs + SABRE_CE_AFSR;
+	unsigned long afar_reg = p->pbm_A.controller_regs + SABRE_UECE_AFAR;
 	unsigned long afsr, afar, error_bits;
 	int reported;
 
@@ -848,7 +822,7 @@ static void sabre_ce_intr(int irq, void *dev_id, struct pt_regs *regs)
 		(SABRE_CEAFSR_PDRD | SABRE_CEAFSR_PDWR |
 		 SABRE_CEAFSR_SDRD | SABRE_CEAFSR_SDWR);
 	if (!error_bits)
-		return;
+		return IRQ_NONE;
 	sabre_write(afsr_reg, error_bits);
 
 	/* Log the error. */
@@ -883,17 +857,55 @@ static void sabre_ce_intr(int irq, void *dev_id, struct pt_regs *regs)
 	if (!reported)
 		printk("(none)");
 	printk("]\n");
+
+	return IRQ_HANDLED;
 }
 
-static void sabre_pcierr_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t sabre_pcierr_intr_other(struct pci_controller_info *p)
+{
+	unsigned long csr_reg, csr, csr_error_bits;
+	irqreturn_t ret = IRQ_NONE;
+	u16 stat;
+
+	csr_reg = p->pbm_A.controller_regs + SABRE_PCICTRL;
+	csr = sabre_read(csr_reg);
+	csr_error_bits =
+		csr & SABRE_PCICTRL_SERR;
+	if (csr_error_bits) {
+		/* Clear the errors.  */
+		sabre_write(csr_reg, csr);
+
+		/* Log 'em.  */
+		if (csr_error_bits & SABRE_PCICTRL_SERR)
+			printk("SABRE%d: PCI SERR signal asserted.\n",
+			       p->index);
+		ret = IRQ_HANDLED;
+	}
+	pci_read_config_word(sabre_root_bus->self,
+			     PCI_STATUS, &stat);
+	if (stat & (PCI_STATUS_PARITY |
+		    PCI_STATUS_SIG_TARGET_ABORT |
+		    PCI_STATUS_REC_TARGET_ABORT |
+		    PCI_STATUS_REC_MASTER_ABORT |
+		    PCI_STATUS_SIG_SYSTEM_ERROR)) {
+		printk("SABRE%d: PCI bus error, PCI_STATUS[%04x]\n",
+		       p->index, stat);
+		pci_write_config_word(sabre_root_bus->self,
+				      PCI_STATUS, 0xffff);
+		ret = IRQ_HANDLED;
+	}
+	return ret;
+}
+
+static irqreturn_t sabre_pcierr_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct pci_controller_info *p = dev_id;
 	unsigned long afsr_reg, afar_reg;
 	unsigned long afsr, afar, error_bits;
 	int reported;
 
-	afsr_reg = p->controller_regs + SABRE_PIOAFSR;
-	afar_reg = p->controller_regs + SABRE_PIOAFAR;
+	afsr_reg = p->pbm_A.controller_regs + SABRE_PIOAFSR;
+	afar_reg = p->pbm_A.controller_regs + SABRE_PIOAFAR;
 
 	/* Latch error status. */
 	afar = sabre_read(afar_reg);
@@ -906,7 +918,7 @@ static void sabre_pcierr_intr(int irq, void *dev_id, struct pt_regs *regs)
 		 SABRE_PIOAFSR_SMA | SABRE_PIOAFSR_STA |
 		 SABRE_PIOAFSR_SRTRY | SABRE_PIOAFSR_SPERR);
 	if (!error_bits)
-		return;
+		return sabre_pcierr_intr_other(p);
 	sabre_write(afsr_reg, error_bits);
 
 	/* Log the error. */
@@ -976,6 +988,8 @@ static void sabre_pcierr_intr(int irq, void *dev_id, struct pt_regs *regs)
 		pci_scan_for_parity_error(p, &p->pbm_A, p->pbm_A.pci_bus);
 		pci_scan_for_parity_error(p, &p->pbm_B, p->pbm_B.pci_bus);
 	}
+
+	return IRQ_HANDLED;
 }
 
 /* XXX What about PowerFail/PowerManagement??? -DaveM */
@@ -985,8 +999,8 @@ static void sabre_pcierr_intr(int irq, void *dev_id, struct pt_regs *regs)
 static void __init sabre_register_error_handlers(struct pci_controller_info *p)
 {
 	struct pci_pbm_info *pbm = &p->pbm_A; /* arbitrary */
-	unsigned long base = p->controller_regs;
-	unsigned long irq, portid = p->portid;
+	unsigned long base = pbm->controller_regs;
+	unsigned long irq, portid = pbm->portid;
 	u64 tmp;
 
 	/* We clear the error bits in the appropriate AFSR before
@@ -1033,14 +1047,13 @@ static void __init sabre_resource_adjust(struct pci_dev *pdev,
 					 struct resource *res,
 					 struct resource *root)
 {
-	struct pci_pbm_info *pbm = pci_bus2pbm[pdev->bus->number];
-	struct pci_controller_info *p = pbm->parent;
+	struct pci_pbm_info *pbm = pdev->bus->sysdata;
 	unsigned long base;
 
 	if (res->flags & IORESOURCE_IO)
-		base = p->controller_regs + SABRE_IOSPACE;
+		base = pbm->controller_regs + SABRE_IOSPACE;
 	else
-		base = p->controller_regs + SABRE_MEMSPACE;
+		base = pbm->controller_regs + SABRE_MEMSPACE;
 
 	res->start += base;
 	res->end += base;
@@ -1050,20 +1063,26 @@ static void __init sabre_base_address_update(struct pci_dev *pdev, int resource)
 {
 	struct pcidev_cookie *pcp = pdev->sysdata;
 	struct pci_pbm_info *pbm = pcp->pbm;
-	struct pci_controller_info *p = pbm->parent;
 	struct resource *res;
 	unsigned long base;
 	u32 reg;
 	int where, size, is_64bit;
 
 	res = &pdev->resource[resource];
-	where = PCI_BASE_ADDRESS_0 + (resource * 4);
+	if (resource < 6) {
+		where = PCI_BASE_ADDRESS_0 + (resource * 4);
+	} else if (resource == PCI_ROM_RESOURCE) {
+		where = pdev->rom_base_reg;
+	} else {
+		/* Somebody might have asked allocation of a non-standard resource */
+		return;
+	}
 
 	is_64bit = 0;
 	if (res->flags & IORESOURCE_IO)
-		base = p->controller_regs + SABRE_IOSPACE;
+		base = pbm->controller_regs + SABRE_IOSPACE;
 	else {
-		base = p->controller_regs + SABRE_MEMSPACE;
+		base = pbm->controller_regs + SABRE_MEMSPACE;
 		if ((res->flags & PCI_BASE_ADDRESS_MEM_TYPE_MASK)
 		    == PCI_BASE_ADDRESS_MEM_TYPE_64)
 			is_64bit = 1;
@@ -1073,6 +1092,10 @@ static void __init sabre_base_address_update(struct pci_dev *pdev, int resource)
 	pci_read_config_dword(pdev, where, &reg);
 	reg = ((reg & size) |
 	       (((u32)(res->start - base)) & ~size));
+	if (resource == PCI_ROM_RESOURCE) {
+		reg |= PCI_ROM_ADDRESS_ENABLE;
+		res->flags |= PCI_ROM_ADDRESS_ENABLE;
+	}
 	pci_write_config_dword(pdev, where, reg);
 
 	/* This knows that the upper 32-bits of the address
@@ -1091,31 +1114,41 @@ static void __init apb_init(struct pci_controller_info *p, struct pci_bus *sabre
 
 		if (pdev->vendor == PCI_VENDOR_ID_SUN &&
 		    pdev->device == PCI_DEVICE_ID_SUN_SIMBA) {
-			u16 word;
+			u32 word32;
+			u16 word16;
 
-			sabre_read_word(pdev, PCI_COMMAND, &word);
-			word |= PCI_COMMAND_SERR | PCI_COMMAND_PARITY |
+			sabre_read_pci_cfg(pdev->bus, pdev->devfn,
+					   PCI_COMMAND, 2, &word32);
+			word16 = (u16) word32;
+			word16 |= PCI_COMMAND_SERR | PCI_COMMAND_PARITY |
 				PCI_COMMAND_MASTER | PCI_COMMAND_MEMORY |
 				PCI_COMMAND_IO;
-			sabre_write_word(pdev, PCI_COMMAND, word);
+			word32 = (u32) word16;
+			sabre_write_pci_cfg(pdev->bus, pdev->devfn,
+					    PCI_COMMAND, 2, word32);
 
 			/* Status register bits are "write 1 to clear". */
-			sabre_write_word(pdev, PCI_STATUS, 0xffff);
-			sabre_write_word(pdev, PCI_SEC_STATUS, 0xffff);
+			sabre_write_pci_cfg(pdev->bus, pdev->devfn,
+					    PCI_STATUS, 2, 0xffff);
+			sabre_write_pci_cfg(pdev->bus, pdev->devfn,
+					    PCI_SEC_STATUS, 2, 0xffff);
 
 			/* Use a primary/seconday latency timer value
 			 * of 64.
 			 */
-			sabre_write_byte(pdev, PCI_LATENCY_TIMER, 64);
-			sabre_write_byte(pdev, PCI_SEC_LATENCY_TIMER, 64);
+			sabre_write_pci_cfg(pdev->bus, pdev->devfn,
+					    PCI_LATENCY_TIMER, 1, 64);
+			sabre_write_pci_cfg(pdev->bus, pdev->devfn,
+					    PCI_SEC_LATENCY_TIMER, 1, 64);
 
 			/* Enable reporting/forwarding of master aborts,
 			 * parity, and SERR.
 			 */
-			sabre_write_byte(pdev, PCI_BRIDGE_CONTROL,
-					 (PCI_BRIDGE_CTL_PARITY |
-					  PCI_BRIDGE_CTL_SERR |
-					  PCI_BRIDGE_CTL_MASTER_ABORT));
+			sabre_write_pci_cfg(pdev->bus, pdev->devfn,
+					    PCI_BRIDGE_CONTROL, 1,
+					    (PCI_BRIDGE_CTL_PARITY |
+					     PCI_BRIDGE_CTL_SERR |
+					     PCI_BRIDGE_CTL_MASTER_ABORT));
 		}
 	}
 }
@@ -1138,7 +1171,7 @@ static struct pcidev_cookie *alloc_bridge_cookie(struct pci_pbm_info *pbm)
 
 static void __init sabre_scan_bus(struct pci_controller_info *p)
 {
-	static int once = 0;
+	static int once;
 	struct pci_bus *sabre_bus;
 	struct pci_pbm_info *pbm;
 	struct pcidev_cookie *cookie;
@@ -1152,11 +1185,8 @@ static void __init sabre_scan_bus(struct pci_controller_info *p)
 	p->pbm_A.is_66mhz_capable = 0;
 	p->pbm_B.is_66mhz_capable = 0;
 
-	/* Unlike for PSYCHO, we can only have one SABRE
-	 * in a system.  Having multiple SABREs is thus
-	 * and error, and as a consequence we do not need
-	 * to do any bus renumbering but we do have to have
-	 * the pci_bus2pbm array setup properly.
+	/* This driver has not been verified to handle
+	 * multiple SABREs yet, so trap this.
 	 *
 	 * Also note that the SABRE host bridge is hardwired
 	 * to live at bus 0.
@@ -1169,12 +1199,13 @@ static void __init sabre_scan_bus(struct pci_controller_info *p)
 
 	cookie = alloc_bridge_cookie(&p->pbm_A);
 
-	/* The pci_bus2pbm table has already been setup in sabre_init. */
 	sabre_bus = pci_scan_bus(p->pci_first_busno,
 				 p->pci_ops,
 				 &p->pbm_A);
 	pci_fixup_host_bridge_self(sabre_bus);
 	sabre_bus->self->sysdata = cookie;
+
+	sabre_root_bus = sabre_bus;
 
 	apb_init(p, sabre_bus);
 
@@ -1235,21 +1266,21 @@ static void __init sabre_iommu_init(struct pci_controller_info *p,
 	iommu->iommu_cur_ctx = 0;
 
 	/* Register addresses. */
-	iommu->iommu_control  = p->controller_regs + SABRE_IOMMU_CONTROL;
-	iommu->iommu_tsbbase  = p->controller_regs + SABRE_IOMMU_TSBBASE;
-	iommu->iommu_flush    = p->controller_regs + SABRE_IOMMU_FLUSH;
-	iommu->write_complete_reg = p->controller_regs + SABRE_WRSYNC;
+	iommu->iommu_control  = p->pbm_A.controller_regs + SABRE_IOMMU_CONTROL;
+	iommu->iommu_tsbbase  = p->pbm_A.controller_regs + SABRE_IOMMU_TSBBASE;
+	iommu->iommu_flush    = p->pbm_A.controller_regs + SABRE_IOMMU_FLUSH;
+	iommu->write_complete_reg = p->pbm_A.controller_regs + SABRE_WRSYNC;
 	/* Sabre's IOMMU lacks ctx flushing. */
 	iommu->iommu_ctxflush = 0;
                                         
 	/* Invalidate TLB Entries. */
-	control = sabre_read(p->controller_regs + SABRE_IOMMU_CONTROL);
+	control = sabre_read(p->pbm_A.controller_regs + SABRE_IOMMU_CONTROL);
 	control |= SABRE_IOMMUCTRL_DENAB;
-	sabre_write(p->controller_regs + SABRE_IOMMU_CONTROL, control);
+	sabre_write(p->pbm_A.controller_regs + SABRE_IOMMU_CONTROL, control);
 
 	for(i = 0; i < 16; i++) {
-		sabre_write(p->controller_regs + SABRE_IOMMU_TAG + (i * 8UL), 0);
-		sabre_write(p->controller_regs + SABRE_IOMMU_DATA + (i * 8UL), 0);
+		sabre_write(p->pbm_A.controller_regs + SABRE_IOMMU_TAG + (i * 8UL), 0);
+		sabre_write(p->pbm_A.controller_regs + SABRE_IOMMU_DATA + (i * 8UL), 0);
 	}
 
 	/* Leave diag mode enabled for full-flushing done
@@ -1266,9 +1297,9 @@ static void __init sabre_iommu_init(struct pci_controller_info *p,
 	iommu->dma_addr_mask = dma_mask;
 	memset((char *)tsbbase, 0, PAGE_SIZE << order);
 
-	sabre_write(p->controller_regs + SABRE_IOMMU_TSBBASE, __pa(tsbbase));
+	sabre_write(p->pbm_A.controller_regs + SABRE_IOMMU_TSBBASE, __pa(tsbbase));
 
-	control = sabre_read(p->controller_regs + SABRE_IOMMU_CONTROL);
+	control = sabre_read(p->pbm_A.controller_regs + SABRE_IOMMU_CONTROL);
 	control &= ~(SABRE_IOMMUCTRL_TSBSZ | SABRE_IOMMUCTRL_TBWSZ);
 	control |= SABRE_IOMMUCTRL_ENAB;
 	switch(tsbsize) {
@@ -1285,7 +1316,7 @@ static void __init sabre_iommu_init(struct pci_controller_info *p,
 		prom_halt();
 		break;
 	}
-	sabre_write(p->controller_regs + SABRE_IOMMU_CONTROL, control);
+	sabre_write(p->pbm_A.controller_regs + SABRE_IOMMU_CONTROL, control);
 
 	/* We start with no consistent mappings. */
 	iommu->lowest_consistent_map =
@@ -1301,8 +1332,8 @@ static void __init pbm_register_toplevel_resources(struct pci_controller_info *p
 						   struct pci_pbm_info *pbm)
 {
 	char *name = pbm->name;
-	unsigned long ibase = p->controller_regs + SABRE_IOSPACE;
-	unsigned long mbase = p->controller_regs + SABRE_MEMSPACE;
+	unsigned long ibase = p->pbm_A.controller_regs + SABRE_IOSPACE;
+	unsigned long mbase = p->pbm_A.controller_regs + SABRE_MEMSPACE;
 	unsigned int devfn;
 	unsigned long first, last, i;
 	u8 *addr, map;
@@ -1395,16 +1426,12 @@ static void __init sabre_pbm_init(struct pci_controller_info *p, int sabre_node,
 			pbm = &p->pbm_B;
 		else
 			pbm = &p->pbm_A;
+		pbm->chip_type = PBM_CHIP_TYPE_SABRE;
 		pbm->parent = p;
 		pbm->prom_node = node;
 		pbm->pci_first_slot = 1;
 		pbm->pci_first_busno = busrange[0];
 		pbm->pci_last_busno = busrange[1];
-		for (err = pbm->pci_first_busno;
-		     err <= pbm->pci_last_busno;
-		     err++)
-			pci_bus2pbm[err] = pbm;
-
 
 		prom_getstring(node, "name", pbm->prom_name, sizeof(pbm->prom_name));
 		err = prom_getproperty(node, "ranges",
@@ -1451,10 +1478,6 @@ static void __init sabre_pbm_init(struct pci_controller_info *p, int sabre_node,
 		pbm->prom_node = sabre_node;
 		pbm->pci_first_busno = p->pci_first_busno;
 		pbm->pci_last_busno = p->pci_last_busno;
-		for (err = pbm->pci_first_busno;
-		     err <= pbm->pci_last_busno;
-		     err++)
-			pci_bus2pbm[err] = pbm;
 
 		prom_getstring(sabre_node, "name", pbm->prom_name, sizeof(pbm->prom_name));
 		err = prom_getproperty(sabre_node, "ranges",
@@ -1490,11 +1513,11 @@ static void __init sabre_pbm_init(struct pci_controller_info *p, int sabre_node,
 		pbm->io_space.name = pbm->mem_space.name = pbm->name;
 
 		/* Hack up top-level resources. */
-		pbm->io_space.start = p->controller_regs + SABRE_IOSPACE;
+		pbm->io_space.start = p->pbm_A.controller_regs + SABRE_IOSPACE;
 		pbm->io_space.end   = pbm->io_space.start + (1UL << 24) - 1UL;
 		pbm->io_space.flags = IORESOURCE_IO;
 
-		pbm->mem_space.start = p->controller_regs + SABRE_MEMSPACE;
+		pbm->mem_space.start = p->pbm_A.controller_regs + SABRE_MEMSPACE;
 		pbm->mem_space.end   = pbm->mem_space.start + (unsigned long)dma_begin - 1UL;
 		pbm->mem_space.flags = IORESOURCE_MEM;
 
@@ -1522,7 +1545,7 @@ void __init sabre_init(int pnode, char *model_name)
 	u32 busrange[2];
 	u32 vdma[2];
 	u32 upa_portid, dma_mask;
-	int bus;
+	u64 clear_irq;
 
 	hummingbird_p = 0;
 	if (!strcmp(model_name, "pci108e,a001"))
@@ -1535,11 +1558,12 @@ void __init sabre_init(int pnode, char *model_name)
 		    !strcmp(compat, "pci108e,a001")) {
 			hummingbird_p = 1;
 		} else {
-			int cpu_node = linux_cpus[0].prom_node;
+			int cpu_node;
 
 			/* Of course, Sun has to encode things a thousand
 			 * different ways, inconsistently.
 			 */
+			cpu_find_by_instance(0, &cpu_node, NULL);
 			if (prom_getproperty(cpu_node, "name",
 					     compat, sizeof(compat)) > 0 &&
 			    !strcmp(compat, "SUNW,UltraSPARC-IIe"))
@@ -1569,7 +1593,8 @@ void __init sabre_init(int pnode, char *model_name)
 	pci_controller_root = p;
 	spin_unlock_irqrestore(&pci_controller_lock, flags);
 
-	p->portid = upa_portid;
+	p->pbm_A.portid = upa_portid;
+	p->pbm_B.portid = upa_portid;
 	p->index = pci_num_controllers++;
 	p->pbms_same_domain = 1;
 	p->scan_bus = sabre_scan_bus;
@@ -1592,20 +1617,31 @@ void __init sabre_init(int pnode, char *model_name)
 	/*
 	 * First REG in property is base of entire SABRE register space.
 	 */
-	p->controller_regs = pr_regs[0].phys_addr;
-	pci_dma_wsync = p->controller_regs + SABRE_WRSYNC;
+	p->pbm_A.controller_regs = pr_regs[0].phys_addr;
+	p->pbm_B.controller_regs = pr_regs[0].phys_addr;
+	pci_dma_wsync = p->pbm_A.controller_regs + SABRE_WRSYNC;
 
 	printk("PCI: Found SABRE, main regs at %016lx, wsync at %016lx\n",
-	       p->controller_regs, pci_dma_wsync);
+	       p->pbm_A.controller_regs, pci_dma_wsync);
+
+	/* Clear interrupts */
+
+	/* PCI first */
+	for (clear_irq = SABRE_ICLR_A_SLOT0; clear_irq < SABRE_ICLR_B_SLOT0 + 0x80; clear_irq += 8)
+		sabre_write(p->pbm_A.controller_regs + clear_irq, 0x0UL);
+
+	/* Then OBIO */
+	for (clear_irq = SABRE_ICLR_SCSI; clear_irq < SABRE_ICLR_SCSI + 0x80; clear_irq += 8)
+		sabre_write(p->pbm_A.controller_regs + clear_irq, 0x0UL);
 
 	/* Error interrupts are enabled later after the bus scan. */
-	sabre_write(p->controller_regs + SABRE_PCICTRL,
+	sabre_write(p->pbm_A.controller_regs + SABRE_PCICTRL,
 		    (SABRE_PCICTRL_MRLEN   | SABRE_PCICTRL_SERR |
 		     SABRE_PCICTRL_ARBPARK | SABRE_PCICTRL_AEN));
 
 	/* Now map in PCI config space for entire SABRE. */
 	p->pbm_A.config_space = p->pbm_B.config_space =
-		(p->controller_regs + SABRE_CONFIGSPACE);
+		(p->pbm_A.controller_regs + SABRE_CONFIGSPACE);
 	printk("SABRE: Shared PCI config space at %016lx\n",
 	       p->pbm_A.config_space);
 
@@ -1651,12 +1687,6 @@ void __init sabre_init(int pnode, char *model_name)
 
 	p->pci_first_busno = busrange[0];
 	p->pci_last_busno = busrange[1];
-
-	/*
-	 * Handle config space reads through any Simba on APB.
-	 */
-	for (bus = p->pci_first_busno; bus <= p->pci_last_busno; bus++)
-		pci_bus2pbm[bus] = &p->pbm_A;
 
 	/*
 	 * Look for APB underneath.

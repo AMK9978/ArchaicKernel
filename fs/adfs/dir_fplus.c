@@ -7,13 +7,14 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
-#include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/adfs_fs.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/stat.h>
 #include <linux/spinlock.h>
+#include <linux/buffer_head.h>
+#include <linux/string.h>
 
 #include "adfs.h"
 #include "dir_fplus.h"
@@ -35,7 +36,7 @@ adfs_fplus_read(struct super_block *sb, unsigned int id, unsigned int sz, struct
 		goto out;
 	}
 
-	dir->bh[0] = bread(sb->s_dev, block, sb->s_blocksize);
+	dir->bh[0] = sb_bread(sb, block);
 	if (!dir->bh[0])
 		goto out;
 	dir->nr_buffers += 1;
@@ -60,7 +61,7 @@ adfs_fplus_read(struct super_block *sb, unsigned int id, unsigned int sz, struct
 			goto out;
 		}
 
-		dir->bh[blk] = bread(sb->s_dev, block, sb->s_blocksize);
+		dir->bh[blk] = sb_bread(sb, block);
 		if (!dir->bh[blk])
 			goto out;
 		dir->nr_buffers = blk;
@@ -171,11 +172,8 @@ adfs_fplus_free(struct adfs_dir *dir)
 }
 
 struct adfs_dir_ops adfs_fplus_dir_ops = {
-	adfs_fplus_read,
-	adfs_fplus_setpos,
-	adfs_fplus_getnext,
-	NULL,
-	NULL,
-	NULL,
-	adfs_fplus_free
+	.read		= adfs_fplus_read,
+	.setpos		= adfs_fplus_setpos,
+	.getnext	= adfs_fplus_getnext,
+	.free		= adfs_fplus_free
 };

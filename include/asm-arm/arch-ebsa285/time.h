@@ -18,6 +18,7 @@
 #define RTC_ALWAYS_BCD		0
 
 #include <linux/mc146818rtc.h>
+#include <linux/bcd.h>
 
 #include <asm/hardware/dec21285.h>
 #include <asm/leds.h>
@@ -62,13 +63,14 @@ static unsigned long isa_gettimeoffset(void)
 
 	count_p = count;
 
-	count = (((mSEC_10_from_14/6)-1) - count) * tick;
+	count = (((mSEC_10_from_14/6)-1) - count) * (tick_nsec / 1000);
 	count = (count + (mSEC_10_from_14/6)/2) / (mSEC_10_from_14/6);
 
 	return count;
 }
 
-static void isa_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t
+isa_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	if (machine_is_netwinder())
 		do_leds();
@@ -76,6 +78,8 @@ static void isa_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	do_timer(regs);
 	do_set_rtc();
 	do_profile(regs);
+
+	return IRQ_HANDLED;
 }
 
 static unsigned long __init get_isa_cmos_time(void)
@@ -177,15 +181,17 @@ set_isa_cmos_time(void)
 }
 
 
+static unsigned long timer1_latch;
 
 static unsigned long timer1_gettimeoffset (void)
 {
-	unsigned long value = LATCH - *CSR_TIMER1_VALUE;
+	unsigned long value = timer1_latch - *CSR_TIMER1_VALUE;
 
-	return (tick * value) / LATCH;
+	return ((tick_nsec / 1000) * value) / timer1_latch;
 }
 
-static void timer1_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t
+timer1_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	*CSR_TIMER1_CLR = 0;
 
@@ -194,12 +200,14 @@ static void timer1_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	do_timer(regs);
 	do_set_rtc();
 	do_profile(regs);
+
+	return IRQ_HANDLED;
 }
 
 /*
  * Set up timer interrupt.
  */
-static inline void setup_timer(void)
+void __init time_init(void)
 {
 	int irq;
 
@@ -253,8 +261,10 @@ static inline void setup_timer(void)
 	    machine_is_personal_server()) {
 		gettimeoffset = timer1_gettimeoffset;
 
+		timer1_latch = (mem_fclk_21285 + 8 * HZ) / (16 * HZ);
+
 		*CSR_TIMER1_CLR  = 0;
-		*CSR_TIMER1_LOAD = LATCH;
+		*CSR_TIMER1_LOAD = timer1_latch;
 		*CSR_TIMER1_CNTL = TIMER_CNTL_ENABLE | TIMER_CNTL_AUTORELOAD | TIMER_CNTL_DIV16;
 
 		timer_irq.handler = timer1_interrupt;
@@ -270,5 +280,5 @@ static inline void setup_timer(void)
 		timer_irq.handler = isa_timer_interrupt;
 		irq = IRQ_ISA_TIMER;
 	}
-	setup_arm_irq(irq, &timer_irq);
+	setup_irq(irq, &timer_irq);
 }

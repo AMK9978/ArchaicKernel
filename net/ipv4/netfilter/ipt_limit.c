@@ -15,6 +15,10 @@
 #include <linux/netfilter_ipv4/ip_tables.h>
 #include <linux/netfilter_ipv4/ipt_limit.h>
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Herve Eychenne <rv@wallfire.org>");
+MODULE_DESCRIPTION("iptables rate limit match");
+
 /* The algorithm used is the Simple Token Bucket Filter (TBF)
  * see net/sched/sch_tbf.c in the linux source tree
  */
@@ -34,12 +38,23 @@ static spinlock_t limit_lock = SPIN_LOCK_UNLOCKED;
 
    See Alexey's formal explanation in net/sched/sch_tbf.c.
 
-   To avoid underflow, we multiply by 128 (ie. you get 128 credits per
-   jiffy).  Hence a cost of 2^32-1, means one pass per 32768 seconds
-   at 1024HZ (or one every 9 hours).  A cost of 1 means 12800 passes
-   per second at 100HZ.  */
+   To get the maxmum range, we multiply by this factor (ie. you get N
+   credits per jiffy).  We want to allow a rate as low as 1 per day
+   (slowest userspace tool allows), which means
+   CREDITS_PER_JIFFY*HZ*60*60*24 < 2^32. ie. */
+#define MAX_CPJ (0xFFFFFFFF / (HZ*60*60*24))
 
-#define CREDITS_PER_JIFFY 128
+/* Repeated shift and or gives us all 1s, final shift and add 1 gives
+ * us the power of 2 below the theoretical max, so GCC simply does a
+ * shift. */
+#define _POW2_BELOW2(x) ((x)|((x)>>1))
+#define _POW2_BELOW4(x) (_POW2_BELOW2(x)|_POW2_BELOW2((x)>>2))
+#define _POW2_BELOW8(x) (_POW2_BELOW4(x)|_POW2_BELOW4((x)>>4))
+#define _POW2_BELOW16(x) (_POW2_BELOW8(x)|_POW2_BELOW8((x)>>8))
+#define _POW2_BELOW32(x) (_POW2_BELOW16(x)|_POW2_BELOW16((x)>>16))
+#define POW2_BELOW32(x) ((_POW2_BELOW32(x)>>1) + 1)
+
+#define CREDITS_PER_JIFFY POW2_BELOW32(MAX_CPJ)
 
 static int
 ipt_limit_match(const struct sk_buff *skb,
@@ -47,8 +62,6 @@ ipt_limit_match(const struct sk_buff *skb,
 		const struct net_device *out,
 		const void *matchinfo,
 		int offset,
-		const void *hdr,
-		u_int16_t datalen,
 		int *hotdrop)
 {
 	struct ipt_rateinfo *r = ((struct ipt_rateinfo *)matchinfo)->master;
@@ -97,7 +110,7 @@ ipt_limit_checkentry(const char *tablename,
 	/* Check for overflow. */
 	if (r->burst == 0
 	    || user2credits(r->avg * r->burst) < user2credits(r->avg)) {
-		printk("Call rusty: overflow in ipt_limit: %u/%u\n",
+		printk("Overflow in ipt_limit, try lower: %u/%u\n",
 		       r->avg, r->burst);
 		return 0;
 	}
@@ -115,9 +128,12 @@ ipt_limit_checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ipt_match ipt_limit_reg
-= { { NULL, NULL }, "limit", ipt_limit_match, ipt_limit_checkentry, NULL,
-    THIS_MODULE };
+static struct ipt_match ipt_limit_reg = {
+	.name		= "limit",
+	.match		= ipt_limit_match,
+	.checkentry	= ipt_limit_checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {
@@ -133,4 +149,3 @@ static void __exit fini(void)
 
 module_init(init);
 module_exit(fini);
-MODULE_LICENSE("GPL");

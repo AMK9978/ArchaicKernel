@@ -2,12 +2,14 @@
 #define _ASM_IA64_HW_IRQ_H
 
 /*
- * Copyright (C) 2001 Hewlett-Packard Co
- * Copyright (C) 2001 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 2001-2003 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
+#include <linux/interrupt.h>
 #include <linux/sched.h>
 #include <linux/types.h>
+#include <linux/profile.h>
 
 #include <asm/machvec.h>
 #include <asm/ptrace.h>
@@ -37,8 +39,10 @@ typedef u8 ia64_vector;
 /*
  * Vectors 0x10-0x1f are used for low priority interrupts, e.g. CMCI.
  */
-#define IA64_PCE_VECTOR			0x1e	/* platform corrected error interrupt vector */
-#define IA64_CMC_VECTOR			0x1f	/* correctable machine-check interrupt vector */
+#define IA64_CPEP_VECTOR		0x1c	/* corrected platform error polling vector */
+#define IA64_CMCP_VECTOR		0x1d	/* corrected machine-check polling vector */
+#define IA64_CPE_VECTOR			0x1e	/* corrected platform error interrupt vector */
+#define IA64_CMC_VECTOR			0x1f	/* corrected machine-check interrupt vector */
 /*
  * Vectors 0x20-0x2f are reserved for legacy ISA IRQs.
  */
@@ -51,6 +55,10 @@ typedef u8 ia64_vector;
 #define	IA64_MCA_WAKEUP_VECTOR		0xf0	/* MCA wakeup (must be >MCA_RENDEZ_VECTOR) */
 #define IA64_IPI_RESCHEDULE		0xfd	/* SMP reschedule */
 #define IA64_IPI_VECTOR			0xfe	/* inter-processor interrupt vector */
+
+/* Used for encoding redirected irqs */
+
+#define IA64_IRQ_REDIRECTED		(1 << 31)
 
 /* IA64 inter-cpu interrupt related definitions */
 
@@ -72,7 +80,7 @@ extern unsigned long ipi_base_addr;
 
 extern struct hw_interrupt_type irq_type_ia64_lsapic;	/* CPU-internal interrupt controller */
 
-extern int ia64_alloc_irq (void);	/* allocate a free irq */
+extern int ia64_alloc_vector (void);	/* allocate a free vector */
 extern void ia64_send_ipi (int cpu, int vector, int delivery_mode, int redirect);
 extern void register_percpu_irq (ia64_vector vec, struct irqaction *action);
 
@@ -86,9 +94,10 @@ hw_resend_irq (struct hw_interrupt_type *h, unsigned int vector)
  * Default implementations for the irq-descriptor API:
  */
 
-extern struct irq_desc _irq_desc[NR_IRQS];
+extern irq_desc_t _irq_desc[NR_IRQS];
 
-static inline struct irq_desc *
+#ifndef CONFIG_IA64_GENERIC
+static inline irq_desc_t *
 __ia64_irq_desc (unsigned int irq)
 {
 	return _irq_desc + irq;
@@ -105,6 +114,7 @@ __ia64_local_vector_to_irq (ia64_vector vec)
 {
 	return (unsigned int) vec;
 }
+#endif
 
 /*
  * Next follows the irq descriptor interface.  On IA-64, each CPU supports 256 interrupt
@@ -117,8 +127,8 @@ __ia64_local_vector_to_irq (ia64_vector vec)
  */
 
 /* Return a pointer to the irq descriptor for IRQ.  */
-static inline struct irq_desc *
-irq_desc (int irq)
+static inline irq_desc_t *
+irq_descp (int irq)
 {
 	return platform_irq_desc(irq);
 }

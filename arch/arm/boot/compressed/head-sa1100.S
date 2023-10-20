@@ -11,7 +11,7 @@
 #include <linux/linkage.h>
 #include <asm/mach-types.h>
 
-		.section        ".start", #alloc, #execinstr
+		.section        ".start", "ax"
 
 __SA1100_start:
 
@@ -34,6 +34,10 @@ __SA1100_start:
 		@ REVISIT_PFS168: Temporary until firmware updated to use assigned machine number
 		mov	r7, #MACH_TYPE_PFS168
 #endif
+#ifdef CONFIG_SA1100_SIMPAD
+		@ UNTIL we've something like an open bootldr
+		mov	r7, #MACH_TYPE_SIMPAD @should be 87
+#endif
 
 #ifdef CONFIG_SA1100_VICTOR
 		teq	r7, #MACH_TYPE_VICTOR
@@ -49,6 +53,10 @@ __SA1100_start:
 		bne	1b
 10:
 #endif
+
+		mrc	p15, 0, r0, c1, c0, 0	@ read control reg
+		ands	r0, r0, #0x0d
+		beq	99f
 
 		@ Data cache might be active.
 		@ Be sure to flush kernel binary out of the cache,
@@ -68,12 +76,4 @@ __SA1100_start:
 		bic	r0, r0, #0x0d		@ clear WB, DC, MMU
 		bic	r0, r0, #0x1000		@ clear Icache
 		mcr	p15, 0, r0, c1, c0, 0
-
-/*
- * Pause for a short time so that we give enough time
- * for the host to start a terminal up.
- */
-		mov	r0, #0x00200000
-1:		subs	r0, r0, #1
-		bne	1b
-
+99:

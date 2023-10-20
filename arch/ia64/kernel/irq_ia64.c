@@ -14,7 +14,7 @@
 
 #include <linux/config.h>
 
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -30,11 +30,16 @@
 
 #include <asm/bitops.h>
 #include <asm/delay.h>
+#include <asm/intrinsics.h>
 #include <asm/io.h>
 #include <asm/hw_irq.h>
 #include <asm/machvec.h>
 #include <asm/pgtable.h>
 #include <asm/system.h>
+
+#ifdef CONFIG_PERFMON
+# include <asm/perfmon.h>
+#endif
 
 #define IRQ_DEBUG	0
 
@@ -51,14 +56,14 @@ __u8 isa_irq_to_vector_map[16] = {
 };
 
 int
-ia64_alloc_irq (void)
+ia64_alloc_vector (void)
 {
-	static int next_irq = IA64_FIRST_DEVICE_VECTOR;
+	static int next_vector = IA64_FIRST_DEVICE_VECTOR;
 
-	if (next_irq > IA64_LAST_DEVICE_VECTOR)
+	if (next_vector > IA64_LAST_DEVICE_VECTOR)
 		/* XXX could look for sharable vectors instead of panic'ing... */
-		panic("ia64_alloc_irq: out of interrupt vectors!");
-	return next_irq++;
+		panic("ia64_alloc_vector: out of interrupt vectors!");
+	return next_vector++;
 }
 
 extern unsigned int do_IRQ(unsigned long irq, struct pt_regs *regs);
@@ -89,8 +94,8 @@ ia64_handle_irq (ia64_vector vector, struct pt_regs *regs)
 		 * because the register and the memory stack are not
 		 * switched atomically.
 		 */
-		asm ("mov %0=ar.bsp" : "=r"(bsp));
-		asm ("mov %0=sp" : "=r"(sp));
+		bsp = ia64_getreg(_IA64_REG_AR_BSP);
+		sp = ia64_getreg(_IA64_REG_AR_SP);
 
 		if ((sp - bsp) < 1024) {
 			static unsigned char count;
@@ -113,11 +118,11 @@ ia64_handle_irq (ia64_vector vector, struct pt_regs *regs)
 	 * 16 (without this, it would be ~240, which could easily lead
 	 * to kernel stack overflows).
 	 */
-	saved_tpr = ia64_get_tpr();
+	saved_tpr = ia64_getreg(_IA64_REG_CR_TPR);
 	ia64_srlz_d();
 	while (vector != IA64_SPURIOUS_INT_VECTOR) {
 		if (!IS_RESCHEDULE(vector)) {
-			ia64_set_tpr(vector);
+			ia64_setreg(_IA64_REG_CR_TPR, vector);
 			ia64_srlz_d();
 
 			do_IRQ(local_vector_to_irq(vector), regs);
@@ -126,7 +131,7 @@ ia64_handle_irq (ia64_vector vector, struct pt_regs *regs)
 			 * Disable interrupts and send EOI:
 			 */
 			local_irq_disable();
-			ia64_set_tpr(saved_tpr);
+			ia64_setreg(_IA64_REG_CR_TPR, saved_tpr);
 		}
 		ia64_eoi();
 		vector = ia64_get_ivr();
@@ -141,12 +146,12 @@ ia64_handle_irq (ia64_vector vector, struct pt_regs *regs)
 }
 
 #ifdef CONFIG_SMP
-extern void handle_IPI (int irq, void *dev_id, struct pt_regs *regs);
+extern irqreturn_t handle_IPI (int irq, void *dev_id, struct pt_regs *regs);
 
 static struct irqaction ipi_irqaction = {
-	handler:	handle_IPI,
-	flags:		SA_INTERRUPT,
-	name:		"IPI"
+	.handler =	handle_IPI,
+	.flags =	SA_INTERRUPT,
+	.name =		"IPI"
 };
 #endif
 
@@ -158,7 +163,7 @@ register_percpu_irq (ia64_vector vec, struct irqaction *action)
 
 	for (irq = 0; irq < NR_IRQS; ++irq)
 		if (irq_to_vector(irq) == vec) {
-			desc = irq_desc(irq);
+			desc = irq_descp(irq);
 			desc->status |= IRQ_PER_CPU;
 			desc->handler = &irq_type_ia64_lsapic;
 			if (action)
@@ -173,6 +178,9 @@ init_IRQ (void)
 #ifdef CONFIG_SMP
 	register_percpu_irq(IA64_IPI_VECTOR, &ipi_irqaction);
 #endif
+#ifdef CONFIG_PERFMON
+	pfm_init_percpu();
+#endif
 	platform_irq_init();
 }
 
@@ -186,7 +194,7 @@ ia64_send_ipi (int cpu, int vector, int delivery_mode, int redirect)
 #ifdef CONFIG_SMP
 	phys_cpu_id = cpu_physical_id(cpu);
 #else
-	phys_cpu_id = (ia64_get_lid() >> 16) & 0xffff;
+	phys_cpu_id = (ia64_getreg(_IA64_REG_CR_LID) >> 16) & 0xffff;
 #endif
 
 	/*

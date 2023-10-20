@@ -30,7 +30,6 @@
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/ioport.h>
-#include <linux/version.h>
 #include <linux/interrupt.h>
 #include <asm/system.h>
 #include <asm/io.h>
@@ -66,6 +65,7 @@ int ft_mach2             = CONFIG_FT_MACH2;
 
 /*      Local vars.
  */
+static spinlock_t fdc_io_lock; 
 static unsigned int fdc_calibr_count;
 static unsigned int fdc_calibr_time;
 static int fdc_status;
@@ -89,14 +89,13 @@ void fdc_catch_stray_interrupts(int count)
 {
 	unsigned long flags;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&fdc_io_lock, flags);
 	if (count == 0) {
 		ft_expected_stray_interrupts = 0;
 	} else {
 		ft_expected_stray_interrupts += count;
 	}
-	restore_flags(flags);
+	spin_unlock_irqrestore(&fdc_io_lock, flags);
 }
 
 /*  Wait during a timeout period for a given FDC status.
@@ -194,13 +193,8 @@ int fdc_command(const __u8 * cmd_data, int cmd_len)
 	TRACE_FUN(ft_t_any);
 
 	fdc_usec_wait(FT_RQM_DELAY);	/* wait for valid RQM status */
-	save_flags(flags);
-	cli();
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,30)
+	spin_lock_irqsave(&fdc_io_lock, flags);
 	if (!in_interrupt())
-#else
-	if (!intr_count)
-#endif
 		/* Yes, I know, too much comments inside this function
 		 * ...
 		 * 
@@ -246,12 +240,11 @@ int fdc_command(const __u8 * cmd_data, int cmd_len)
 
 			}
 			fdc_usec_wait(FT_RQM_DELAY);	/* wait for valid RQM status */
-			save_flags(flags);
-			cli();
+			spin_lock_irqsave(&fdc_io_lock, flags);
 		}
 	fdc_status = inb(fdc.msr);
 	if ((fdc_status & FDC_DATA_READY_MASK) != FDC_DATA_IN_READY) {
-		restore_flags(flags);
+		spin_unlock_irqrestore(&fdc_io_lock, flags);
 		TRACE_ABORT(-EBUSY, ft_t_err, "fdc not ready");
 	} 
 	fdc_mode = *cmd_data;	/* used by isr */
@@ -264,19 +257,11 @@ int fdc_command(const __u8 * cmd_data, int cmd_len)
 		}
 	}
 #endif
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,30)
 	if (!in_interrupt()) {
 		/* shouldn't be cleared if called from isr
 		 */
 		ft_interrupt_seen = 0;
 	}
-#else
-	if (!intr_count) {
-		/* shouldn't be cleared if called from isr
-		 */
-		ft_interrupt_seen = 0;
-	}
-#endif
 	while (count) {
 		result = fdc_write(*cmd_data);
 		if (result < 0) {
@@ -301,7 +286,7 @@ int fdc_command(const __u8 * cmd_data, int cmd_len)
 		last_time = ftape_timestamp();
 	}
 #endif
-	restore_flags(flags);
+	spin_unlock_irqrestore(&fdc_io_lock, flags);
 	TRACE_EXIT result;
 }
 
@@ -317,15 +302,14 @@ int fdc_result(__u8 * res_data, int res_len)
 	int retry = 0;
 	TRACE_FUN(ft_t_any);
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&fdc_io_lock, flags);
 	fdc_status = inb(fdc.msr);
 	if ((fdc_status & FDC_DATA_READY_MASK) != FDC_DATA_OUT_READY) {
 		TRACE(ft_t_err, "fdc not ready");
 		result = -EBUSY;
 	} else while (count) {
 		if (!(fdc_status & FDC_BUSY)) {
-			restore_flags(flags);
+			spin_unlock_irqrestore(&fdc_io_lock, flags);
 			TRACE_ABORT(-EIO, ft_t_err, "premature end of result phase");
 		}
 		result = fdc_read(res_data);
@@ -348,7 +332,7 @@ int fdc_result(__u8 * res_data, int res_len)
 			++res_data;
 		}
 	}
-	restore_flags(flags);
+	spin_unlock_irqrestore(&fdc_io_lock, flags);
 	fdc_usec_wait(FT_RQM_DELAY);	/* allow FDC to negate BSY */
 	TRACE_EXIT result;
 }
@@ -392,23 +376,17 @@ int fdc_interrupt_wait(unsigned int time)
 
 	TRACE_FUN(ft_t_fdc_dma);
 
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,0,16)
  	if (waitqueue_active(&ftape_wait_intr)) {
 		TRACE_ABORT(-EIO, ft_t_err, "error: nested call");
 	}
-#else
-	if (ftape_wait_intr) {
-		TRACE_ABORT(-EIO, ft_t_err, "error: nested call");
-	}
-#endif
 	/* timeout time will be up to USPT microseconds too long ! */
 	timeout = (1000 * time + FT_USPT - 1) / FT_USPT;
 
-	spin_lock_irq(&current->sigmask_lock);
+	spin_lock_irq(&current->sighand->siglock);
 	old_sigmask = current->blocked;
 	sigfillset(&current->blocked);
-	recalc_sigpending(current);
-	spin_unlock_irq(&current->sigmask_lock);
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
 
 	current->state = TASK_INTERRUPTIBLE;
 	add_wait_queue(&ftape_wait_intr, &wait);
@@ -416,10 +394,10 @@ int fdc_interrupt_wait(unsigned int time)
 		timeout = schedule_timeout(timeout);
         }
 
-	spin_lock_irq(&current->sigmask_lock);
+	spin_lock_irq(&current->sighand->siglock);
 	current->blocked = old_sigmask;
-	recalc_sigpending(current);
-	spin_unlock_irq(&current->sigmask_lock);
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
 	
 	remove_wait_queue(&ftape_wait_intr, &wait);
 	/*  the following IS necessary. True: as well
@@ -627,8 +605,7 @@ void fdc_reset(void)
 	unsigned long flags;
 	TRACE_FUN(ft_t_any);
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&fdc_io_lock, flags);
 
 	fdc_dor_reset(1); /* keep unit selected */
 
@@ -647,7 +624,7 @@ void fdc_reset(void)
 	 */
 	fdc_update_dsr();               /* restore data rate and precomp */
 
-	restore_flags(flags);
+	spin_unlock_irqrestore(&fdc_io_lock, flags);
 
         /*
          *	Wait for first polling cycle to complete
@@ -928,18 +905,6 @@ static inline void fdc_setup_dma(char mode,
 	set_dma_mode(fdc.dma, mode);
 	set_dma_addr(fdc.dma, virt_to_bus((void*)addr));
 	set_dma_count(fdc.dma, count);
-#ifdef GCC_2_4_5_BUG
-	/*  This seemingly stupid construction confuses the gcc-2.4.5
-	 *  code generator enough to create correct code.
-	 */
-	if (1) {
-		int i;
-		
-		for (i = 0; i < 1; ++i) {
-			ftape_udelay(1);
-		}
-	}
-#endif
 	enable_dma(fdc.dma);
 }
 
@@ -958,8 +923,7 @@ int fdc_setup_formatting(buffer_struct * buff)
 	 */
         TRACE(ft_t_fdc_dma,
 	      "phys. addr. = %lx", virt_to_bus((void*) buff->ptr));
-	save_flags(flags);
-	cli();			/* could be called from ISR ! */
+	spin_lock_irqsave(&fdc_io_lock, flags);
 	fdc_setup_dma(DMA_MODE_WRITE, buff->ptr, FT_SECTORS_PER_SEGMENT * 4);
 	/* Issue FDC command to start reading/writing.
 	 */
@@ -967,7 +931,7 @@ int fdc_setup_formatting(buffer_struct * buff)
 	out[4] = buff->gap3;
 	TRACE_CATCH(fdc_setup_error = fdc_command(out, sizeof(out)),
 		    restore_flags(flags); fdc_mode = fdc_idle);
-	restore_flags(flags);
+	spin_unlock_irqrestore(&fdc_io_lock, flags);
 	TRACE_EXIT 0;
 }
 
@@ -1007,11 +971,10 @@ int fdc_setup_read_write(buffer_struct * buff, __u8 operation)
 		break;
 	default:
 		TRACE_ABORT(-EIO,
-			    ft_t_bug, "bug: illegal operation parameter");
+			    ft_t_bug, "bug: invalid operation parameter");
 	}
 	TRACE(ft_t_fdc_dma, "phys. addr. = %lx",virt_to_bus((void*)buff->ptr));
-	save_flags(flags);
-	cli();			/* could be called from ISR ! */
+	spin_lock_irqsave(&fdc_io_lock, flags);
 	if (operation != FDC_VERIFY) {
 		fdc_setup_dma(dma_mode, buff->ptr,
 			      FT_SECTOR_SIZE * buff->sector_count);
@@ -1029,7 +992,7 @@ int fdc_setup_read_write(buffer_struct * buff, __u8 operation)
 	out[8] = 0xff;		/* No limit to transfer size. */
 	TRACE(ft_t_fdc_dma, "C: 0x%02x, H: 0x%02x, R: 0x%02x, cnt: 0x%02x",
 		out[2], out[3], out[4], out[6] - out[4] + 1);
-	restore_flags(flags);
+	spin_unlock_irqrestore(&fdc_io_lock, flags);
 	TRACE_CATCH(fdc_setup_error = fdc_command(out, 9),fdc_mode = fdc_idle);
 	TRACE_EXIT 0;
 }
@@ -1221,7 +1184,7 @@ static int fdc_request_regions(void)
 	TRACE_FUN(ft_t_flow);
 
 	if (ft_mach2 || ft_probe_fc10) {
-		if (check_region(fdc.sra, 8) < 0) {
+		if (!request_region(fdc.sra, 8, "fdc (ft)")) {
 #ifndef BROKEN_FLOPPY_DRIVER
 			TRACE_EXIT -EBUSY;
 #else
@@ -1229,10 +1192,8 @@ static int fdc_request_regions(void)
 "address 0x%03x occupied (by floppy driver?), using it anyway", fdc.sra);
 #endif
 		}
-		request_region(fdc.sra, 8, "fdc (ft)");
 	} else {
-		if (check_region(fdc.sra, 6) < 0 || 
-		    check_region(fdc.dir, 1) < 0) {
+		if (!request_region(fdc.sra, 6, "fdc (ft)")) {
 #ifndef BROKEN_FLOPPY_DRIVER
 			TRACE_EXIT -EBUSY;
 #else
@@ -1240,8 +1201,15 @@ static int fdc_request_regions(void)
 "address 0x%03x occupied (by floppy driver?), using it anyway", fdc.sra);
 #endif
 		}
-		request_region(fdc.sra, 6, "fdc (ft)");
-		request_region(fdc.sra + 7, 1, "fdc (ft)");
+		if (!request_region(fdc.sra + 7, 1, "fdc (ft)")) {
+#ifndef BROKEN_FLOPPY_DRIVER
+			release_region(fdc.sra, 6);
+			TRACE_EXIT -EBUSY;
+#else
+			TRACE(ft_t_warn,
+"address 0x%03x occupied (by floppy driver?), using it anyway", fdc.sra + 7);
+#endif
+		}
 	}
 	TRACE_EXIT 0;
 }
@@ -1323,18 +1291,20 @@ static int fdc_config(void)
 	TRACE_EXIT 0;
 }
 
-static void ftape_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t ftape_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	void (*handler) (void) = *fdc.hook;
+	int handled = 0;
 	TRACE_FUN(ft_t_any);
 
 	*fdc.hook = NULL;
 	if (handler) {
+		handled = 1;
 		handler();
 	} else {
 		TRACE(ft_t_bug, "Unexpected ftape interrupt");
 	}
-	TRACE_EXIT;
+	TRACE_EXIT IRQ_RETVAL(handled);
 }
 
 int fdc_grab_irq_and_dma(void)

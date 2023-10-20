@@ -1,37 +1,69 @@
-#ifndef __ASM_MIPS_SMP_H
-#define __ASM_MIPS_SMP_H
+/*
+ * This file is subject to the terms and conditions of the GNU General
+ * Public License.  See the file "COPYING" in the main directory of this
+ * archive for more details.
+ *
+ * Copyright (C) 2000 - 2001 by Kanoj Sarcar (kanoj@sgi.com)
+ * Copyright (C) 2000 - 2001 by Silicon Graphics, Inc.
+ * Copyright (C) 2000, 2001, 2002 Ralf Baechle
+ * Copyright (C) 2000, 2001 Broadcom Corporation
+ */
+#ifndef __ASM_SMP_H
+#define __ASM_SMP_H
 
 #include <linux/config.h>
 
 #ifdef CONFIG_SMP
 
-#include <asm/spinlock.h>
+#include <linux/bitops.h>
+#include <linux/threads.h>
+#include <linux/cpumask.h>
 #include <asm/atomic.h>
-#include <asm/current.h>
 
+#define smp_processor_id()	(current_thread_info()->cpu)
 
-/* Mappings are straight across.  If we want
-   to add support for disabling cpus and such,
-   we'll have to do what the mips64 port does here */
-#define cpu_logical_map(cpu)	(cpu)
-#define cpu_number_map(cpu)     (cpu)
+/* Map from cpu id to sequential logical cpu number.  This will only
+   not be idempotent when cpus failed to come on-line.  */
+extern int __cpu_number_map[NR_CPUS];
+#define cpu_number_map(cpu)  __cpu_number_map[cpu]
 
-#define smp_processor_id()  (current->processor)
-
-
-/* I've no idea what the real meaning of this is */
-#define PROC_CHANGE_PENALTY	20
+/* The reverse map from sequential logical cpu number to cpu id.  */
+extern int __cpu_logical_map[NR_CPUS];
+#define cpu_logical_map(cpu)  __cpu_logical_map[cpu]
 
 #define NO_PROC_ID	(-1)
 
-struct smp_fn_call_struct {
-	spinlock_t lock;
-	atomic_t   finished;
-	void (*fn)(void *);
-	void *data;
+struct call_data_struct {
+	void		(*func)(void *);
+	void		*info;
+	atomic_t	started;
+	atomic_t	finished;
+	int		wait;
 };
 
-extern struct smp_fn_call_struct smp_fn_call;
+extern struct call_data_struct *call_data;
+
+#define SMP_RESCHEDULE_YOURSELF	0x1	/* XXX braindead */
+#define SMP_CALL_FUNCTION	0x2
+
+extern cpumask_t phys_cpu_present_map;
+extern cpumask_t cpu_online_map;
+
+#define cpu_possible(cpu)	cpu_isset(cpu, phys_cpu_present_map)
+#define cpu_online(cpu)		cpu_isset(cpu, cpu_online_map)
+
+static inline unsigned int num_online_cpus(void)
+{
+	return cpus_weight(cpu_online_map);
+}
+
+extern cpumask_t cpu_callout_map;
+/* We don't mark CPUs online until __cpu_up(), so we need another measure */
+static inline int num_booting_cpus(void)
+{
+	return cpus_weight(cpu_callout_map);
+}
 
 #endif /* CONFIG_SMP */
-#endif /* __ASM_MIPS_SMP_H */
+
+#endif /* __ASM_SMP_H */

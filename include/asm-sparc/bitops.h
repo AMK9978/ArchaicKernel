@@ -1,4 +1,4 @@
-/* $Id: bitops.h,v 1.65 2001/10/30 04:08:26 davem Exp $
+/* $Id: bitops.h,v 1.67 2001/11/19 18:36:34 davem Exp $
  * bitops.h: Bit string operations on the Sparc.
  *
  * Copyright 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -9,9 +9,8 @@
 #ifndef _SPARC_BITOPS_H
 #define _SPARC_BITOPS_H
 
-#include <linux/kernel.h>
+#include <linux/compiler.h>
 #include <asm/byteorder.h>
-#include <asm/system.h>
 
 #ifdef __KERNEL__
 
@@ -21,10 +20,14 @@
  * within the first byte. Sparc is BIG-Endian. Unless noted otherwise
  * all bit-ops return 0 if bit was previously clear and != 0 otherwise.
  */
-static __inline__ int test_and_set_bit(unsigned long nr, volatile void *addr)
+static inline int test_and_set_bit(unsigned long nr, volatile unsigned long *addr)
 {
 	register unsigned long mask asm("g2");
 	register unsigned long *ADDR asm("g1");
+	register int tmp1 asm("g3");
+	register int tmp2 asm("g4");
+	register int tmp3 asm("g5");
+	register int tmp4 asm("g7");
 
 	ADDR = ((unsigned long *) addr) + (nr >> 5);
 	mask = 1 << (nr & 31);
@@ -33,17 +36,21 @@ static __inline__ int test_and_set_bit(unsigned long nr, volatile void *addr)
 	"mov	%%o7, %%g4\n\t"
 	"call	___set_bit\n\t"
 	" add	%%o7, 8, %%o7\n"
-	: "=&r" (mask)
+	: "=&r" (mask), "=r" (tmp1), "=r" (tmp2), "=r" (tmp3), "=r" (tmp4)
 	: "0" (mask), "r" (ADDR)
-	: "g3", "g4", "g5", "g7", "memory", "cc");
+	: "memory", "cc");
 
 	return mask != 0;
 }
 
-static __inline__ void set_bit(unsigned long nr, volatile void *addr)
+static inline void set_bit(unsigned long nr, volatile unsigned long *addr)
 {
 	register unsigned long mask asm("g2");
 	register unsigned long *ADDR asm("g1");
+	register int tmp1 asm("g3");
+	register int tmp2 asm("g4");
+	register int tmp3 asm("g5");
+	register int tmp4 asm("g7");
 
 	ADDR = ((unsigned long *) addr) + (nr >> 5);
 	mask = 1 << (nr & 31);
@@ -52,15 +59,19 @@ static __inline__ void set_bit(unsigned long nr, volatile void *addr)
 	"mov	%%o7, %%g4\n\t"
 	"call	___set_bit\n\t"
 	" add	%%o7, 8, %%o7\n"
-	: "=&r" (mask)
+	: "=&r" (mask), "=r" (tmp1), "=r" (tmp2), "=r" (tmp3), "=r" (tmp4)
 	: "0" (mask), "r" (ADDR)
-	: "g3", "g4", "g5", "g7", "cc");
+	: "memory", "cc");
 }
 
-static __inline__ int test_and_clear_bit(unsigned long nr, volatile void *addr)
+static inline int test_and_clear_bit(unsigned long nr, volatile unsigned long *addr)
 {
 	register unsigned long mask asm("g2");
 	register unsigned long *ADDR asm("g1");
+	register int tmp1 asm("g3");
+	register int tmp2 asm("g4");
+	register int tmp3 asm("g5");
+	register int tmp4 asm("g7");
 
 	ADDR = ((unsigned long *) addr) + (nr >> 5);
 	mask = 1 << (nr & 31);
@@ -69,17 +80,21 @@ static __inline__ int test_and_clear_bit(unsigned long nr, volatile void *addr)
 	"mov	%%o7, %%g4\n\t"
 	"call	___clear_bit\n\t"
 	" add	%%o7, 8, %%o7\n"
-	: "=&r" (mask)
+	: "=&r" (mask), "=r" (tmp1), "=r" (tmp2), "=r" (tmp3), "=r" (tmp4)
 	: "0" (mask), "r" (ADDR)
-	: "g3", "g4", "g5", "g7", "memory", "cc");
+	: "memory", "cc");
 
 	return mask != 0;
 }
 
-static __inline__ void clear_bit(unsigned long nr, volatile void *addr)
+static inline void clear_bit(unsigned long nr, volatile unsigned long *addr)
 {
 	register unsigned long mask asm("g2");
 	register unsigned long *ADDR asm("g1");
+	register int tmp1 asm("g3");
+	register int tmp2 asm("g4");
+	register int tmp3 asm("g5");
+	register int tmp4 asm("g7");
 
 	ADDR = ((unsigned long *) addr) + (nr >> 5);
 	mask = 1 << (nr & 31);
@@ -88,15 +103,19 @@ static __inline__ void clear_bit(unsigned long nr, volatile void *addr)
 	"mov	%%o7, %%g4\n\t"
 	"call	___clear_bit\n\t"
 	" add	%%o7, 8, %%o7\n"
-	: "=&r" (mask)
+	: "=&r" (mask), "=r" (tmp1), "=r" (tmp2), "=r" (tmp3), "=r" (tmp4)
 	: "0" (mask), "r" (ADDR)
-	: "g3", "g4", "g5", "g7", "cc");
+	: "memory", "cc");
 }
 
-static __inline__ int test_and_change_bit(unsigned long nr, volatile void *addr)
+static inline int test_and_change_bit(unsigned long nr, volatile unsigned long *addr)
 {
 	register unsigned long mask asm("g2");
 	register unsigned long *ADDR asm("g1");
+	register int tmp1 asm("g3");
+	register int tmp2 asm("g4");
+	register int tmp3 asm("g5");
+	register int tmp4 asm("g7");
 
 	ADDR = ((unsigned long *) addr) + (nr >> 5);
 	mask = 1 << (nr & 31);
@@ -105,17 +124,21 @@ static __inline__ int test_and_change_bit(unsigned long nr, volatile void *addr)
 	"mov	%%o7, %%g4\n\t"
 	"call	___change_bit\n\t"
 	" add	%%o7, 8, %%o7\n"
-	: "=&r" (mask)
+	: "=&r" (mask), "=r" (tmp1), "=r" (tmp2), "=r" (tmp3), "=r" (tmp4)
 	: "0" (mask), "r" (ADDR)
-	: "g3", "g4", "g5", "g7", "memory", "cc");
+	: "memory", "cc");
 
 	return mask != 0;
 }
 
-static __inline__ void change_bit(unsigned long nr, volatile void *addr)
+static inline void change_bit(unsigned long nr, volatile unsigned long *addr)
 {
 	register unsigned long mask asm("g2");
 	register unsigned long *ADDR asm("g1");
+	register int tmp1 asm("g3");
+	register int tmp2 asm("g4");
+	register int tmp3 asm("g5");
+	register int tmp4 asm("g7");
 
 	ADDR = ((unsigned long *) addr) + (nr >> 5);
 	mask = 1 << (nr & 31);
@@ -124,15 +147,15 @@ static __inline__ void change_bit(unsigned long nr, volatile void *addr)
 	"mov	%%o7, %%g4\n\t"
 	"call	___change_bit\n\t"
 	" add	%%o7, 8, %%o7\n"
-	: "=&r" (mask)
+	: "=&r" (mask), "=r" (tmp1), "=r" (tmp2), "=r" (tmp3), "=r" (tmp4)
 	: "0" (mask), "r" (ADDR)
-	: "g3", "g4", "g5", "g7", "cc");
+	: "memory", "cc");
 }
 
 /*
  * non-atomic versions
  */
-static __inline__ void __set_bit(int nr, volatile void *addr)
+static inline void __set_bit(int nr, volatile unsigned long *addr)
 {
 	unsigned long mask = 1UL << (nr & 0x1f);
 	unsigned long *p = ((unsigned long *)addr) + (nr >> 5);
@@ -140,7 +163,7 @@ static __inline__ void __set_bit(int nr, volatile void *addr)
 	*p |= mask;
 }
 
-static __inline__ void __clear_bit(int nr, volatile void *addr)
+static inline void __clear_bit(int nr, volatile unsigned long *addr)
 {
 	unsigned long mask = 1UL << (nr & 0x1f);
 	unsigned long *p = ((unsigned long *)addr) + (nr >> 5);
@@ -148,7 +171,7 @@ static __inline__ void __clear_bit(int nr, volatile void *addr)
 	*p &= ~mask;
 }
 
-static __inline__ void __change_bit(int nr, volatile void *addr)
+static inline void __change_bit(int nr, volatile unsigned long *addr)
 {
 	unsigned long mask = 1UL << (nr & 0x1f);
 	unsigned long *p = ((unsigned long *)addr) + (nr >> 5);
@@ -156,7 +179,7 @@ static __inline__ void __change_bit(int nr, volatile void *addr)
 	*p ^= mask;
 }
 
-static __inline__ int __test_and_set_bit(int nr, volatile void *addr)
+static inline int __test_and_set_bit(int nr, volatile unsigned long *addr)
 {
 	unsigned long mask = 1UL << (nr & 0x1f);
 	unsigned long *p = ((unsigned long *)addr) + (nr >> 5);
@@ -166,7 +189,7 @@ static __inline__ int __test_and_set_bit(int nr, volatile void *addr)
 	return (old & mask) != 0;
 }
 
-static __inline__ int __test_and_clear_bit(int nr, volatile void *addr)
+static inline int __test_and_clear_bit(int nr, volatile unsigned long *addr)
 {
 	unsigned long mask = 1UL << (nr & 0x1f);
 	unsigned long *p = ((unsigned long *)addr) + (nr >> 5);
@@ -176,7 +199,7 @@ static __inline__ int __test_and_clear_bit(int nr, volatile void *addr)
 	return (old & mask) != 0;
 }
 
-static __inline__ int __test_and_change_bit(int nr, volatile void *addr)
+static inline int __test_and_change_bit(int nr, volatile unsigned long *addr)
 {
 	unsigned long mask = 1UL << (nr & 0x1f);
 	unsigned long *p = ((unsigned long *)addr) + (nr >> 5);
@@ -190,13 +213,13 @@ static __inline__ int __test_and_change_bit(int nr, volatile void *addr)
 #define smp_mb__after_clear_bit()	do { } while(0)
 
 /* The following routine need not be atomic. */
-static __inline__ int test_bit(int nr, __const__ void *addr)
+static inline int test_bit(int nr, __const__ volatile unsigned long *addr)
 {
-	return (1 & (((__const__ unsigned int *) addr)[nr >> 5] >> (nr & 31))) != 0;
+	return (1UL & (((unsigned long *)addr)[nr >> 5] >> (nr & 31))) != 0UL;
 }
 
 /* The easy/cheese version for now. */
-static __inline__ unsigned long ffz(unsigned long word)
+static inline unsigned long ffz(unsigned long word)
 {
 	unsigned long result = 0;
 
@@ -207,12 +230,74 @@ static __inline__ unsigned long ffz(unsigned long word)
 	return result;
 }
 
+/**
+ * __ffs - find first bit in word.
+ * @word: The word to search
+ *
+ * Undefined if no bit exists, so code should check against 0 first.
+ */
+static inline int __ffs(unsigned long word)
+{
+	int num = 0;
+
+	if ((word & 0xffff) == 0) {
+		num += 16;
+		word >>= 16;
+	}
+	if ((word & 0xff) == 0) {
+		num += 8;
+		word >>= 8;
+	}
+	if ((word & 0xf) == 0) {
+		num += 4;
+		word >>= 4;
+	}
+	if ((word & 0x3) == 0) {
+		num += 2;
+		word >>= 2;
+	}
+	if ((word & 0x1) == 0)
+		num += 1;
+	return num;
+}
+
+/*
+ * Every architecture must define this function. It's the fastest
+ * way of searching a 140-bit bitmap where the first 100 bits are
+ * unlikely to be set. It's guaranteed that at least one of the 140
+ * bits is cleared.
+ */
+static inline int sched_find_first_bit(unsigned long *b)
+{
+
+	if (unlikely(b[0]))
+		return __ffs(b[0]);
+	if (unlikely(b[1]))
+		return __ffs(b[1]) + 32;
+	if (unlikely(b[2]))
+		return __ffs(b[2]) + 64;
+	if (b[3])
+		return __ffs(b[3]) + 96;
+	return __ffs(b[4]) + 128;
+}
+
 /*
  * ffs: find first bit set. This is defined the same way as
  * the libc and compiler builtin ffs routines, therefore
  * differs in spirit from the above ffz (man ffs).
  */
-#define ffs(x) generic_ffs(x)
+static inline int ffs(int x)
+{
+	if (!x)
+		return 0;
+	return __ffs((unsigned long)x) + 1;
+}
+
+/*
+ * fls: find last (most-significant) bit set.
+ * Note fls(0) = 0, fls(1) = 1, fls(0x80000000) = 32.
+ */
+#define fls(x) generic_fls(x)
 
 /*
  * hweightN: returns the hamming weight (i.e. the number
@@ -227,9 +312,10 @@ static __inline__ unsigned long ffz(unsigned long word)
  * 'size' bits, starting the search at bit 'offset'. This is largely based
  * on Linus's ALPHA routines, which are pretty portable BTW.
  */
-static __inline__ unsigned long find_next_zero_bit(void *addr, unsigned long size, unsigned long offset)
+static inline unsigned long find_next_zero_bit(unsigned long *addr,
+    unsigned long size, unsigned long offset)
 {
-	unsigned long *p = ((unsigned long *) addr) + (offset >> 5);
+	unsigned long *p = addr + (offset >> 5);
 	unsigned long result = offset & ~31UL;
 	unsigned long tmp;
 
@@ -272,7 +358,35 @@ found_middle:
 #define find_first_zero_bit(addr, size) \
         find_next_zero_bit((addr), (size), 0)
 
-static __inline__ int test_le_bit(int nr, __const__ void * addr)
+/**
+ * find_next_bit - find the first set bit in a memory region
+ * @addr: The address to base the search on
+ * @offset: The bitnumber to start searching at
+ * @size: The maximum size to search
+ *
+ * Scheduler induced bitop, do not use.
+ */
+static inline int find_next_bit(unsigned long *addr, int size, int offset)
+{
+	unsigned long *p = addr + (offset >> 5);
+	int num = offset & ~0x1f;
+	unsigned long word;
+
+	word = *p++;
+	word &= ~((1 << (offset & 0x1f)) - 1);
+	while (num < size) {
+		if (word != 0) {
+			return __ffs(word) + num;
+		}
+		word = *p++;
+		num += 0x20;
+	}
+	return num;
+}
+
+/*
+ */
+static inline int test_le_bit(int nr, __const__ unsigned long * addr)
 {
 	__const__ unsigned char *ADDR = (__const__ unsigned char *) addr;
 	return (ADDR[nr >> 3] >> (nr & 7)) & 1;
@@ -281,7 +395,7 @@ static __inline__ int test_le_bit(int nr, __const__ void * addr)
 /*
  * non-atomic versions
  */
-static __inline__ void __set_le_bit(int nr, void *addr)
+static inline void __set_le_bit(int nr, unsigned long *addr)
 {
 	unsigned char *ADDR = (unsigned char *)addr;
 
@@ -289,7 +403,7 @@ static __inline__ void __set_le_bit(int nr, void *addr)
 	*ADDR |= 1 << (nr & 0x07);
 }
 
-static __inline__ void __clear_le_bit(int nr, void *addr)
+static inline void __clear_le_bit(int nr, unsigned long *addr)
 {
 	unsigned char *ADDR = (unsigned char *)addr;
 
@@ -297,7 +411,7 @@ static __inline__ void __clear_le_bit(int nr, void *addr)
 	*ADDR &= ~(1 << (nr & 0x07));
 }
 
-static __inline__ int __test_and_set_le_bit(int nr, void *addr)
+static inline int __test_and_set_le_bit(int nr, unsigned long *addr)
 {
 	int mask, retval;
 	unsigned char *ADDR = (unsigned char *)addr;
@@ -309,7 +423,7 @@ static __inline__ int __test_and_set_le_bit(int nr, void *addr)
 	return retval;
 }
 
-static __inline__ int __test_and_clear_le_bit(int nr, void *addr)
+static inline int __test_and_clear_le_bit(int nr, unsigned long *addr)
 {
 	int mask, retval;
 	unsigned char *ADDR = (unsigned char *)addr;
@@ -321,9 +435,10 @@ static __inline__ int __test_and_clear_le_bit(int nr, void *addr)
 	return retval;
 }
 
-static __inline__ unsigned long find_next_zero_le_bit(void *addr, unsigned long size, unsigned long offset)
+static inline unsigned long find_next_zero_le_bit(unsigned long *addr,
+    unsigned long size, unsigned long offset)
 {
-	unsigned long *p = ((unsigned long *) addr) + (offset >> 5);
+	unsigned long *p = addr + (offset >> 5);
 	unsigned long result = offset & ~31UL;
 	unsigned long tmp;
 
@@ -364,18 +479,47 @@ found_middle:
 #define find_first_zero_le_bit(addr, size) \
         find_next_zero_le_bit((addr), (size), 0)
 
-#define ext2_set_bit			__test_and_set_le_bit
-#define ext2_clear_bit			__test_and_clear_le_bit
-#define ext2_test_bit			test_le_bit
-#define ext2_find_first_zero_bit	find_first_zero_le_bit
-#define ext2_find_next_zero_bit		find_next_zero_le_bit
+#define ext2_set_bit(nr,addr)	\
+	__test_and_set_le_bit((nr),(unsigned long *)(addr))
+#define ext2_clear_bit(nr,addr)	\
+	__test_and_clear_le_bit((nr),(unsigned long *)(addr))
+
+#define ext2_set_bit_atomic(lock, nr, addr)		\
+	({						\
+		int ret;				\
+		spin_lock(lock);			\
+		ret = ext2_set_bit((nr), (unsigned long *)(addr)); \
+		spin_unlock(lock);			\
+		ret;					\
+	})
+
+#define ext2_clear_bit_atomic(lock, nr, addr)		\
+	({						\
+		int ret;				\
+		spin_lock(lock);			\
+		ret = ext2_clear_bit((nr), (unsigned long *)(addr)); \
+		spin_unlock(lock);			\
+		ret;					\
+	})
+
+#define ext2_test_bit(nr,addr)	\
+	test_le_bit((nr),(unsigned long *)(addr))
+#define ext2_find_first_zero_bit(addr, size) \
+	find_first_zero_le_bit((unsigned long *)(addr), (size))
+#define ext2_find_next_zero_bit(addr, size, off) \
+	find_next_zero_le_bit((unsigned long *)(addr), (size), (off))
 
 /* Bitmap functions for the minix filesystem.  */
-#define minix_test_and_set_bit(nr,addr)		test_and_set_bit(nr,addr)
-#define minix_set_bit(nr,addr)			set_bit(nr,addr)
-#define minix_test_and_clear_bit(nr,addr)	test_and_clear_bit(nr,addr)
-#define minix_test_bit(nr,addr)			test_bit(nr,addr)
-#define minix_find_first_zero_bit(addr,size)	find_first_zero_bit(addr,size)
+#define minix_test_and_set_bit(nr,addr)	\
+	test_and_set_bit((nr),(unsigned long *)(addr))
+#define minix_set_bit(nr,addr)		\
+	set_bit((nr),(unsigned long *)(addr))
+#define minix_test_and_clear_bit(nr,addr) \
+	test_and_clear_bit((nr),(unsigned long *)(addr))
+#define minix_test_bit(nr,addr)		\
+	test_bit((nr),(unsigned long *)(addr))
+#define minix_find_first_zero_bit(addr,size) \
+	find_first_zero_bit((unsigned long *)(addr),(size))
 
 #endif /* __KERNEL__ */
 

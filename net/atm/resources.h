@@ -10,21 +10,37 @@
 #include <linux/atmdev.h>
 
 
-extern struct atm_dev *atm_devs;
-extern struct atm_vcc *nodev_vccs; /* VCCs not linked to any device */
+extern struct list_head atm_devs;
+extern spinlock_t atm_dev_lock;
 
 
-struct sock *alloc_atm_vcc_sk(int family);
-void free_atm_vcc_sk(struct sock *sk);
+int atm_dev_ioctl(unsigned int cmd, unsigned long arg);
 
 
 #ifdef CONFIG_PROC_FS
 
 #include <linux/proc_fs.h>
 
+void *atm_dev_seq_start(struct seq_file *seq, loff_t *pos);
+void atm_dev_seq_stop(struct seq_file *seq, void *v);
+void *atm_dev_seq_next(struct seq_file *seq, void *v, loff_t *pos);
+
+
 int atm_proc_dev_register(struct atm_dev *dev);
 void atm_proc_dev_deregister(struct atm_dev *dev);
 
-#endif
+#else
+
+static inline int atm_proc_dev_register(struct atm_dev *dev)
+{
+	return 0;
+}
+
+static inline void atm_proc_dev_deregister(struct atm_dev *dev)
+{
+	/* nothing */
+}
+
+#endif /* CONFIG_PROC_FS */
 
 #endif

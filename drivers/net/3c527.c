@@ -16,8 +16,12 @@
  *
  */
 
+#define DRV_NAME		"3c527"
+#define DRV_VERSION		"0.6a"
+#define DRV_RELDATE		"2001/11/17"
+
 static const char *version =
-	"3c527.c:v0.6 2001/03/03 Richard Proctor (rnp@netlink.co.nz)\n";
+DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE " Richard Proctor (rnp@netlink.co.nz)\n";
 
 /**
  * DOC: Traps for the unwary
@@ -79,36 +83,39 @@ static const char *version =
 
 #include <linux/module.h>
 
+#include <linux/errno.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/if_ether.h>
+#include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
-#include <linux/mca.h>
+#include <linux/mca-legacy.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
+#include <linux/skbuff.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/wait.h>
+#include <linux/ethtool.h>
+
+#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
-#include <linux/errno.h>
-#include <linux/init.h>
-
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
-#include <linux/skbuff.h>
-#include <linux/if_ether.h>
 
 #include "3c527.h"
+
+MODULE_LICENSE("GPL");
 
 /*
  * The name of the card. Is used for messages and in the requests for
  * io regions, irqs and dma channels
  */
-static const char* cardname = "3c527";
+static const char* cardname = DRV_NAME;
 
 /* use 0 for production, 1 for verification, >2 for debug */
 #ifndef NET_DEBUG
@@ -208,11 +215,12 @@ static int      mc32_command(struct net_device *dev, u16 cmd, void *data, int le
 static int	mc32_open(struct net_device *dev);
 static void	mc32_timeout(struct net_device *dev);
 static int	mc32_send_packet(struct sk_buff *skb, struct net_device *dev);
-static void	mc32_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t mc32_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static int	mc32_close(struct net_device *dev);
 static struct	net_device_stats *mc32_get_stats(struct net_device *dev);
 static void	mc32_set_multicast_list(struct net_device *dev);
 static void	mc32_reset_multicast_list(struct net_device *dev);
+static struct ethtool_ops netdev_ethtool_ops;
 
 /**
  * mc32_probe 	-	Search for supported boards
@@ -221,7 +229,7 @@ static void	mc32_reset_multicast_list(struct net_device *dev);
  * Because MCA bus is a real bus and we can scan for cards we could do a
  * single scan for all boards here. Right now we use the passed in device
  * structure and scan for only one board. This needs fixing for modules
- * in paticular.
+ * in particular.
  */
 
 int __init mc32_probe(struct net_device *dev)
@@ -470,16 +478,16 @@ static int __init mc32_probe1(struct net_device *dev, int slot)
 		base|=(inb(dev->base_addr)<<(8*i));
 	}
 	
-	lp->exec_box=bus_to_virt(dev->mem_start+base);
+	lp->exec_box=isa_bus_to_virt(dev->mem_start+base);
 	
 	base=lp->exec_box->data[1]<<16|lp->exec_box->data[0];  
 	
 	lp->base = dev->mem_start+base;
 	
-	lp->rx_box=bus_to_virt(lp->base + lp->exec_box->data[2]); 
-	lp->tx_box=bus_to_virt(lp->base + lp->exec_box->data[3]);
+	lp->rx_box=isa_bus_to_virt(lp->base + lp->exec_box->data[2]); 
+	lp->tx_box=isa_bus_to_virt(lp->base + lp->exec_box->data[3]);
 	
-	lp->stats = bus_to_virt(lp->base + lp->exec_box->data[5]);
+	lp->stats = isa_bus_to_virt(lp->base + lp->exec_box->data[5]);
 
 	/*
 	 *	Descriptor chains (card relative)
@@ -502,7 +510,7 @@ static int __init mc32_probe1(struct net_device *dev, int slot)
 	dev->set_multicast_list = mc32_set_multicast_list;
 	dev->tx_timeout		= mc32_timeout;
 	dev->watchdog_timeo	= HZ*5;	/* Board does all the work */
-
+	dev->ethtool_ops	= &netdev_ethtool_ops;
 	
 	lp->xceiver_state = HALTED; 
 	
@@ -781,10 +789,10 @@ static int mc32_load_rx_ring(struct net_device *dev)
 			return -ENOBUFS;
 		}
 		
-		p=bus_to_virt(lp->base+rx_base);
+		p=isa_bus_to_virt(lp->base+rx_base);
 				
 		p->control=0;
-		p->data=virt_to_bus(lp->rx_ring[i].skb->data);
+		p->data=isa_virt_to_bus(lp->rx_ring[i].skb->data);
 		p->status=0;
 		p->length=1532;
 	
@@ -854,7 +862,7 @@ static void mc32_load_tx_ring(struct net_device *dev)
 
 	for(i=0;i<lp->tx_len;i++) 
 	{
-		p=bus_to_virt(lp->base+tx_base);
+		p=isa_bus_to_virt(lp->base+tx_base);
 		lp->tx_ring[i].p=p; 
 		lp->tx_ring[i].skb=NULL;
 
@@ -1075,18 +1083,24 @@ static int mc32_send_packet(struct sk_buff *skb, struct net_device *dev)
 	/* NP is the buffer we will be loading */
 	np=lp->tx_ring[lp->tx_ring_head].p; 
 
+   	if (skb->len < ETH_ZLEN) {
+   		skb = skb_padto(skb, ETH_ZLEN);
+   		if (skb == NULL)
+   			goto out;
+   	}
+
 	/* We will need this to flush the buffer out */
-	lp->tx_ring[lp->tx_ring_head].skb=skb;
+	lp->tx_ring[lp->tx_ring_head].skb = skb;
    	   
 	np->length = (skb->len < ETH_ZLEN) ? ETH_ZLEN : skb->len; 
 			
-	np->data	= virt_to_bus(skb->data);
+	np->data	= isa_virt_to_bus(skb->data);
 	np->status	= 0;
 	np->control     = CONTROL_EOP | CONTROL_EOL;     
 	wmb();
 		
 	p->control     &= ~CONTROL_EOL;     /* Clear EOL on p */ 
-	
+out:	
 	restore_flags(flags);
 
 	netif_wake_queue(dev);
@@ -1157,7 +1171,7 @@ static void mc32_update_stats(struct net_device *dev)
  * 	the stack or, if the packet is near MTU sized, we allocate
  *	another buffer and flip the old one up the stack.
  * 
- *	We must succeed in keeping a buffer on the ring. If neccessary we
+ *	We must succeed in keeping a buffer on the ring. If necessary we
  *	will toss a received packet rather than lose a ring entry. Once
  *	the first uncompleted descriptor is found, we move the
  *	End-Of-List bit to include the buffers just processed.
@@ -1197,7 +1211,7 @@ static void mc32_rx_ring(struct net_device *dev)
 				
 				skb_reserve(newskb,18); 
 				lp->rx_ring[rx_ring_tail].skb=newskb;  
-				p->data=virt_to_bus(newskb->data);  
+				p->data=isa_virt_to_bus(newskb->data);  
 			} 
 			else 
 			{
@@ -1336,7 +1350,7 @@ static void mc32_tx_ring(struct net_device *dev)
  *
  */
 
-static void mc32_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t mc32_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	struct net_device *dev = dev_id;
 	struct mc32_local *lp;
@@ -1346,7 +1360,7 @@ static void mc32_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	
 	if (dev == NULL) {
 		printk(KERN_WARNING "%s: irq %d for unknown device.\n", cardname, irq);
-		return;
+		return IRQ_NONE;
 	}
  
 	ioaddr = dev->base_addr;
@@ -1450,7 +1464,7 @@ static void mc32_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	if(rx_event) 
 		mc32_rx_ring(dev);
 
-	return;
+	return IRQ_HANDLED;
 }
 
 
@@ -1644,6 +1658,30 @@ static void mc32_reset_multicast_list(struct net_device *dev)
 	do_mc32_set_multicast_list(dev,1);
 }
 
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+	sprintf(info->bus_info, "MCA 0x%lx", dev->base_addr);
+}
+
+static u32 netdev_get_msglevel(struct net_device *dev)
+{
+	return mc32_debug;
+}
+
+static void netdev_set_msglevel(struct net_device *dev, u32 level)
+{
+	mc32_debug = level;
+}
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+	.get_msglevel		= netdev_get_msglevel,
+	.set_msglevel		= netdev_set_msglevel,
+};
+
 #ifdef MODULE
 
 static struct net_device this_device;
@@ -1682,7 +1720,6 @@ void cleanup_module(void)
 {
 	int slot;
 	
-	/* No need to check MOD_IN_USE, as sys_delete_module() checks. */
 	unregister_netdev(&this_device);
 
 	/*

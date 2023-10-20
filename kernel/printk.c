@@ -16,6 +16,7 @@
  *	01Mar01 Andrew Morton <andrewm@uow.edu.au>
  */
 
+#include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
@@ -25,18 +26,14 @@
 #include <linux/module.h>
 #include <linux/interrupt.h>			/* For in_interrupt() */
 #include <linux/config.h>
+#include <linux/delay.h>
+#include <linux/smp.h>
+#include <linux/security.h>
+#include <linux/bootmem.h>
 
 #include <asm/uaccess.h>
 
-#ifdef CONFIG_MULTIQUAD
-#define LOG_BUF_LEN	(65536)
-#elif defined(CONFIG_SMP)
-#define LOG_BUF_LEN	(32768)
-#else	
-#define LOG_BUF_LEN	(16384)			/* This must be a power of two */
-#endif
-
-#define LOG_BUF_MASK	(LOG_BUF_LEN-1)
+#define __LOG_BUF_LEN	(1 << CONFIG_LOG_BUF_SHIFT)
 
 /* printk's without a loglevel use this.. */
 #define DEFAULT_MESSAGE_LOGLEVEL 4 /* KERN_WARNING */
@@ -47,11 +44,14 @@
 
 DECLARE_WAIT_QUEUE_HEAD(log_wait);
 
-/* Keep together for sysctl support */
-int console_loglevel = DEFAULT_CONSOLE_LOGLEVEL;
-int default_message_loglevel = DEFAULT_MESSAGE_LOGLEVEL;
-int minimum_console_loglevel = MINIMUM_CONSOLE_LOGLEVEL;
-int default_console_loglevel = DEFAULT_CONSOLE_LOGLEVEL;
+int console_printk[4] = {
+	DEFAULT_CONSOLE_LOGLEVEL,	/* console_loglevel */
+	DEFAULT_MESSAGE_LOGLEVEL,	/* default_message_loglevel */
+	MINIMUM_CONSOLE_LOGLEVEL,	/* minimum_console_loglevel */
+	DEFAULT_CONSOLE_LOGLEVEL,	/* default_console_loglevel */
+};
+
+EXPORT_SYMBOL(console_printk);
 
 int oops_in_progress;
 
@@ -70,17 +70,21 @@ struct console *console_drivers;
  */
 static spinlock_t logbuf_lock = SPIN_LOCK_UNLOCKED;
 
-static char log_buf[LOG_BUF_LEN];
+static char __log_buf[__LOG_BUF_LEN];
+static char *log_buf = __log_buf;
+static int log_buf_len = __LOG_BUF_LEN;
+
+#define LOG_BUF_MASK	(log_buf_len-1)
 #define LOG_BUF(idx) (log_buf[(idx) & LOG_BUF_MASK])
 
 /*
- * The indices into log_buf are not constrained to LOG_BUF_LEN - they
+ * The indices into log_buf are not constrained to log_buf_len - they
  * must be masked before subscripting
  */
-static unsigned long log_start;			/* Index into log_buf: next char to be read by syslog() */
-static unsigned long con_start;			/* Index into log_buf: next char to be sent to consoles */
-static unsigned long log_end;			/* Index into log_buf: most-recently-written-char + 1 */
-static unsigned long logged_chars;		/* Number of chars produced since last read+clear operation */
+static unsigned long log_start;	/* Index into log_buf: next char to be read by syslog() */
+static unsigned long con_start;	/* Index into log_buf: next char to be sent to consoles */
+static unsigned long log_end;	/* Index into log_buf: most-recently-written-char + 1 */
+static unsigned long logged_chars; /* Number of chars produced since last read+clear operation */
 
 struct console_cmdline console_cmdline[MAX_CMDLINECONSOLES];
 static int preferred_console = -1;
@@ -143,6 +147,45 @@ static int __init console_setup(char *str)
 
 __setup("console=", console_setup);
 
+static int __init log_buf_len_setup(char *str)
+{
+	unsigned long size = memparse(str, &str);
+
+	if (size > log_buf_len) {
+		unsigned long start, dest_idx, offset;
+		char * new_log_buf;
+
+		new_log_buf = alloc_bootmem(size);
+		if (!new_log_buf) {
+			printk("log_buf_len: allocation failed\n");
+			goto out;
+		}
+
+		spin_lock_irq(&logbuf_lock);
+		log_buf_len = size;
+		log_buf = new_log_buf;
+
+		offset = start = min(con_start, log_start);
+		dest_idx = 0;
+		while (start != log_end) {
+			log_buf[dest_idx] = __log_buf[start & (__LOG_BUF_LEN - 1)];
+			start++;
+			dest_idx++;
+		}
+		log_start -= offset;
+		con_start -= offset;
+		log_end -= offset;
+		spin_unlock_irq(&logbuf_lock);
+
+		printk("log_buf_len: %d\n", log_buf_len);
+	}
+out:
+
+	return 1;
+}
+
+__setup("log_buf_len=", log_buf_len_setup);
+
 /*
  * Commands to do_syslog:
  *
@@ -157,12 +200,16 @@ __setup("console=", console_setup);
  *	8 -- Set level of messages printed to console
  *	9 -- Return number of unread characters in the log buffer
  */
-int do_syslog(int type, char * buf, int len)
+int do_syslog(int type, char __user * buf, int len)
 {
 	unsigned long i, j, limit, count;
 	int do_clear = 0;
 	char c;
 	int error = 0;
+
+	error = security_syslog(type);
+	if (error)
+		return error;
 
 	switch (type) {
 	case 0:		/* Close log */
@@ -184,17 +231,18 @@ int do_syslog(int type, char * buf, int len)
 			goto out;
 		i = 0;
 		spin_lock_irq(&logbuf_lock);
-		while ((log_start != log_end) && i < len) {
+		while (!error && (log_start != log_end) && i < len) {
 			c = LOG_BUF(log_start);
 			log_start++;
 			spin_unlock_irq(&logbuf_lock);
-			__put_user(c,buf);
+			error = __put_user(c,buf);
 			buf++;
 			i++;
 			spin_lock_irq(&logbuf_lock);
 		}
 		spin_unlock_irq(&logbuf_lock);
-		error = i;
+		if (!error)
+			error = i;
 		break;
 	case 4:		/* Read/clear last kernel messages */
 		do_clear = 1; 
@@ -210,8 +258,8 @@ int do_syslog(int type, char * buf, int len)
 		if (error)
 			goto out;
 		count = len;
-		if (count > LOG_BUF_LEN)
-			count = LOG_BUF_LEN;
+		if (count > log_buf_len)
+			count = log_buf_len;
 		spin_lock_irq(&logbuf_lock);
 		if (count > logged_chars)
 			count = logged_chars;
@@ -224,41 +272,39 @@ int do_syslog(int type, char * buf, int len)
 		 * we try to copy to user space. Therefore
 		 * the messages are copied in reverse. <manfreds>
 		 */
-		for(i=0;i < count;i++) {
+		for(i = 0; i < count && !error; i++) {
 			j = limit-1-i;
-			if (j+LOG_BUF_LEN < log_end)
+			if (j + log_buf_len < log_end)
 				break;
 			c = LOG_BUF(j);
 			spin_unlock_irq(&logbuf_lock);
-			__put_user(c,&buf[count-1-i]);
+			error = __put_user(c,&buf[count-1-i]);
 			spin_lock_irq(&logbuf_lock);
 		}
 		spin_unlock_irq(&logbuf_lock);
+		if (error)
+			break;
 		error = i;
 		if(i != count) {
 			int offset = count-error;
 			/* buffer overflow during copy, correct user buffer. */
 			for(i=0;i<error;i++) {
-				__get_user(c,&buf[i+offset]);
-				__put_user(c,&buf[i]);
+				if (__get_user(c,&buf[i+offset]) ||
+				    __put_user(c,&buf[i])) {
+					error = -EFAULT;
+					break;
+				}
 			}
 		}
-
 		break;
 	case 5:		/* Clear ring buffer */
-		spin_lock_irq(&logbuf_lock);
 		logged_chars = 0;
-		spin_unlock_irq(&logbuf_lock);
 		break;
 	case 6:		/* Disable logging to console */
-		spin_lock_irq(&logbuf_lock);
 		console_loglevel = minimum_console_loglevel;
-		spin_unlock_irq(&logbuf_lock);
 		break;
 	case 7:		/* Enable logging to console */
-		spin_lock_irq(&logbuf_lock);
 		console_loglevel = default_console_loglevel;
-		spin_unlock_irq(&logbuf_lock);
 		break;
 	case 8:		/* Set level of messages printed to console */
 		error = -EINVAL;
@@ -266,15 +312,11 @@ int do_syslog(int type, char * buf, int len)
 			goto out;
 		if (len < minimum_console_loglevel)
 			len = minimum_console_loglevel;
-		spin_lock_irq(&logbuf_lock);
 		console_loglevel = len;
-		spin_unlock_irq(&logbuf_lock);
 		error = 0;
 		break;
 	case 9:		/* Number of chars in the log buffer */
-		spin_lock_irq(&logbuf_lock);
 		error = log_end - log_start;
-		spin_unlock_irq(&logbuf_lock);
 		break;
 	default:
 		error = -EINVAL;
@@ -284,10 +326,8 @@ out:
 	return error;
 }
 
-asmlinkage long sys_syslog(int type, char * buf, int len)
+asmlinkage long sys_syslog(int type, char __user * buf, int len)
 {
-	if ((type != 3) && !capable(CAP_SYS_ADMIN))
-		return -EPERM;
 	return do_syslog(type, buf, len);
 }
 
@@ -307,12 +347,15 @@ static void __call_console_drivers(unsigned long start, unsigned long end)
 /*
  * Write out chars from start to end - 1 inclusive
  */
-static void _call_console_drivers(unsigned long start, unsigned long end, int msg_log_level)
+static void _call_console_drivers(unsigned long start,
+				unsigned long end, int msg_log_level)
 {
-	if (msg_log_level < console_loglevel && console_drivers && start != end) {
+	if (msg_log_level < console_loglevel &&
+			console_drivers && start != end) {
 		if ((start & LOG_BUF_MASK) > (end & LOG_BUF_MASK)) {
 			/* wrapped write */
-			__call_console_drivers(start & LOG_BUF_MASK, LOG_BUF_LEN);
+			__call_console_drivers(start & LOG_BUF_MASK,
+						log_buf_len);
 			__call_console_drivers(0, end & LOG_BUF_MASK);
 		} else {
 			__call_console_drivers(start, end);
@@ -375,11 +418,11 @@ static void emit_log_char(char c)
 {
 	LOG_BUF(log_end) = c;
 	log_end++;
-	if (log_end - log_start > LOG_BUF_LEN)
-		log_start = log_end - LOG_BUF_LEN;
-	if (log_end - con_start > LOG_BUF_LEN)
-		con_start = log_end - LOG_BUF_LEN;
-	if (logged_chars < LOG_BUF_LEN)
+	if (log_end - log_start > log_buf_len)
+		log_start = log_end - log_buf_len;
+	if (log_end - con_start > log_buf_len)
+		con_start = log_end - log_buf_len;
+	if (logged_chars < log_buf_len)
 		logged_chars++;
 }
 
@@ -438,6 +481,16 @@ asmlinkage int printk(const char *fmt, ...)
 			log_level_unknown = 1;
 	}
 
+	if (!cpu_online(smp_processor_id())) {
+		/*
+		 * Some console drivers may assume that per-cpu resources have
+		 * been allocated.  So don't allow them to be called by this
+		 * CPU until it is officially up.  We shouldn't be calling into
+		 * random console drivers on a CPU which doesn't exist yet..
+		 */
+		spin_unlock_irqrestore(&logbuf_lock, flags);
+		goto out;
+	}
 	if (!down_trylock(&console_sem)) {
 		/*
 		 * We own the drivers.  We can drop the spinlock and let
@@ -454,6 +507,7 @@ asmlinkage int printk(const char *fmt, ...)
 		 */
 		spin_unlock_irqrestore(&logbuf_lock, flags);
 	}
+out:
 	return printed_len;
 }
 EXPORT_SYMBOL(printk);
@@ -493,11 +547,11 @@ void release_console_sem(void)
 {
 	unsigned long flags;
 	unsigned long _con_start, _log_end;
-	unsigned long must_wake_klogd = 0;
+	unsigned long wake_klogd = 0;
 
 	for ( ; ; ) {
 		spin_lock_irqsave(&logbuf_lock, flags);
-		must_wake_klogd |= log_start - log_end;
+		wake_klogd |= log_start - log_end;
 		if (con_start == log_end)
 			break;			/* Nothing to print */
 		_con_start = con_start;
@@ -509,7 +563,7 @@ void release_console_sem(void)
 	console_may_schedule = 0;
 	up(&console_sem);
 	spin_unlock_irqrestore(&logbuf_lock, flags);
-	if (must_wake_klogd && !oops_in_progress)
+	if (wake_klogd && !oops_in_progress && waitqueue_active(&log_wait))
 		wake_up_interruptible(&log_wait);
 }
 
@@ -523,11 +577,12 @@ void release_console_sem(void)
  */
 void console_conditional_schedule(void)
 {
-	if (console_may_schedule && current->need_resched) {
+	if (console_may_schedule && need_resched()) {
 		set_current_state(TASK_RUNNING);
 		schedule();
 	}
 }
+EXPORT_SYMBOL(console_conditional_schedule);
 
 void console_print(const char *s)
 {
@@ -539,7 +594,14 @@ void console_unblank(void)
 {
 	struct console *c;
 
-	acquire_console_sem();
+	/*
+	 * Try to get the console semaphore. If someone else owns it
+	 * we have to return without unblanking because console_unblank
+	 * may be called in interrupt context.
+	 */
+	if (down_trylock(&console_sem) != 0)
+		return;
+	console_may_schedule = 0;
 	for (c = console_drivers; c != NULL; c = c->next)
 		if ((c->flags & CON_ENABLED) && c->unblank)
 			c->unblank();
@@ -612,7 +674,8 @@ void register_console(struct console * console)
 	}
 	if (console->flags & CON_PRINTBUFFER) {
 		/*
-		 * release_cosole_sem() will print out the buffered messages for us.
+		 * release_console_sem() will print out the buffered messages
+		 * for us.
 		 */
 		spin_lock_irqsave(&logbuf_lock, flags);
 		con_start = log_start;
@@ -664,7 +727,7 @@ EXPORT_SYMBOL(unregister_console);
  */
 void tty_write_message(struct tty_struct *tty, char *msg)
 {
-	if (tty && tty->driver.write)
-		tty->driver.write(tty, 0, msg, strlen(msg));
+	if (tty && tty->driver->write)
+		tty->driver->write(tty, 0, msg, strlen(msg));
 	return;
 }

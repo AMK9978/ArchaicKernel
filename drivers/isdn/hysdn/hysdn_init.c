@@ -21,7 +21,7 @@
 
 #include "hysdn_defs.h"
 
-static struct pci_device_id hysdn_pci_tbl[] __initdata = {
+static struct pci_device_id hysdn_pci_tbl[] = {
 	{PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_HYPERCOPE_PLX, PCI_ANY_ID, PCI_SUBDEVICE_ID_HYPERCOPE_METRO},
 	{PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_HYPERCOPE_PLX, PCI_ANY_ID, PCI_SUBDEVICE_ID_HYPERCOPE_CHAMP2},
 	{PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_HYPERCOPE_PLX, PCI_ANY_ID, PCI_SUBDEVICE_ID_HYPERCOPE_ERGO},
@@ -203,10 +203,6 @@ hysdn_init(void)
 	printk(KERN_NOTICE "HYSDN: module Rev: %s loaded\n", hysdn_getrev(tmp));
 	strcpy(tmp, hysdn_net_revision);
 	printk(KERN_NOTICE "HYSDN: network interface Rev: %s \n", hysdn_getrev(tmp));
-	if (!pci_present()) {
-		printk(KERN_ERR "HYSDN: no PCI bus present, module not loaded\n");
-		return (-1);
-	}
 	search_cards();
 	printk(KERN_INFO "HYSDN: %d card(s) found.\n", cardmax);
 

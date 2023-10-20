@@ -190,8 +190,8 @@ struct ArcProto {
 
 	void (*rx) (struct net_device * dev, int bufnum,
 		    struct archdr * pkthdr, int length);
-	int (*build_header) (struct sk_buff * skb, unsigned short ethproto,
-			     uint8_t daddr);
+	int (*build_header) (struct sk_buff * skb, struct net_device *dev,
+			     unsigned short ethproto, uint8_t daddr);
 
 	/* these functions return '1' if the skb can now be freed */
 	int (*prepare_tx) (struct net_device * dev, struct archdr * pkt, int length,
@@ -291,12 +291,13 @@ struct arcnet_local {
 
 	/* hardware-specific functions */
 	struct {
+		struct module *owner;
 		void (*command) (struct net_device * dev, int cmd);
 		int (*status) (struct net_device * dev);
 		void (*intmask) (struct net_device * dev, int mask);
 		bool (*reset) (struct net_device * dev, bool really_reset);
-		void (*open_close) (struct net_device * dev, bool open);
-		void (*open_close_ll) (struct net_device * dev, bool open);
+		void (*open) (struct net_device * dev);
+		void (*close) (struct net_device * dev);
 
 		void (*copy_to_card) (struct net_device * dev, int bufnum, int offset,
 				      void *buf, int count);
@@ -312,7 +313,6 @@ struct arcnet_local {
 #define ACOMMAND(x)  (lp->hw.command(dev, (x)))
 #define ASTATUS()    (lp->hw.status(dev))
 #define AINTMASK(x)  (lp->hw.intmask(dev, (x)))
-#define ARCOPEN(x)   (lp->hw.open_close(dev, (x)))
 
 
 
@@ -329,18 +329,9 @@ void arcnet_dump_packet(struct net_device *dev, int bufnum, char *desc);
 #endif
 
 void arcnet_unregister_proto(struct ArcProto *proto);
-void arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+irqreturn_t arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 void arcdev_setup(struct net_device *dev);
 void arcnet_rx(struct net_device *dev, int bufnum);
 
-void arcnet_init(void);
-
-void arcnet_rfc1201_init(void);
-void arcnet_rfc1051_init(void);
-void arcnet_raw_init(void);
-
-int com90xx_probe(struct net_device *dev);
-
 #endif				/* __KERNEL__ */
-
 #endif				/* _LINUX_ARCDEVICE_H */

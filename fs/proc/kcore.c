@@ -1,5 +1,5 @@
 /*
- *	fs/proc/kcore.c kernel ELF/AOUT core dumper
+ *	fs/proc/kcore.c kernel ELF core dumper
  *
  *	Modelled on fs/exec.c:aout_core_dump()
  *	Jeremy Fitzhardinge <jeremy@sw.oz.au>
@@ -27,77 +27,19 @@ static int open_kcore(struct inode * inode, struct file * filp)
 	return capable(CAP_SYS_RAWIO) ? 0 : -EPERM;
 }
 
-static ssize_t read_kcore(struct file *, char *, size_t, loff_t *);
+static ssize_t read_kcore(struct file *, char __user *, size_t, loff_t *);
 
 struct file_operations proc_kcore_operations = {
-	read:		read_kcore,
-	open:		open_kcore,
+	.read		= read_kcore,
+	.open		= open_kcore,
 };
 
-#ifdef CONFIG_KCORE_AOUT
-static ssize_t read_kcore(struct file *file, char *buf, size_t count, loff_t *ppos)
-{
-	unsigned long long p = *ppos, memsize;
-	ssize_t read;
-	ssize_t count1;
-	char * pnt;
-	struct user dump;
-#if defined (__i386__) || defined (__mc68000__) || defined(__x86_64__)
-#	define FIRST_MAPPED	PAGE_SIZE	/* we don't have page 0 mapped on x86.. */
-#else
-#	define FIRST_MAPPED	0
+#ifndef kc_vaddr_to_offset
+#define	kc_vaddr_to_offset(v) ((v) - PAGE_OFFSET)
 #endif
-
-	memset(&dump, 0, sizeof(struct user));
-	dump.magic = CMAGIC;
-	dump.u_dsize = (virt_to_phys(high_memory) >> PAGE_SHIFT);
-#if defined (__i386__) || defined(__x86_64__)
-	dump.start_code = PAGE_OFFSET;
+#ifndef	kc_offset_to_vaddr
+#define	kc_offset_to_vaddr(o) ((o) + PAGE_OFFSET)
 #endif
-#ifdef __alpha__
-	dump.start_data = PAGE_OFFSET;
-#endif
-
-	memsize = virt_to_phys(high_memory);
-	if (p >= memsize)
-		return 0;
-	if (count > memsize - p)
-		count = memsize - p;
-	read = 0;
-
-	if (p < sizeof(struct user) && count > 0) {
-		count1 = count;
-		if (p + count1 > sizeof(struct user))
-			count1 = sizeof(struct user)-p;
-		pnt = (char *) &dump + p;
-		if (copy_to_user(buf,(void *) pnt, count1))
-			return -EFAULT;
-		buf += count1;
-		p += count1;
-		count -= count1;
-		read += count1;
-	}
-
-	if (count > 0 && p < PAGE_SIZE + FIRST_MAPPED) {
-		count1 = PAGE_SIZE + FIRST_MAPPED - p;
-		if (count1 > count)
-			count1 = count;
-		if (clear_user(buf, count1))
-			return -EFAULT;
-		buf += count1;
-		p += count1;
-		count -= count1;
-		read += count1;
-	}
-	if (count > 0) {
-		if (copy_to_user(buf, (void *) (PAGE_OFFSET+p-PAGE_SIZE), count))
-			return -EFAULT;
-		read += count;
-	}
-	*ppos += read;
-	return read;
-}
-#else /* CONFIG_KCORE_AOUT */
 
 #define roundup(x, y)  ((((x)+((y)-1))/(y))*(y))
 
@@ -110,31 +52,62 @@ struct memelfnote
 	void *data;
 };
 
+static struct kcore_list *kclist;
+static rwlock_t kclist_lock = RW_LOCK_UNLOCKED;
+
+void
+kclist_add(struct kcore_list *new, void *addr, size_t size)
+{
+	new->addr = (unsigned long)addr;
+	new->size = size;
+
+	write_lock(&kclist_lock);
+	new->next = kclist;
+	kclist = new;
+	write_unlock(&kclist_lock);
+}
+
+struct kcore_list *
+kclist_del(void *addr)
+{
+	struct kcore_list *m, **p = &kclist;
+
+	write_lock(&kclist_lock);
+	for (m = *p; m; p = &m->next) {
+		if (m->addr == (unsigned long)addr) {
+			*p = m->next;
+			write_unlock(&kclist_lock);
+			return m;
+		}
+	}
+	write_unlock(&kclist_lock);
+	return 0;
+}
+
 extern char saved_command_line[];
 
-static size_t get_kcore_size(int *num_vma, size_t *elf_buflen)
+static size_t get_kcore_size(int *nphdr, size_t *elf_buflen)
 {
 	size_t try, size;
-	struct vm_struct *m;
+	struct kcore_list *m;
 
-	*num_vma = 0;
-	size = ((size_t)high_memory - PAGE_OFFSET + PAGE_SIZE);
-	if (!vmlist) {
-		*elf_buflen = PAGE_SIZE;
-		return (size);
-	}
+	*nphdr = 1; /* PT_NOTE */
+	size = 0;
 
-	for (m=vmlist; m; m=m->next) {
-		try = (size_t)m->addr + m->size;
+	for (m=kclist; m; m=m->next) {
+		try = kc_vaddr_to_offset((size_t)m->addr + m->size);
 		if (try > size)
 			size = try;
-		*num_vma = *num_vma + 1;
+		*nphdr = *nphdr + 1;
 	}
 	*elf_buflen =	sizeof(struct elfhdr) + 
-			(*num_vma + 2)*sizeof(struct elf_phdr) + 
-			3 * sizeof(struct memelfnote);
+			(*nphdr + 2)*sizeof(struct elf_phdr) + 
+			3 * sizeof(struct memelfnote) +
+			sizeof(struct elf_prstatus) +
+			sizeof(struct elf_prpsinfo) +
+			sizeof(struct task_struct);
 	*elf_buflen = PAGE_ALIGN(*elf_buflen);
-	return (size - PAGE_OFFSET + *elf_buflen);
+	return size + *elf_buflen;
 }
 
 
@@ -182,9 +155,9 @@ static char *storenote(struct memelfnote *men, char *bufp)
 
 /*
  * store an ELF coredump header in the supplied buffer
- * num_vma is the number of elements in vmlist
+ * nphdr is the number of elf_phdr to insert
  */
-static void elf_kcore_store_hdr(char *bufp, int num_vma, int dataoff)
+static void elf_kcore_store_hdr(char *bufp, int nphdr, int dataoff)
 {
 	struct elf_prstatus prstatus;	/* NT_PRSTATUS */
 	struct elf_prpsinfo prpsinfo;	/* NT_PRPSINFO */
@@ -192,7 +165,7 @@ static void elf_kcore_store_hdr(char *bufp, int num_vma, int dataoff)
 	struct elfhdr *elf;
 	struct memelfnote notes[3];
 	off_t offset = 0;
-	struct vm_struct *m;
+	struct kcore_list *m;
 
 	/* setup ELF header */
 	elf = (struct elfhdr *) bufp;
@@ -202,6 +175,7 @@ static void elf_kcore_store_hdr(char *bufp, int num_vma, int dataoff)
 	elf->e_ident[EI_CLASS]	= ELF_CLASS;
 	elf->e_ident[EI_DATA]	= ELF_DATA;
 	elf->e_ident[EI_VERSION]= EV_CURRENT;
+	elf->e_ident[EI_OSABI] = ELF_OSABI;
 	memset(elf->e_ident+EI_PAD, 0, EI_NIDENT-EI_PAD);
 	elf->e_type	= ET_CORE;
 	elf->e_machine	= ELF_ARCH;
@@ -212,7 +186,7 @@ static void elf_kcore_store_hdr(char *bufp, int num_vma, int dataoff)
 	elf->e_flags	= 0;
 	elf->e_ehsize	= sizeof(struct elfhdr);
 	elf->e_phentsize= sizeof(struct elf_phdr);
-	elf->e_phnum	= 2 + num_vma;
+	elf->e_phnum	= nphdr;
 	elf->e_shentsize= 0;
 	elf->e_shnum	= 0;
 	elf->e_shstrndx	= 0;
@@ -230,33 +204,17 @@ static void elf_kcore_store_hdr(char *bufp, int num_vma, int dataoff)
 	nhdr->p_flags	= 0;
 	nhdr->p_align	= 0;
 
-	/* setup ELF PT_LOAD program header for the 
-	 * virtual range 0xc0000000 -> high_memory */
-	phdr = (struct elf_phdr *) bufp;
-	bufp += sizeof(struct elf_phdr);
-	offset += sizeof(struct elf_phdr);
-	phdr->p_type	= PT_LOAD;
-	phdr->p_flags	= PF_R|PF_W|PF_X;
-	phdr->p_offset	= dataoff;
-	phdr->p_vaddr	= PAGE_OFFSET;
-	phdr->p_paddr	= __pa(PAGE_OFFSET);
-	phdr->p_filesz	= phdr->p_memsz = ((unsigned long)high_memory - PAGE_OFFSET);
-	phdr->p_align	= PAGE_SIZE;
-
-	/* setup ELF PT_LOAD program header for every vmalloc'd area */
-	for (m=vmlist; m; m=m->next) {
-		if (m->flags & VM_IOREMAP) /* don't dump ioremap'd stuff! (TA) */
-			continue;
-
+	/* setup ELF PT_LOAD program header for every area */
+	for (m=kclist; m; m=m->next) {
 		phdr = (struct elf_phdr *) bufp;
 		bufp += sizeof(struct elf_phdr);
 		offset += sizeof(struct elf_phdr);
 
 		phdr->p_type	= PT_LOAD;
 		phdr->p_flags	= PF_R|PF_W|PF_X;
-		phdr->p_offset	= (size_t)m->addr - PAGE_OFFSET + dataoff;
+		phdr->p_offset	= kc_vaddr_to_offset(m->addr) + dataoff;
 		phdr->p_vaddr	= (size_t)m->addr;
-		phdr->p_paddr	= __pa(m->addr);
+		phdr->p_paddr	= 0;
 		phdr->p_filesz	= phdr->p_memsz	= m->size;
 		phdr->p_align	= PAGE_SIZE;
 	}
@@ -292,7 +250,7 @@ static void elf_kcore_store_hdr(char *bufp, int num_vma, int dataoff)
 	strcpy(prpsinfo.pr_fname, "vmlinux");
 	strncpy(prpsinfo.pr_psargs, saved_command_line, ELF_PRARGSZ);
 
-	nhdr->p_filesz	= notesize(&notes[1]);
+	nhdr->p_filesz	+= notesize(&notes[1]);
 	bufp = storenote(&notes[1], bufp);
 
 	/* set up the task structure */
@@ -301,7 +259,7 @@ static void elf_kcore_store_hdr(char *bufp, int num_vma, int dataoff)
 	notes[2].datasz	= sizeof(struct task_struct);
 	notes[2].data	= current;
 
-	nhdr->p_filesz	= notesize(&notes[2]);
+	nhdr->p_filesz	+= notesize(&notes[2]);
 	bufp = storenote(&notes[2], bufp);
 
 } /* end elf_kcore_store_hdr() */
@@ -310,18 +268,20 @@ static void elf_kcore_store_hdr(char *bufp, int num_vma, int dataoff)
 /*
  * read from the ELF header and then kernel memory
  */
-static ssize_t read_kcore(struct file *file, char *buffer, size_t buflen, loff_t *fpos)
+static ssize_t
+read_kcore(struct file *file, char __user *buffer, size_t buflen, loff_t *fpos)
 {
 	ssize_t acc = 0;
 	size_t size, tsz;
 	size_t elf_buflen;
-	int num_vma;
+	int nphdr;
 	unsigned long start;
 
-	read_lock(&vmlist_lock);
-	proc_root_kcore->size = size = get_kcore_size(&num_vma, &elf_buflen);
+	read_lock(&kclist_lock);
+	tsz =  get_kcore_size(&nphdr, &elf_buflen);
+	proc_root_kcore->size = size = tsz + elf_buflen;
 	if (buflen == 0 || *fpos >= size) {
-		read_unlock(&vmlist_lock);
+		read_unlock(&kclist_lock);
 		return 0;
 	}
 
@@ -338,12 +298,12 @@ static ssize_t read_kcore(struct file *file, char *buffer, size_t buflen, loff_t
 			tsz = buflen;
 		elf_buf = kmalloc(elf_buflen, GFP_ATOMIC);
 		if (!elf_buf) {
-			read_unlock(&vmlist_lock);
+			read_unlock(&kclist_lock);
 			return -ENOMEM;
 		}
 		memset(elf_buf, 0, elf_buflen);
-		elf_kcore_store_hdr(elf_buf, num_vma, elf_buflen);
-		read_unlock(&vmlist_lock);
+		elf_kcore_store_hdr(elf_buf, nphdr, elf_buflen);
+		read_unlock(&kclist_lock);
 		if (copy_to_user(buffer, elf_buf + *fpos, tsz)) {
 			kfree(elf_buf);
 			return -EFAULT;
@@ -358,36 +318,30 @@ static ssize_t read_kcore(struct file *file, char *buffer, size_t buflen, loff_t
 		if (buflen == 0)
 			return acc;
 	} else
-		read_unlock(&vmlist_lock);
+		read_unlock(&kclist_lock);
 
-	/* where page 0 not mapped, write zeros into buffer */
-#if defined (__i386__) || defined (__mc68000__) || defined(__x86_64__)
-	if (*fpos < PAGE_SIZE + elf_buflen) {
-		/* work out how much to clear */
-		tsz = PAGE_SIZE + elf_buflen - *fpos;
-		if (buflen < tsz)
-			tsz = buflen;
-
-		/* write zeros to buffer */
-		if (clear_user(buffer, tsz))
-			return -EFAULT;
-		buflen -= tsz;
-		*fpos += tsz;
-		buffer += tsz;
-		acc += tsz;
-
-		/* leave now if filled buffer already */
-		if (buflen == 0)
-			return tsz;
-	}
-#endif
-	/* fill the remainder of the buffer from kernel VM space */
-	start = (unsigned long)__va(*fpos - elf_buflen);
+	/*
+	 * Check to see if our file offset matches with any of
+	 * the addresses in the elf_phdr on our list.
+	 */
+	start = kc_offset_to_vaddr(*fpos - elf_buflen);
 	if ((tsz = (PAGE_SIZE - (start & ~PAGE_MASK))) > buflen)
 		tsz = buflen;
 		
 	while (buflen) {
-		if ((start >= VMALLOC_START) && (start < VMALLOC_END)) {
+		struct kcore_list *m;
+
+		read_lock(&kclist_lock);
+		for (m=kclist; m; m=m->next) {
+			if (start >= m->addr && start < (m->addr+m->size))
+				break;
+		}
+		read_unlock(&kclist_lock);
+
+		if (m == NULL) {
+			if (clear_user(buffer, tsz))
+				return -EFAULT;
+		} else if ((start >= VMALLOC_START) && (start < VMALLOC_END)) {
 			char * elf_buf;
 			struct vm_struct *m;
 			unsigned long curstart = start;
@@ -432,18 +386,26 @@ static ssize_t read_kcore(struct file *file, char *buffer, size_t buflen, loff_t
 				return -EFAULT;
 			}
 			kfree(elf_buf);
-		} else if ((start > PAGE_OFFSET) && (start < 
-						(unsigned long)high_memory)) {
+		} else {
 			if (kern_addr_valid(start)) {
-				if (copy_to_user(buffer, (char *)start, tsz))
-					return -EFAULT;
+				unsigned long n;
+
+				n = copy_to_user(buffer, (char *)start, tsz);
+				/*
+				 * We cannot distingush between fault on source
+				 * and fault on destination. When this happens
+				 * we clear too and hope it will trigger the
+				 * EFAULT again.
+				 */
+				if (n) { 
+					if (clear_user(buffer + tsz - n,
+								tsz - n))
+						return -EFAULT;
+				}
 			} else {
 				if (clear_user(buffer, tsz))
 					return -EFAULT;
 			}
-		} else {
-			if (clear_user(buffer, tsz))
-				return -EFAULT;
 		}
 		buflen -= tsz;
 		*fpos += tsz;
@@ -455,4 +417,3 @@ static ssize_t read_kcore(struct file *file, char *buffer, size_t buflen, loff_t
 
 	return acc;
 }
-#endif /* CONFIG_KCORE_AOUT */

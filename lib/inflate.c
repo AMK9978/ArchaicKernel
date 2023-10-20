@@ -271,14 +271,15 @@ STATIC const int dbits = 6;          /* bits in base distance lookup table */
 STATIC unsigned hufts;         /* track memory usage */
 
 
-STATIC int huft_build(b, n, s, d, e, t, m)
-unsigned *b;            /* code lengths in bits (all assumed <= BMAX) */
-unsigned n;             /* number of codes (assumed <= N_MAX) */
-unsigned s;             /* number of simple-valued codes (0..s-1) */
-const ush *d;                 /* list of base values for non-simple codes */
-const ush *e;                 /* list of extra bits for non-simple codes */
-struct huft **t;        /* result: starting table */
-int *m;                 /* maximum lookup bits, returns actual */
+STATIC int huft_build(
+	unsigned *b,            /* code lengths in bits (all assumed <= BMAX) */
+	unsigned n,             /* number of codes (assumed <= N_MAX) */
+	unsigned s,             /* number of simple-valued codes (0..s-1) */
+	const ush *d,           /* list of base values for non-simple codes */
+	const ush *e,           /* list of extra bits for non-simple codes */
+	struct huft **t,        /* result: starting table */
+	int *m                  /* maximum lookup bits, returns actual */
+	)
 /* Given a list of code lengths and a maximum table size, make a set of
    tables to decode that set of codes.  Return zero on success, one if
    the given code set is incomplete (the tables are still built in this
@@ -489,8 +490,9 @@ DEBG("huft7 ");
 
 
 
-STATIC int huft_free(t)
-struct huft *t;         /* table to free */
+STATIC int huft_free(
+	struct huft *t         /* table to free */
+	)
 /* Free the malloc'ed tables built by huft_build(), which makes a linked
    list of the tables it made, with the links in a dummy first entry of
    each table. */
@@ -510,9 +512,12 @@ struct huft *t;         /* table to free */
 }
 
 
-STATIC int inflate_codes(tl, td, bl, bd)
-struct huft *tl, *td;   /* literal/length and distance decoder tables */
-int bl, bd;             /* number of bits decoded by tl[] and td[] */
+STATIC int inflate_codes(
+	struct huft *tl,    /* literal/length decoder tables */
+	struct huft *td,    /* distance decoder tables */
+	int bl,             /* number of bits decoded by tl[] */
+	int bd              /* number of bits decoded by td[] */
+	)
 /* inflate (decompress) the codes in a deflated (compressed) block.
    Return an error code or zero if it all goes ok. */
 {
@@ -619,7 +624,7 @@ int bl, bd;             /* number of bits decoded by tl[] and td[] */
 
 
 
-STATIC int inflate_stored()
+STATIC int inflate_stored(void)
 /* "decompress" an inflated type 0 (stored) block. */
 {
   unsigned n;           /* number of bytes in block */
@@ -675,7 +680,7 @@ DEBG("<stor");
 
 
 
-STATIC int inflate_fixed()
+STATIC int inflate_fixed(void)
 /* decompress an inflated type 1 (fixed Huffman codes) block.  We should
    either replace this with a custom decoder, or at least precompute the
    Huffman tables. */
@@ -729,7 +734,7 @@ DEBG("<fix");
 
 
 
-STATIC int inflate_dynamic()
+STATIC int inflate_dynamic(void)
 /* decompress an inflated type 2 (dynamic Huffman codes) block. */
 {
   int i;                /* temporary variables */
@@ -866,7 +871,7 @@ DEBG("dyn5a ");
   {
 DEBG("dyn5b ");
     if (i == 1) {
-      error(" incomplete literal tree\n");
+      error("incomplete literal tree");
       huft_free(tl);
     }
     return i;                   /* incomplete code set */
@@ -877,7 +882,7 @@ DEBG("dyn5c ");
   {
 DEBG("dyn5d ");
     if (i == 1) {
-      error(" incomplete distance tree\n");
+      error("incomplete distance tree");
 #ifdef PKZIP_BUG_WORKAROUND
       i = 0;
     }
@@ -907,8 +912,9 @@ DEBG("dyn7 ");
 
 
 
-STATIC int inflate_block(e)
-int *e;                 /* last block flag */
+STATIC int inflate_block(
+	int *e                  /* last block flag */
+	)
 /* decompress an inflated block */
 {
   unsigned t;           /* block type */
@@ -954,7 +960,7 @@ int *e;                 /* last block flag */
 
 
 
-STATIC int inflate()
+STATIC int inflate(void)
 /* decompress an inflated entry */
 {
   int e;                /* last block flag */
@@ -1009,7 +1015,7 @@ STATIC int inflate()
 
 static ulg crc_32_tab[256];
 static ulg crc;		/* initialized in makecrc() so it'll reside in bss */
-#define CRC_VALUE (crc ^ 0xffffffffL)
+#define CRC_VALUE (crc ^ 0xffffffffUL)
 
 /*
  * Code to compute the CRC-32 table. Borrowed from 
@@ -1049,7 +1055,7 @@ makecrc(void)
   }
 
   /* this is initialized here so this code could reside in ROM */
-  crc = (ulg)0xffffffffL; /* shift register contents */
+  crc = (ulg)0xffffffffUL; /* shift register contents */
 }
 
 /* gzip flag byte */
@@ -1091,15 +1097,15 @@ static int gunzip(void)
 
     flags  = (uch)get_byte();
     if ((flags & ENCRYPTED) != 0) {
-	    error("Input is encrypted\n");
+	    error("Input is encrypted");
 	    return -1;
     }
     if ((flags & CONTINUATION) != 0) {
-	    error("Multi part input\n");
+	    error("Multi part input");
 	    return -1;
     }
     if ((flags & RESERVED) != 0) {
-	    error("Input has invalid flags\n");
+	    error("Input has invalid flags");
 	    return -1;
     }
     (ulg)get_byte();	/* Get timestamp */

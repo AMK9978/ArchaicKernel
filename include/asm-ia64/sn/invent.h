@@ -4,12 +4,13 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1992 - 1997, 2000 Silicon Graphics, Inc.
- * Copyright (C) 2000 by Colin Ngam
+ * Copyright (C) 1992 - 1997, 2000-2003 Silicon Graphics, Inc. All rights reserved.
  */
-#ifndef _ASM_SN_INVENT_H
-#define _ASM_SN_INVENT_H
+#ifndef _ASM_IA64_SN_INVENT_H
+#define _ASM_IA64_SN_INVENT_H
 
+#include <linux/types.h>
+#include <asm/sn/sgi.h>
 /*
  * sys/sn/invent.h --  Kernel Hardware Inventory
  *
@@ -29,7 +30,7 @@
 #define minor_t int
 #define app32_ptr_t unsigned long
 #define graph_vertex_place_t long
-#define GRAPH_VERTEX_NONE ((devfs_handle_t)-1)
+#define GRAPH_VERTEX_NONE ((vertex_hdl_t)-1)
 #define GRAPH_EDGE_PLACE_NONE ((graph_edge_place_t)0)
 #define GRAPH_INFO_PLACE_NONE ((graph_info_place_t)0)
 #define GRAPH_VERTEX_PLACE_NONE ((graph_vertex_place_t)0)
@@ -711,36 +712,22 @@ typedef struct irix5_inventory_s {
 } irix5_inventory_t;
 
 typedef struct invplace_s {
-	devfs_handle_t		invplace_vhdl;		/* current vertex */
-	devfs_handle_t		invplace_vplace;	/* place in vertex list */
+	vertex_hdl_t		invplace_vhdl;		/* current vertex */
+	vertex_hdl_t		invplace_vplace;	/* place in vertex list */
 	inventory_t		*invplace_inv;		/* place in inv list on vertex */
 } invplace_t; /* Magic cookie placeholder in inventory list */
 
 extern invplace_t invplace_none;
 #define INVPLACE_NONE invplace_none
 
-extern void	    add_to_inventory(int, int, int, int, int);
-extern void	    replace_in_inventory(inventory_t *, int, int, int, int, int);
-extern void         start_scan_inventory(invplace_t *);
-extern inventory_t  *get_next_inventory(invplace_t *);
-extern void         end_scan_inventory(invplace_t *);
-extern inventory_t  *find_inventory(inventory_t *, int, int, int, int, int);
-extern int	    scaninvent(int (*)(inventory_t *, void *), void *);
-extern int	    get_sizeof_inventory(int);
-
-extern void device_inventory_add(	devfs_handle_t device, 
+static inline void device_inventory_add(vertex_hdl_t device, 
 					int class, 
 					int type, 
 					major_t ctlr, 
 					minor_t unit, 
-					int state);
+					int state)
+{
+}
 
-
-extern inventory_t *device_inventory_get_next(	devfs_handle_t device,
-						invplace_t *);
-
-extern void device_controller_num_set(	devfs_handle_t,
-					int);
-extern int device_controller_num_get(	devfs_handle_t);
 #endif /* __KERNEL__ */
-#endif /* _ASM_SN_INVENT_H */
+#endif /* _ASM_IA64_SN_INVENT_H */

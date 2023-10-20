@@ -3,11 +3,15 @@
  *
  *	Alan Cox (GW4PTS) 	10/11/93
  */
- 
 #ifndef _AX25_H
 #define _AX25_H 
+
 #include <linux/config.h>
 #include <linux/ax25.h>
+#include <linux/spinlock.h>
+#include <linux/timer.h>
+#include <linux/list.h>
+#include <asm/atomic.h>
 
 #define	AX25_T1CLAMPLO  		1
 #define	AX25_T1CLAMPHI 			(30 * HZ)
@@ -66,6 +70,8 @@
 #define	AX25_UA			0x63	/* Unnumbered acknowledge */
 #define	AX25_FRMR		0x87	/* Frame reject */
 #define	AX25_UI			0x03	/* Unnumbered information */
+#define	AX25_XID		0xaf	/* Exchange information */
+#define	AX25_TEST		0xe3	/* Test */
 
 #define	AX25_PF			0x10	/* Poll/final bit for standard AX.25 */
 #define	AX25_EPF		0x01	/* Poll/final bit for extended AX.25 */
@@ -147,10 +153,12 @@ typedef struct {
 
 typedef struct ax25_route {
 	struct ax25_route	*next;
+	atomic_t		ref;
 	ax25_address		callsign;
-	struct net_device		*dev;
+	struct net_device	*dev;
 	ax25_digi		*digipeat;
 	char			ip_mode;
+	struct timer_list	timer;
 } ax25_route;
 
 typedef struct {
@@ -173,7 +181,7 @@ typedef struct ax25_dev {
 } ax25_dev;
 
 typedef struct ax25_cb {
-	struct ax25_cb		*next;
+	struct hlist_node	ax25_node;
 	ax25_address		source_addr, dest_addr;
 	ax25_digi		*digipeat;
 	ax25_dev		*ax25_dev;
@@ -190,16 +198,34 @@ typedef struct ax25_cb {
 	struct sk_buff_head	ack_queue;
 	struct sk_buff_head	frag_queue;
 	unsigned char		window;
-	struct timer_list	timer;
+	struct timer_list	timer, dtimer;
 	struct sock		*sk;		/* Backlink to socket */
+	atomic_t		refcount;
 } ax25_cb;
 
+#define ax25_sk(__sk) ((ax25_cb *)(__sk)->sk_protinfo)
+
+#define ax25_for_each(__ax25, node, list) \
+	hlist_for_each_entry(__ax25, node, list, ax25_node)
+
+#define ax25_cb_hold(__ax25) \
+	atomic_inc(&((__ax25)->refcount))
+
+static __inline__ void ax25_cb_put(ax25_cb *ax25)
+{
+	if (atomic_dec_and_test(&ax25->refcount)) {
+		if (ax25->digipeat)
+			kfree(ax25->digipeat);
+		kfree(ax25);
+	}
+}
+
 /* af_ax25.c */
-extern ax25_cb *volatile ax25_list;
-extern void ax25_free_cb(ax25_cb *);
-extern void ax25_insert_socket(ax25_cb *);
+extern struct hlist_head ax25_list;
+extern spinlock_t ax25_list_lock;
+extern void ax25_cb_add(ax25_cb *);
 struct sock *ax25_find_listener(ax25_address *, int, struct net_device *, int);
-struct sock *ax25_find_socket(ax25_address *, ax25_address *, int);
+struct sock *ax25_get_socket(ax25_address *, ax25_address *, int);
 extern ax25_cb *ax25_find_cb(ax25_address *, ax25_address *, ax25_digi *, struct net_device *);
 extern struct sock *ax25_addr_match(ax25_address *);
 extern void ax25_send_to_raw(struct sock *, struct sk_buff *, int);
@@ -222,7 +248,13 @@ extern void ax25_digi_invert(ax25_digi *, ax25_digi *);
 
 /* ax25_dev.c */
 extern ax25_dev *ax25_dev_list;
-extern ax25_dev *ax25_dev_ax25dev(struct net_device *);
+extern spinlock_t ax25_dev_lock;
+
+static inline ax25_dev *ax25_dev_ax25dev(struct net_device *dev)
+{
+	return dev->ax25_ptr;
+}
+
 extern ax25_dev *ax25_addr_ax25dev(ax25_address *);
 extern void ax25_dev_device_up(struct net_device *);
 extern void ax25_dev_device_down(struct net_device *);
@@ -282,11 +314,17 @@ extern int  ax25_check_iframes_acked(ax25_cb *, unsigned short);
 /* ax25_route.c */
 extern void ax25_rt_device_down(struct net_device *);
 extern int  ax25_rt_ioctl(unsigned int, void *);
-extern int  ax25_rt_get_info(char *, char **, off_t, int);
+extern struct file_operations ax25_route_fops;
 extern int  ax25_rt_autobind(ax25_cb *, ax25_address *);
-extern ax25_route *ax25_rt_find_route(ax25_address *, struct net_device *);
+extern ax25_route *ax25_rt_find_route(ax25_route *, ax25_address *,
+	struct net_device *);
 extern struct sk_buff *ax25_rt_build_path(struct sk_buff *, ax25_address *, ax25_address *, ax25_digi *);
 extern void ax25_rt_free(void);
+
+static inline void ax25_put_route(ax25_route *ax25_rt)
+{
+	atomic_dec(&ax25_rt->ref);
+}
 
 /* ax25_std_in.c */
 extern int  ax25_std_frame_in(ax25_cb *, struct sk_buff *, int);
@@ -335,7 +373,7 @@ extern unsigned long ax25_display_timer(struct timer_list *);
 extern int  ax25_uid_policy;
 extern ax25_address *ax25_findbyuid(uid_t);
 extern int  ax25_uid_ioctl(int, struct sockaddr_ax25 *);
-extern int  ax25_uid_get_info(char *, char **, off_t, int);
+extern struct file_operations ax25_uid_fops;
 extern void ax25_uid_free(void);
 
 /* sysctl_net_ax25.c */
@@ -343,8 +381,8 @@ extern void ax25_uid_free(void);
 extern void ax25_register_sysctl(void);
 extern void ax25_unregister_sysctl(void);
 #else
-extern inline void ax25_register_sysctl(void) {};
-extern inline void ax25_unregister_sysctl(void) {};
+static inline void ax25_register_sysctl(void) {};
+static inline void ax25_unregister_sysctl(void) {};
 #endif /* CONFIG_SYSCTL */
 
 #endif

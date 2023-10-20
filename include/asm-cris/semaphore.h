@@ -54,12 +54,12 @@ extern inline void sema_init(struct semaphore *sem, int val)
 	*sem = (struct semaphore)__SEMAPHORE_INITIALIZER((*sem),val);
 }
 
-static inline void init_MUTEX (struct semaphore *sem)
+extern inline void init_MUTEX (struct semaphore *sem)
 {
         sema_init(sem, 1);
 }
 
-static inline void init_MUTEX_LOCKED (struct semaphore *sem)
+extern inline void init_MUTEX_LOCKED (struct semaphore *sem)
 {
         sema_init(sem, 0);
 }
@@ -79,12 +79,13 @@ extern inline void down(struct semaphore * sem)
 #if WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
 #endif
+	might_sleep();
 
 	/* atomically decrement the semaphores count, and if its negative, we wait */
-	save_flags(flags);
-	cli();
+	local_save_flags(flags);
+	local_irq_disable();
 	failed = --(sem->count) < 0;
-	restore_flags(flags);
+	local_irq_restore(flags);
 	if(failed) {
 		__down(sem);
 	}
@@ -104,12 +105,13 @@ extern inline int down_interruptible(struct semaphore * sem)
 #if WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
 #endif
+	might_sleep();
 
 	/* atomically decrement the semaphores count, and if its negative, we wait */
-	save_flags(flags);
-	cli();
+	local_save_flags(flags);
+	local_irq_disable();
 	failed = --(sem->count) < 0;
-	restore_flags(flags);
+	local_irq_restore(flags);
 	if(failed)
 		failed = __down_interruptible(sem);
 	return(failed);
@@ -124,10 +126,10 @@ extern inline int down_trylock(struct semaphore * sem)
 	CHECK_MAGIC(sem->__magic);
 #endif
 
-	save_flags(flags);
-	cli();
+	local_save_flags(flags);
+	local_irq_disable();
 	failed = --(sem->count) < 0;
-	restore_flags(flags);
+	local_irq_restore(flags);
 	if(failed)
 		failed = __down_trylock(sem);
 	return(failed);
@@ -149,10 +151,10 @@ extern inline void up(struct semaphore * sem)
 #endif
 
 	/* atomically increment the semaphores count, and if it was negative, we wake people */
-	save_flags(flags);
-	cli();
+	local_save_flags(flags);
+	local_irq_disable();
 	wakeup = ++(sem->count) <= 0;
-	restore_flags(flags);
+	local_irq_restore(flags);
 	if(wakeup) {
 		__up(sem);
 	}

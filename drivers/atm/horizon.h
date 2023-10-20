@@ -31,7 +31,6 @@
 #define DRIVER_ATM_HORIZON_H
 
 #include <linux/config.h>
-#include <linux/version.h>
 
 #ifdef CONFIG_ATM_HORIZON_DEBUG
 #define DEBUG_HORIZON
@@ -422,14 +421,10 @@ struct hrz_dev {
   unsigned int        tx_regions; // number of remaining regions
 
   spinlock_t          mem_lock;
-#if LINUX_VERSION_CODE >= 0x20303
   wait_queue_head_t   tx_queue;
-#else
-  struct wait_queue * tx_queue;
-#endif
 
   u8                  irq;
-  u8                  flags;
+  long		      flags;
   u8                  tx_last;
   u8                  tx_idle;
 

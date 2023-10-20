@@ -31,14 +31,11 @@
  ********************************************************************/
 
 #include <linux/module.h>
-
 #include <linux/delay.h>
 #include <linux/tty.h>
-#include <linux/sched.h>
 #include <linux/init.h>
 
 #include <net/irda/irda.h>
-#include <net/irda/irmod.h>
 #include <net/irda/irda_device.h>
 
 static void esi_open(dongle_t *self, struct qos_info *qos);
@@ -47,12 +44,12 @@ static int  esi_change_speed(struct irda_task *task);
 static int  esi_reset(struct irda_task *task);
 
 static struct dongle_reg dongle = {
-	Q_NULL,
-	IRDA_ESI_DONGLE,
-	esi_open,
-	esi_close,
-	esi_reset,
-	esi_change_speed,
+	.type = IRDA_ESI_DONGLE,
+	.open = esi_open,
+	.close = esi_close,
+	.reset = esi_reset,
+	.change_speed = esi_change_speed,
+	.owner = THIS_MODULE,
 };
 
 int __init esi_init(void)
@@ -60,7 +57,7 @@ int __init esi_init(void)
 	return irda_device_register_dongle(&dongle);
 }
 
-void esi_cleanup(void)
+void __exit esi_cleanup(void)
 {
 	irda_device_unregister_dongle(&dongle);
 }
@@ -69,16 +66,12 @@ static void esi_open(dongle_t *self, struct qos_info *qos)
 {
 	qos->baud_rate.bits &= IR_9600|IR_19200|IR_115200;
 	qos->min_turn_time.bits = 0x01; /* Needs at least 10 ms */
-
-	MOD_INC_USE_COUNT;
 }
 
 static void esi_close(dongle_t *dongle)
 {		
 	/* Power off dongle */
 	dongle->set_dtr_rts(dongle->dev, FALSE, FALSE);
-
-	MOD_DEC_USE_COUNT;
 }
 
 /*
@@ -133,10 +126,10 @@ static int esi_reset(struct irda_task *task)
 	return 0;
 }
 
-#ifdef MODULE
 MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");
 MODULE_DESCRIPTION("Extended Systems JetEye PC dongle driver");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("irda-dongle-1"); /* IRDA_ESI_DONGLE */
 
 /*
  * Function init_module (void)
@@ -144,10 +137,7 @@ MODULE_LICENSE("GPL");
  *    Initialize ESI module
  *
  */
-int init_module(void)
-{
-	return esi_init();
-}
+module_init(esi_init);
 
 /*
  * Function cleanup_module (void)
@@ -155,9 +145,5 @@ int init_module(void)
  *    Cleanup ESI module
  *
  */
-void cleanup_module(void)
-{
-        esi_cleanup();
-}
-#endif /* MODULE */
+module_exit(esi_cleanup);
 

@@ -1,6 +1,3 @@
-/*
- * BK Id: SCCS/s.uaccess.h 1.8 09/11/01 18:10:06 paulus
- */
 #ifdef __KERNEL__
 #ifndef _PPC_UACCESS_H
 #define _PPC_UACCESS_H
@@ -19,10 +16,13 @@
  * get_fs() == KERNEL_DS, checking is bypassed.
  *
  * For historical reasons, these macros are grossly misnamed.
+ *
+ * The fs/ds values are now the highest legal address in the "segment".
+ * This simplifies the checking in the routines below.
  */
 
-#define KERNEL_DS	((mm_segment_t) { 0 })
-#define USER_DS		((mm_segment_t) { 1 })
+#define KERNEL_DS	((mm_segment_t) { ~0UL })
+#define USER_DS		((mm_segment_t) { TASK_SIZE - 1 })
 
 #define get_ds()	(KERNEL_DS)
 #define get_fs()	(current->thread.fs)
@@ -30,14 +30,15 @@
 
 #define segment_eq(a,b)	((a).seg == (b).seg)
 
-#define __kernel_ok (segment_eq(get_fs(), KERNEL_DS))
-#define __user_ok(addr,size) (((size) <= TASK_SIZE)&&((addr) <= TASK_SIZE-(size)))
-#define __access_ok(addr,size) (__kernel_ok || __user_ok((addr),(size)))
-#define access_ok(type,addr,size) __access_ok((unsigned long)(addr),(size))
+#define __access_ok(addr,size)						    \
+	((addr) <= current->thread.fs.seg				    \
+	 && ((size) == 0 || (size) - 1 <= current->thread.fs.seg - (addr)))
 
-extern inline int verify_area(int type, const void * addr, unsigned long size)
+#define access_ok(type, addr, size) __access_ok((unsigned long)(addr),(size))
+
+extern inline int verify_area(int type, const void __user * addr, unsigned long size)
 {
-	return access_ok(type,addr,size) ? 0 : -EFAULT;
+	return access_ok(type, addr, size) ? 0 : -EFAULT;
 }
 
 
@@ -59,8 +60,6 @@ struct exception_table_entry
 	unsigned long insn, fixup;
 };
 
-/* Returns 0 if exception not found and fixup otherwise.  */
-extern unsigned long search_exception_table(unsigned long);
 extern void sort_exception_table(void);
 
 /*
@@ -70,7 +69,7 @@ extern void sort_exception_table(void);
  * This gets kind of ugly. We want to return _two_ values in "get_user()"
  * and yet we don't want to do any pointers, because that is too much
  * of a performance impact. Thus we have a few rather ugly macros here,
- * and hide all the uglyness from the user.
+ * and hide all the ugliness from the user.
  *
  * The "__xxx" versions of the user access functions are versions that
  * do not verify the address space, that must have been done previously
@@ -80,16 +79,28 @@ extern void sort_exception_table(void);
  * As we use the same address space for kernel and user data on the
  * PowerPC, we can just do these as direct assignments.  (Of course, the
  * exception handling means that it's no longer "just"...)
+ *
+ * The "user64" versions of the user access functions are versions that 
+ * allow access of 64-bit data. The "get_user" functions do not 
+ * properly handle 64-bit data because the value gets down cast to a long. 
+ * The "put_user" functions already handle 64-bit data properly but we add 
+ * "user64" versions for completeness
  */
 #define get_user(x,ptr) \
   __get_user_check((x),(ptr),sizeof(*(ptr)))
+#define get_user64(x,ptr) \
+  __get_user64_check((x),(ptr),sizeof(*(ptr)))
 #define put_user(x,ptr) \
   __put_user_check((__typeof__(*(ptr)))(x),(ptr),sizeof(*(ptr)))
+#define put_user64(x,ptr) put_user(x,ptr)
 
 #define __get_user(x,ptr) \
   __get_user_nocheck((x),(ptr),sizeof(*(ptr)))
+#define __get_user64(x,ptr) \
+  __get_user64_nocheck((x),(ptr),sizeof(*(ptr)))
 #define __put_user(x,ptr) \
   __put_user_nocheck((__typeof__(*(ptr)))(x),(ptr),sizeof(*(ptr)))
+#define __put_user64(x,ptr) __put_user(x,ptr)
 
 extern long __put_user_bad(void);
 
@@ -109,20 +120,26 @@ extern long __put_user_bad(void);
 	__pu_err;						\
 })
 
-#define __put_user_size(x,ptr,size,retval)			\
-do {								\
-	retval = 0;						\
-	switch (size) {						\
-	  case 1: __put_user_asm(x,ptr,retval,"stb"); break;	\
-	  case 2: __put_user_asm(x,ptr,retval,"sth"); break;	\
-	  case 4: __put_user_asm(x,ptr,retval,"stw"); break;	\
-	  case 8: __put_user_asm2(x,ptr,retval); break;		\
-	  default: __put_user_bad();				\
-	}							\
+#define __put_user_size(x,ptr,size,retval)		\
+do {							\
+	retval = 0;					\
+	switch (size) {					\
+	case 1:						\
+		__put_user_asm(x, ptr, retval, "stb");	\
+		break;					\
+	case 2:						\
+		__put_user_asm(x, ptr, retval, "sth");	\
+		break;					\
+	case 4:						\
+		__put_user_asm(x, ptr, retval, "stw");	\
+		break;					\
+	case 8:						\
+		__put_user_asm2(x, ptr, retval);	\
+		break;					\
+	default:					\
+		__put_user_bad();			\
+	}						\
 } while (0)
-
-struct __large_struct { unsigned long buf[100]; };
-#define __m(x) (*(struct __large_struct *)(x))
 
 /*
  * We don't tell gcc that we are accessing memory, but this is OK
@@ -141,13 +158,13 @@ struct __large_struct { unsigned long buf[100]; };
 		"	.align 2\n"				\
 		"	.long 1b,3b\n"				\
 		".previous"					\
-		: "=r"(err)					\
-		: "r"(x), "b"(addr), "i"(-EFAULT), "0"(err))
+		: "=r" (err)					\
+		: "r" (x), "b" (addr), "i" (-EFAULT), "0" (err))
 
 #define __put_user_asm2(x, addr, err)				\
 	__asm__ __volatile__(					\
 		"1:	stw %1,0(%2)\n"				\
-		"2:	stw %1+1,4(%2)\n"				\
+		"2:	stw %1+1,4(%2)\n"			\
 		"3:\n"						\
 		".section .fixup,\"ax\"\n"			\
 		"4:	li %0,%3\n"				\
@@ -158,38 +175,85 @@ struct __large_struct { unsigned long buf[100]; };
 		"	.long 1b,4b\n"				\
 		"	.long 2b,4b\n"				\
 		".previous"					\
-		: "=r"(err)					\
-		: "r"(x), "b"(addr), "i"(-EFAULT), "0"(err))
+		: "=r" (err)					\
+		: "r" (x), "b" (addr), "i" (-EFAULT), "0" (err))
 
-#define __get_user_nocheck(x,ptr,size)				\
+#define __get_user_nocheck(x, ptr, size)			\
 ({								\
 	long __gu_err, __gu_val;				\
-	__get_user_size(__gu_val,(ptr),(size),__gu_err);	\
+	__get_user_size(__gu_val, (ptr), (size), __gu_err);	\
 	(x) = (__typeof__(*(ptr)))__gu_val;			\
 	__gu_err;						\
 })
 
-#define __get_user_check(x,ptr,size)					\
+#define __get_user64_nocheck(x, ptr, size)			\
+({								\
+	long __gu_err;						\
+	long long __gu_val;					\
+	__get_user_size64(__gu_val, (ptr), (size), __gu_err);	\
+	(x) = (__typeof__(*(ptr)))__gu_val;			\
+	__gu_err;						\
+})
+
+#define __get_user_check(x, ptr, size)					\
 ({									\
 	long __gu_err = -EFAULT, __gu_val = 0;				\
 	const __typeof__(*(ptr)) *__gu_addr = (ptr);			\
-	if (access_ok(VERIFY_READ,__gu_addr,size))			\
-		__get_user_size(__gu_val,__gu_addr,(size),__gu_err);	\
+	if (access_ok(VERIFY_READ, __gu_addr, (size)))			\
+		__get_user_size(__gu_val, __gu_addr, (size), __gu_err);	\
 	(x) = (__typeof__(*(ptr)))__gu_val;				\
 	__gu_err;							\
 })
 
+#define __get_user64_check(x, ptr, size)				  \
+({									  \
+	long __gu_err = -EFAULT;					  \
+	long long __gu_val = 0;						  \
+	const __typeof__(*(ptr)) *__gu_addr = (ptr);			  \
+	if (access_ok(VERIFY_READ, __gu_addr, (size)))			  \
+		__get_user_size64(__gu_val, __gu_addr, (size), __gu_err); \
+	(x) = (__typeof__(*(ptr)))__gu_val;				  \
+	__gu_err;							  \
+})
+
 extern long __get_user_bad(void);
 
-#define __get_user_size(x,ptr,size,retval)			\
+#define __get_user_size(x, ptr, size, retval)			\
 do {								\
 	retval = 0;						\
 	switch (size) {						\
-	  case 1: __get_user_asm(x,ptr,retval,"lbz"); break;	\
-	  case 2: __get_user_asm(x,ptr,retval,"lhz"); break;	\
-	  case 4: __get_user_asm(x,ptr,retval,"lwz"); break;	\
-	  case 8: __get_user_asm2(x, ptr, retval);		\
-	  default: (x) = __get_user_bad();			\
+	case 1:							\
+		__get_user_asm(x, ptr, retval, "lbz");		\
+		break;						\
+	case 2:							\
+		__get_user_asm(x, ptr, retval, "lhz");		\
+		break;						\
+	case 4:							\
+		__get_user_asm(x, ptr, retval, "lwz");		\
+		break;						\
+	default:						\
+		x = __get_user_bad();				\
+	}							\
+} while (0)
+
+#define __get_user_size64(x, ptr, size, retval)			\
+do {								\
+	retval = 0;						\
+	switch (size) {						\
+	case 1:							\
+		__get_user_asm(x, ptr, retval, "lbz");		\
+		break;						\
+	case 2:							\
+		__get_user_asm(x, ptr, retval, "lhz");		\
+		break;						\
+	case 4:							\
+		__get_user_asm(x, ptr, retval, "lwz");		\
+		break;						\
+	case 8:							\
+		__get_user_asm2(x, ptr, retval);		\
+		break;						\
+	default:						\
+		x = __get_user_bad();				\
 	}							\
 } while (0)
 
@@ -230,55 +294,60 @@ do {								\
 
 /* more complex routines */
 
-extern int __copy_tofrom_user(void *to, const void *from, unsigned long size);
+extern int __copy_tofrom_user(void __user *to, const void __user *from,
+			      unsigned long size);
 
 extern inline unsigned long
-copy_from_user(void *to, const void *from, unsigned long n)
+copy_from_user(void *to, const void __user *from, unsigned long n)
 {
 	unsigned long over;
 
 	if (access_ok(VERIFY_READ, from, n))
-		return __copy_tofrom_user(to, from, n);
+		return __copy_tofrom_user((void __user *)to, from, n);
 	if ((unsigned long)from < TASK_SIZE) {
 		over = (unsigned long)from + n - TASK_SIZE;
-		return __copy_tofrom_user(to, from, n - over) + over;
+		return __copy_tofrom_user((void __user *)to, from, n - over) + over;
 	}
 	return n;
 }
 
 extern inline unsigned long
-copy_to_user(void *to, const void *from, unsigned long n)
+copy_to_user(void __user *to, const void *from, unsigned long n)
 {
 	unsigned long over;
 
 	if (access_ok(VERIFY_WRITE, to, n))
-		return __copy_tofrom_user(to, from, n);
+		return __copy_tofrom_user(to, (void __user *) from, n);
 	if ((unsigned long)to < TASK_SIZE) {
 		over = (unsigned long)to + n - TASK_SIZE;
-		return __copy_tofrom_user(to, from, n - over) + over;
+		return __copy_tofrom_user(to, (void __user *) from, n - over) + over;
 	}
 	return n;
 }
 
 #define __copy_from_user(to, from, size) \
-	__copy_tofrom_user((to), (from), (size))
+	__copy_tofrom_user((void __user *)(to), (from), (size))
 #define __copy_to_user(to, from, size) \
-	__copy_tofrom_user((to), (from), (size))
+	__copy_tofrom_user((to), (void __user *)(from), (size))
 
-extern unsigned long __clear_user(void *addr, unsigned long size);
+extern unsigned long __clear_user(void __user *addr, unsigned long size);
 
 extern inline unsigned long
-clear_user(void *addr, unsigned long size)
+clear_user(void __user *addr, unsigned long size)
 {
 	if (access_ok(VERIFY_WRITE, addr, size))
 		return __clear_user(addr, size);
-	return size? -EFAULT: 0;
+	if ((unsigned long)addr < TASK_SIZE) {
+		unsigned long over = (unsigned long)addr + size - TASK_SIZE;
+		return __clear_user(addr, size - over) + over;
+	}
+	return size;
 }
 
-extern int __strncpy_from_user(char *dst, const char *src, long count);
+extern int __strncpy_from_user(char *dst, const char __user *src, long count);
 
 extern inline long
-strncpy_from_user(char *dst, const char *src, long count)
+strncpy_from_user(char *dst, const char __user *src, long count)
 {
 	if (access_ok(VERIFY_READ, src, 1))
 		return __strncpy_from_user(dst, src, count);
@@ -291,7 +360,7 @@ strncpy_from_user(char *dst, const char *src, long count)
  * Return 0 for error
  */
 
-extern int __strnlen_user(const char *str, long len, unsigned long top);
+extern int __strnlen_user(const char __user *str, long len, unsigned long top);
 
 /*
  * Returns the length of the string at str (including the null byte),
@@ -301,9 +370,9 @@ extern int __strnlen_user(const char *str, long len, unsigned long top);
  * The `top' parameter to __strnlen_user is to make sure that
  * we can never overflow from the user area into kernel space.
  */
-extern __inline__ int strnlen_user(const char *str, long len)
+extern __inline__ int strnlen_user(const char __user *str, long len)
 {
-	unsigned long top = __kernel_ok? ~0UL: TASK_SIZE - 1;
+	unsigned long top = current->thread.fs.seg;
 
 	if ((unsigned long)str > top)
 		return 0;

@@ -7,7 +7,7 @@
  */
 /*
  * Converts an ECOFF or ELF object file into a bootable file.  The
- * object file must be a OMAGIC file (i.e., data and bss follow immediatly
+ * object file must be a OMAGIC file (i.e., data and bss follow immediately
  * behind the text).  See DEC "Assembly Language Programmer's Guide"
  * documentation for details.  The SRM boot process is documented in
  * the Alpha AXP Architecture Reference Manual, Second Edition by
@@ -27,7 +27,6 @@
 #include <linux/param.h>
 #include <linux/string.h>
 #ifdef __ELF__
-# include <asm/elf.h>
 # include <linux/elf.h>
 #endif
 

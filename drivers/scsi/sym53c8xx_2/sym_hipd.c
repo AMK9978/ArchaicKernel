@@ -50,7 +50,7 @@
  * SUCH DAMAGE.
  */
 
-#define SYM_DRIVER_NAME	"sym-2.1.16a"
+#define SYM_DRIVER_NAME	"sym-2.1.18b"
 
 #ifdef __FreeBSD__
 #include <dev/sym/sym_glue.h>
@@ -221,7 +221,7 @@ static void sym_chip_reset (hcb_p np)
  */
 static void sym_soft_reset (hcb_p np)
 {
-	u_char istat;
+	u_char istat = 0;
 	int i;
 
 	if (!(np->features & FE_ISTAT1) || !(INB (nc_istat1) & SCRUN))
@@ -234,7 +234,7 @@ static void sym_soft_reset (hcb_p np)
 			INW (nc_sist);
 		}
 		else if (istat & DIP) {
-			if (INB (nc_dstat) & ABRT);
+			if (INB (nc_dstat) & ABRT)
 				break;
 		}
 		UDELAY(5);
@@ -289,7 +289,7 @@ int sym_reset_scsi_bus(hcb_p np, int enab_int)
 		((INW(nc_sbdl) & 0xff00) << 10) |	/* d15-8    */
 		INB(nc_sbcl);	/* req ack bsy sel atn msg cd io    */
 
-	if (!(np->features & FE_WIDE))
+	if (!np->maxwide)
 		term &= 0x3ffff;
 
 	if (term != (2<<7)) {
@@ -734,6 +734,41 @@ static void sym_save_initial_setting (hcb_p np)
 		np->sv_ctest5	= INB(nc_ctest5) & 0x24;
 }
 
+#ifdef CONFIG_PARISC
+static u32 parisc_setup_hcb(hcb_p np, u32 period)
+{
+	unsigned long pdc_period;
+	char scsi_mode;
+	struct hardware_path hwpath;
+
+	/* Host firmware (PDC) keeps a table for crippling SCSI capabilities.
+	 * Many newer machines export one channel of 53c896 chip
+	 * as SE, 50-pin HD.  Also used for Multi-initiator SCSI clusters
+	 * to set the SCSI Initiator ID.
+	 */
+	get_pci_node_path(np->s.device, &hwpath);
+	if (!pdc_get_initiator(&hwpath, &np->myaddr, &pdc_period,
+				&np->maxwide, &scsi_mode))
+		return period;
+
+	printk("scsi_mode = %d, period = %ld\n", scsi_mode, pdc_period);
+
+	if (scsi_mode >= 0) {
+		/* C3000 PDC reports period/mode */
+		SYM_SETUP_SCSI_DIFF = 0;
+		switch(scsi_mode) {
+		case 0:	np->scsi_mode = SMODE_SE; break;
+		case 1:	np->scsi_mode = SMODE_HVD; break;
+		case 2:	np->scsi_mode = SMODE_LVD; break;
+		default:	break;
+		}
+	}
+
+	return (u32) pdc_period;
+}
+#else
+static inline int parisc_setup_hcb(hcb_p np, u32 period) { return period; }
+#endif
 /*
  *  Prepare io register values used by sym_start_up() 
  *  according to selected and supported features.
@@ -800,6 +835,9 @@ static int sym_prepare_setting(hcb_p np, struct sym_nvram *nvram)
 	 * Btw, 'period' is in tenths of nanoseconds.
 	 */
 	period = (4 * div_10M[0] + np->clock_khz - 1) / np->clock_khz;
+
+	period = parisc_setup_hcb(np, period);
+
 	if	(period <= 250)		np->minsync = 10;
 	else if	(period <= 303)		np->minsync = 11;
 	else if	(period <= 500)		np->minsync = 12;
@@ -862,7 +900,7 @@ static int sym_prepare_setting(hcb_p np, struct sym_nvram *nvram)
 	 *  In dual channel mode, contention occurs if internal cycles
 	 *  are used. Disable internal cycles.
 	 */
-	if (np->device_id == PCI_ID_LSI53C1010 &&
+	if (np->device_id == PCI_ID_LSI53C1010_33 &&
 	    np->revision_id < 0x1)
 		np->rv_ccntl0	|=  DILS;
 
@@ -1235,7 +1273,7 @@ restart_test:
  *  	s4:	scntl4 (see the manual)
  *
  *  current script command:
- *  	dsp:	script adress (relative to start of script).
+ *  	dsp:	script address (relative to start of script).
  *  	dbc:	first word of script command.
  *
  *  First 24 register of the chip:
@@ -1362,17 +1400,17 @@ static struct sym_pci_chip sym_pci_dev_table[] = {
  FE_WIDE|FE_ULTRA|FE_QUAD|FE_CACHE_SET|FE_BOF|FE_DFS|FE_LDSTR|FE_PFEN|
  FE_RAM|FE_DAC|FE_IO256|FE_NOPM|FE_LEDC|FE_LCKFRQ}
  ,
- {PCI_ID_LSI53C1010, 0x00, "1010-33", 6, 31, 7, 8,
+ {PCI_ID_LSI53C1010_33, 0x00, "1010-33", 6, 31, 7, 8,
  FE_WIDE|FE_ULTRA3|FE_QUAD|FE_CACHE_SET|FE_BOF|FE_DFBC|FE_LDSTR|FE_PFEN|
  FE_RAM|FE_RAM8K|FE_64BIT|FE_DAC|FE_IO256|FE_NOPM|FE_LEDC|FE_CRC|
  FE_C10}
  ,
- {PCI_ID_LSI53C1010, 0xff, "1010-33", 6, 31, 7, 8,
+ {PCI_ID_LSI53C1010_33, 0xff, "1010-33", 6, 31, 7, 8,
  FE_WIDE|FE_ULTRA3|FE_QUAD|FE_CACHE_SET|FE_BOF|FE_DFBC|FE_LDSTR|FE_PFEN|
  FE_RAM|FE_RAM8K|FE_64BIT|FE_DAC|FE_IO256|FE_NOPM|FE_LEDC|FE_CRC|
  FE_C10|FE_U3EN}
  ,
- {PCI_ID_LSI53C1010_2, 0xff, "1010-66", 6, 31, 7, 8,
+ {PCI_ID_LSI53C1010_66, 0xff, "1010-66", 6, 31, 7, 8,
  FE_WIDE|FE_ULTRA3|FE_QUAD|FE_CACHE_SET|FE_BOF|FE_DFBC|FE_LDSTR|FE_PFEN|
  FE_RAM|FE_RAM8K|FE_64BIT|FE_DAC|FE_IO256|FE_NOPM|FE_LEDC|FE_66MHZ|FE_CRC|
  FE_C10|FE_U3EN}
@@ -1809,7 +1847,7 @@ void sym_start_up (hcb_p np, int reason)
 	/*
 	 *  For now, disable AIP generation on C1010-66.
 	 */
-	if (np->device_id == PCI_ID_LSI53C1010_2)
+	if (np->device_id == PCI_ID_LSI53C1010_66)
 		OUTB (nc_aipcntl1, DISAIP);
 
 	/*
@@ -1819,7 +1857,7 @@ void sym_start_up (hcb_p np, int reason)
 	 *  that from SCRIPTS for each selection/reselection, but 
 	 *  I just don't want. :)
 	 */
-	if (np->device_id == PCI_ID_LSI53C1010 &&
+	if (np->device_id == PCI_ID_LSI53C1010_33 &&
 	    np->revision_id < 1)
 		OUTB (nc_stest1, INB(nc_stest1) | 0x30);
 
@@ -4641,7 +4679,10 @@ static void sym_int_sir (hcb_p np)
 		case M_IGN_RESIDUE:
 			if (DEBUG_FLAGS & DEBUG_POINTER)
 				sym_print_msg(cp,"ign wide residue", np->msgin);
-			sym_modify_dp(np, tp, cp, -1);
+			if (cp->host_flags & HF_SENSE)
+				OUTL_DSP (SCRIPTA_BA (np, clrack));
+			else
+				sym_modify_dp(np, tp, cp, -1);
 			return;
 		case M_REJECT:
 			if (INB (HS_PRT) == HS_NEGOTIATE)
@@ -4691,6 +4732,7 @@ out_clrack:
 	OUTL_DSP (SCRIPTA_BA (np, clrack));
 	return;
 out_stuck:
+	return;
 }
 
 /*
@@ -5226,6 +5268,7 @@ static void sym_alloc_lcb_tags (hcb_p np, u_char tn, u_char ln)
 
 	return;
 fail:
+	return;
 }
 
 /*
@@ -5788,6 +5831,13 @@ int sym_hcb_attach(hcb_p np, struct sym_fw *fw)
 		goto attach_failed;
 
 	/*
+	 *  Allocate the array of lists of CCBs hashed by DSA.
+	 */
+	np->ccbh = sym_calloc(sizeof(ccb_p *)*CCB_HASH_SIZE, "CCBH");
+	if (!np->ccbh)
+		goto attach_failed;
+
+	/*
 	 *  Initialyze the CCB free and busy queues.
 	 */
 	sym_que_init(&np->free_ccbq);
@@ -5839,9 +5889,9 @@ int sym_hcb_attach(hcb_p np, struct sym_fw *fw)
 	/*
 	 *  Copy scripts to controller instance.
 	 */
-	bcopy(fw->a_base, np->scripta0, np->scripta_sz);
-	bcopy(fw->b_base, np->scriptb0, np->scriptb_sz);
-	bcopy(fw->z_base, np->scriptz0, np->scriptz_sz);
+	memcpy(np->scripta0, fw->a_base, np->scripta_sz);
+	memcpy(np->scriptb0, fw->b_base, np->scriptb_sz);
+	memcpy(np->scriptz0, fw->z_base, np->scriptz_sz);
 
 	/*
 	 *  Setup variable parts in scripts and compute
@@ -5930,15 +5980,8 @@ int sym_hcb_attach(hcb_p np, struct sym_fw *fw)
 	 */
 	return 0;
 
-	/*
-	 *  We have failed.
-	 *  We will try to free all the resources we have 
-	 *  allocated, but if we are a boot device, this 
-	 *  will not help that much.;)
-	 */
 attach_failed:
-		sym_hcb_free(np);
-	return ENXIO;
+	return -ENXIO;
 }
 
 /*
@@ -5978,6 +6021,8 @@ void sym_hcb_free(hcb_p np)
 			sym_mfree_dma(cp, sizeof(*cp), "CCB");
 		}
 	}
+	if (np->ccbh)
+		sym_mfree(np->ccbh, sizeof(ccb_p *)*CCB_HASH_SIZE, "CCBH");
 
 	if (np->badluntbl)
 		sym_mfree_dma(np->badluntbl, 256,"BADLUNTBL");

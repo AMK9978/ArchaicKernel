@@ -1,4 +1,4 @@
-/* airport.c 0.06f
+/* airport.c 0.13e
  *
  * A driver for "Hermes" chipset based Apple Airport wireless
  * card.
@@ -11,331 +11,300 @@
  *  0.06 : fix possible hang on powerup, add sleep support
  */
 
+#include <linux/config.h>
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/sched.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/ioport.h>
-#include <asm/uaccess.h>
-#include <asm/io.h>
-#include <asm/system.h>
-#include <linux/proc_fs.h>
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>
 #include <linux/etherdevice.h>
 #include <linux/wireless.h>
-#include <linux/list.h>
-#include <linux/adb.h>
-#include <linux/pmu.h>
 
+#include <asm/io.h>
+#include <asm/system.h>
+#include <asm/current.h>
 #include <asm/prom.h>
-#include <asm/feature.h>
+#include <asm/machdep.h>
+#include <asm/pmac_feature.h>
 #include <asm/irq.h>
+#include <asm/uaccess.h>
 
-#include "hermes.h"
 #include "orinoco.h"
 
-static char version[] __initdata = "airport.c 0.06f (Benjamin Herrenschmidt <benh@kernel.crashing.org>)";
-MODULE_AUTHOR("Benjamin Herrenschmidt <benh@kernel.crashing.org>");
-MODULE_DESCRIPTION("Driver for the Apple Airport wireless card.");
-MODULE_LICENSE("Dual MPL/GPL");
-EXPORT_NO_SYMBOLS;
+#define AIRPORT_IO_LEN	(0x1000)	/* one page */
 
-typedef struct dldwd_card {
-	struct device_node* node;
+struct airport {
+	struct device_node *node;
+	void *vaddr;
 	int irq_requested;
 	int ndev_registered;
-	int open;
-	/* Common structure (fully included), see orinoco.h */
-	struct dldwd_priv priv;
-} dldwd_card_t;
-
-#ifdef CONFIG_PMAC_PBOOK
-static int airport_sleep_notify(struct pmu_sleep_notifier *self, int when);
-static struct pmu_sleep_notifier airport_sleep_notifier = {
-	airport_sleep_notify, SLEEP_LEVEL_NET,
 };
-#endif
-
-/*
- * Function prototypes
- */
-
-static dldwd_priv_t* airport_attach(struct device_node *of_node);
-static void airport_detach(dldwd_priv_t* priv);
-static int airport_init(struct net_device *dev);
-static int airport_open(struct net_device *dev);
-static int airport_stop(struct net_device *dev);
-
-/*
-   A linked list of "instances" of the dummy device.  Each actual
-   PCMCIA card corresponds to one device instance, and is described
-   by one dev_link_t structure (defined in ds.h).
-
-   You may not want to use a linked list for this -- for example, the
-   memory card driver uses an array of dev_link_t pointers, where minor
-   device numbers are used to derive the corresponding array index.
-*/
-
-static dldwd_priv_t *airport_dev;
-
-static int airport_init(struct net_device *dev)
-{
-	dldwd_priv_t *priv = dev->priv;
-	int rc;
-	
-	TRACE_ENTER(priv->ndev.name);
-
-	MOD_INC_USE_COUNT;
-
-	rc = dldwd_init(dev);
-	if (!rc)
-		priv->hw_ready = 1;
-
-	MOD_DEC_USE_COUNT;
-
-	return rc;
-}
 
 static int
-airport_open(struct net_device *dev)
+airport_suspend(struct macio_dev *mdev, u32 state)
 {
-	dldwd_priv_t *priv = dev->priv;
-	dldwd_card_t* card = (dldwd_card_t *)priv->card;
-	int rc;
+	struct net_device *dev = dev_get_drvdata(&mdev->ofdev.dev);
+	struct orinoco_private *priv = dev->priv;
+	struct airport *card = priv->card;
+	unsigned long flags;
+	int err;
 
-	TRACE_ENTER(priv->ndev.name);
+	printk(KERN_DEBUG "%s: Airport entering sleep mode\n", dev->name);
 
-	rc = dldwd_reset(priv);
-	if (rc)
-		airport_stop(dev);
-	else {
-		card->open = 1;
-		netif_device_attach(dev);
+	err = orinoco_lock(priv, &flags);
+	if (err) {
+		printk(KERN_ERR "%s: hw_unavailable on PBOOK_SLEEP_NOW\n",
+		       dev->name);
+		return 0;
 	}
 
-//	TRACE_EXIT(priv->ndev.name);
+	err = __orinoco_down(dev);
+	if (err)
+		printk(KERN_WARNING "%s: PBOOK_SLEEP_NOW: Error %d downing interface\n",
+		       dev->name, err);
 
-	return rc;
-}
+	netif_device_detach(dev);
 
-static int
-airport_stop(struct net_device *dev)
-{
-	dldwd_priv_t *priv = dev->priv;
-	dldwd_card_t* card = (dldwd_card_t *)priv->card;
+	priv->hw_unavailable++;
 
-	TRACE_ENTER(priv->ndev.name);
+	orinoco_unlock(priv, &flags);
 
-	netif_stop_queue(dev);
-	dldwd_shutdown(priv);
-	card->open = 0;
-
-	TRACE_EXIT(priv->ndev.name);
+	disable_irq(dev->irq);
+	pmac_call_feature(PMAC_FTR_AIRPORT_ENABLE, card->node, 0, 0);
 
 	return 0;
 }
 
-#ifdef CONFIG_PMAC_PBOOK
 static int
-airport_sleep_notify(struct pmu_sleep_notifier *self, int when)
+airport_resume(struct macio_dev *mdev)
 {
-	dldwd_priv_t *priv;
-	struct net_device *ndev;
-	dldwd_card_t* card;
-	int rc;
-	
-	if (!airport_dev)
-		return PBOOK_SLEEP_OK;
-	priv = airport_dev;
-	ndev = &priv->ndev;
-	card = (dldwd_card_t *)priv->card;
+	struct net_device *dev = dev_get_drvdata(&mdev->ofdev.dev);
+	struct orinoco_private *priv = dev->priv;
+	struct airport *card = priv->card;
+	unsigned long flags;
+	int err;
 
-	switch (when) {
-	case PBOOK_SLEEP_REQUEST:
-		break;
-	case PBOOK_SLEEP_REJECT:
-		break;
-	case PBOOK_SLEEP_NOW:
-		printk(KERN_INFO "%s: Airport entering sleep mode\n", ndev->name);
-		netif_device_detach(ndev);
-		if (card->open)
-			dldwd_shutdown(priv);
-		disable_irq(ndev->irq);
-		feature_set_airport_power(card->node, 0);
-		priv->hw_ready = 0;
-		break;
-	case PBOOK_WAKE:
-		printk(KERN_INFO "%s: Airport waking up\n", ndev->name);
-		feature_set_airport_power(card->node, 1);
-		mdelay(200);
-		hermes_reset(&priv->hw);
-		priv->hw_ready = 1;		
-		rc = dldwd_reset(priv);
-		if (rc)
-			printk(KERN_ERR "airport: Error %d re-initing card !\n", rc);
-		else if (card->open)
-			netif_device_attach(ndev);
-		enable_irq(ndev->irq);
-		break;
+	printk(KERN_DEBUG "%s: Airport waking up\n", dev->name);
+
+	pmac_call_feature(PMAC_FTR_AIRPORT_ENABLE, card->node, 0, 1);
+	mdelay(200);
+
+	enable_irq(dev->irq);
+
+	err = orinoco_reinit_firmware(dev);
+	if (err) {
+		printk(KERN_ERR "%s: Error %d re-initializing firmware on PBOOK_WAKE\n",
+		       dev->name, err);
+		return 0;
 	}
-	return PBOOK_SLEEP_OK;
+
+	spin_lock_irqsave(&priv->lock, flags);
+
+	netif_device_attach(dev);
+
+	priv->hw_unavailable--;
+
+	if (priv->open && (! priv->hw_unavailable)) {
+		err = __orinoco_up(dev);
+		if (err)
+			printk(KERN_ERR "%s: Error %d restarting card on PBOOK_WAKE\n",
+			       dev->name, err);
+	}
+
+
+	spin_unlock_irqrestore(&priv->lock, flags);
+
+	return 0;
 }
-#endif /* CONFIG_PMAC_PBOOK */
 
-static dldwd_priv_t*
-airport_attach(struct device_node* of_node)
+static int
+airport_detach(struct macio_dev *mdev)
 {
-	dldwd_priv_t *priv;
-	struct net_device *ndev;
-	dldwd_card_t* card;
-	hermes_t *hw;
+	struct net_device *dev = dev_get_drvdata(&mdev->ofdev.dev);
+	struct orinoco_private *priv = dev->priv;
+	struct airport *card = priv->card;
 
-	TRACE_ENTER("dldwd");
+	if (card->ndev_registered)
+		unregister_netdev(dev);
+	card->ndev_registered = 0;
+
+	if (card->irq_requested)
+		free_irq(dev->irq, dev);
+	card->irq_requested = 0;
+
+	if (card->vaddr)
+		iounmap(card->vaddr);
+	card->vaddr = 0;
+
+	dev->base_addr = 0;
+
+	release_OF_resource(card->node, 0);
+
+	pmac_call_feature(PMAC_FTR_AIRPORT_ENABLE, card->node, 0, 0);
+	current->state = TASK_UNINTERRUPTIBLE;
+	schedule_timeout(HZ);
+
+	dev_set_drvdata(&mdev->ofdev.dev, NULL);
+	free_netdev(dev);
+
+	return 0;
+}
+
+static int airport_hard_reset(struct orinoco_private *priv)
+{
+	/* It would be nice to power cycle the Airport for a real hard
+	 * reset, but for some reason although it appears to
+	 * re-initialize properly, it falls in a screaming heap
+	 * shortly afterwards. */
+#if 0
+	struct net_device *dev = priv->ndev;
+	struct airport *card = priv->card;
+
+	/* Vitally important.  If we don't do this it seems we get an
+	 * interrupt somewhere during the power cycle, since
+	 * hw_unavailable is already set it doesn't get ACKed, we get
+	 * into an interrupt loop and the the PMU decides to turn us
+	 * off. */
+	disable_irq(dev->irq);
+
+	pmac_call_feature(PMAC_FTR_AIRPORT_ENABLE, card->node, 0, 0);
+	current->state = TASK_UNINTERRUPTIBLE;
+	schedule_timeout(HZ);
+	pmac_call_feature(PMAC_FTR_AIRPORT_ENABLE, card->node, 0, 1);
+	current->state = TASK_UNINTERRUPTIBLE;
+	schedule_timeout(HZ);
+
+	enable_irq(dev->irq);
+	schedule_timeout(HZ);
+#endif
+
+	return 0;
+}
+
+static int
+airport_attach(struct macio_dev *mdev, const struct of_match *match)
+{
+	struct orinoco_private *priv;
+	struct net_device *dev;
+	struct airport *card;
+	unsigned long phys_addr;
+	struct device_node *of_node = mdev->ofdev.node;
+	hermes_t *hw;
 
 	if (of_node->n_addrs < 1 || of_node->n_intrs < 1) {
 		printk(KERN_ERR "airport: wrong interrupt/addresses in OF tree\n");
-		return NULL;
+		return -ENODEV;
 	}
 
 	/* Allocate space for private device-specific data */
-	card = kmalloc(sizeof(*card), GFP_KERNEL);
-	if (!card) {
+	dev = alloc_orinocodev(sizeof(*card), airport_hard_reset);
+	if (! dev) {
 		printk(KERN_ERR "airport: can't allocate device datas\n");
-		return NULL;
+		return -ENODEV;
 	}
-	memset(card, 0, sizeof(*card));
+	priv = dev->priv;
+	card = priv->card;
 
-	priv = &(card->priv);
-	priv->card = card;
-	ndev = &priv->ndev;
 	hw = &priv->hw;
 	card->node = of_node;
 
-	/* Setup the common part */
-	if (dldwd_setup(priv) < 0) {
-		kfree(card);
-		return NULL;
+	if (! request_OF_resource(of_node, 0, " (airport)")) {
+		printk(KERN_ERR "airport: can't request IO resource !\n");
+		kfree(dev);
+		return -ENODEV;
 	}
 
-	/* Overrides */
-	ndev->init = airport_init;
-	ndev->open = airport_open;
-	ndev->stop = airport_stop;
+	dev->name[0] = '\0';	/* register_netdev will give us an ethX name */
+	SET_MODULE_OWNER(dev);
+	SET_NETDEV_DEV(dev, &mdev->ofdev.dev);
+
+	dev_set_drvdata(&mdev->ofdev.dev, dev);
 
 	/* Setup interrupts & base address */
-	ndev->irq = of_node->intrs[0].line;
-	ndev->base_addr = (unsigned long)ioremap(of_node->addrs[0].address, 0x1000) - _IO_BASE;
+	dev->irq = of_node->intrs[0].line;
+	phys_addr = of_node->addrs[0].address;  /* Physical address */
+	printk(KERN_DEBUG "Airport at physical address %lx\n", phys_addr);
+	dev->base_addr = phys_addr;
+	card->vaddr = ioremap(phys_addr, AIRPORT_IO_LEN);
+	if (! card->vaddr) {
+		printk("airport: ioremap() failed\n");
+		goto failed;
+	}
 
-	hermes_struct_init(hw, ndev->base_addr);
+	hermes_struct_init(hw, (ulong)card->vaddr,
+			HERMES_MEM, HERMES_16BIT_REGSPACING);
 		
 	/* Power up card */
-	feature_set_airport_power(card->node, 1);
+	pmac_call_feature(PMAC_FTR_AIRPORT_ENABLE, card->node, 0, 1);
 	current->state = TASK_UNINTERRUPTIBLE;
 	schedule_timeout(HZ);
 
 	/* Reset it before we get the interrupt */
-	hermes_reset(hw);
+	hermes_init(hw);
 
-	if (request_irq(ndev->irq, dldwd_interrupt, 0, "Airport", (void *)priv)) {
-		printk(KERN_ERR "airport: Couldn't get IRQ %d\n", ndev->irq);
+	if (request_irq(dev->irq, orinoco_interrupt, 0, "Airport", dev)) {
+		printk(KERN_ERR "airport: Couldn't get IRQ %d\n", dev->irq);
 		goto failed;
 	}
 	card->irq_requested = 1;
-	
-	/* register_netdev will give us an ethX name */
-	ndev->name[0] = '\0';
+
 	/* Tell the stack we exist */
-	if (register_netdev(ndev) != 0) {
+	if (register_netdev(dev) != 0) {
 		printk(KERN_ERR "airport: register_netdev() failed\n");
 		goto failed;
 	}
-	printk(KERN_DEBUG "airport: card registered for interface %s\n", ndev->name);
+	printk(KERN_DEBUG "airport: card registered for interface %s\n", dev->name);
 	card->ndev_registered = 1;
-
-	SET_MODULE_OWNER(ndev);
-
-	/* And give us the proc nodes for debugging */
-	if (dldwd_proc_dev_init(priv) != 0)
-		printk(KERN_ERR "airport: Failed to create /proc node for %s\n",
-		       ndev->name);
-
-#ifdef CONFIG_PMAC_PBOOK
-	pmu_register_sleep_notifier(&airport_sleep_notifier);
-#endif
-	return priv;
-	
-failed:
-	airport_detach(priv);
-	return NULL;
+	return 0;
+ failed:
+	airport_detach(mdev);
+	return -ENODEV;
 }				/* airport_attach */
 
-/*======================================================================
-  This deletes a driver "instance".  
-  ======================================================================*/
 
-static void
-airport_detach(dldwd_priv_t *priv)
+static char version[] __initdata = "airport.c 0.13e (Benjamin Herrenschmidt <benh@kernel.crashing.org>)";
+MODULE_AUTHOR("Benjamin Herrenschmidt <benh@kernel.crashing.org>");
+MODULE_DESCRIPTION("Driver for the Apple Airport wireless card.");
+MODULE_LICENSE("Dual MPL/GPL");
+
+static struct of_match airport_match[] = 
 {
-	dldwd_card_t* card = (dldwd_card_t *)priv->card;
+	{
+	.name 		= "radio",
+	.type		= OF_ANY_MATCH,
+	.compatible	= OF_ANY_MATCH
+	},
+	{},
+};
 
-	priv->hw_ready = 0;
-	
-	/* Unregister proc entry */
-	dldwd_proc_dev_cleanup(priv);
-
-#ifdef CONFIG_PMAC_PBOOK
-	pmu_unregister_sleep_notifier(&airport_sleep_notifier);
-#endif
-	if (card->ndev_registered)
-		unregister_netdev(&priv->ndev);
-	card->ndev_registered = 0;
-	
-	if (card->irq_requested)
-		free_irq(priv->ndev.irq, priv);
-	card->irq_requested = 0;
-
-// FIXME
-//	if (ndev->base_addr)
-//		iounmap(ndev->base_addr + _IO_BASE);
-//	ndev->base_addr = 0;
-	
-	feature_set_airport_power(card->node, 0);
-	current->state = TASK_UNINTERRUPTIBLE;
-	schedule_timeout(HZ);
-	
-	kfree(card);
-}				/* airport_detach */
+static struct macio_driver airport_driver = 
+{
+	.name 		= "airport",
+	.match_table	= airport_match,
+	.probe		= airport_attach,
+	.remove		= airport_detach,
+	.suspend	= airport_suspend,
+	.resume		= airport_resume,
+};
 
 static int __init
 init_airport(void)
 {
-	struct device_node* airport_node;
-
 	printk(KERN_DEBUG "%s\n", version);
 
-	MOD_INC_USE_COUNT;
-
-	/* Lookup card in device tree */
-	airport_node = find_devices("radio");
-	if (airport_node && !strcmp(airport_node->parent->name, "mac-io"))
-		airport_dev = airport_attach(airport_node);
-
-	MOD_DEC_USE_COUNT;
-
-	return airport_dev ? 0 : -ENODEV;
+	return macio_register_driver(&airport_driver);
 }
 
 static void __exit
 exit_airport(void)
 {
-	if (airport_dev)
-		airport_detach(airport_dev);
-	airport_dev = NULL;
+	return macio_unregister_driver(&airport_driver);
 }
 
 module_init(init_airport);

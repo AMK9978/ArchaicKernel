@@ -6,7 +6,7 @@
 
 #include <linux/module.h>
 
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
@@ -28,6 +28,7 @@
 #include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/pgalloc.h>
+#include <asm/cacheflush.h>
 
 static int load_aout_binary(struct linux_binprm *, struct pt_regs * regs);
 static int load_aout_library(struct file*);
@@ -36,7 +37,11 @@ static int aout_core_dump(long signr, struct pt_regs * regs, struct file *file);
 extern void dump_thread(struct pt_regs *, struct user *);
 
 static struct linux_binfmt aout_format = {
-	NULL, THIS_MODULE, load_aout_binary, load_aout_library, aout_core_dump, PAGE_SIZE
+	.module		= THIS_MODULE,
+	.load_binary	= load_aout_binary,
+	.load_shlib	= load_aout_library,
+	.core_dump	= aout_core_dump,
+	.min_coredump	= PAGE_SIZE
 };
 
 static void set_brk(unsigned long start, unsigned long end)
@@ -263,7 +268,7 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	if ((N_MAGIC(ex) != ZMAGIC && N_MAGIC(ex) != OMAGIC &&
 	     N_MAGIC(ex) != QMAGIC && N_MAGIC(ex) != NMAGIC) ||
 	    N_TRSIZE(ex) || N_DRSIZE(ex) ||
-	    bprm->file->f_dentry->d_inode->i_size < ex.a_text+ex.a_data+N_SYMSIZE(ex)+N_TXTOFF(ex)) {
+	    i_size_read(bprm->file->f_dentry->d_inode) < ex.a_text+ex.a_data+N_SYMSIZE(ex)+N_TXTOFF(ex)) {
 		return -ENOEXEC;
 	}
 
@@ -302,6 +307,7 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 		(current->mm->start_data = N_DATADDR(ex));
 	current->mm->brk = ex.a_bss +
 		(current->mm->start_brk = N_BSSADDR(ex));
+	current->mm->free_area_cache = TASK_UNMAPPED_BASE;
 
 	current->mm->rss = 0;
 	current->mm->mmap = NULL;
@@ -420,8 +426,12 @@ beyond_if:
 	regs->gp = ex.a_gpvalue;
 #endif
 	start_thread(regs, ex.a_entry, current->mm->start_stack);
-	if (current->ptrace & PT_PTRACED)
-		send_sig(SIGTRAP, current, 0);
+	if (unlikely(current->ptrace & PT_PTRACED)) {
+		if (current->ptrace & PT_TRACE_EXEC)
+			ptrace_notify ((PTRACE_EVENT_EXEC << 8) | SIGTRAP);
+		else
+			send_sig(SIGTRAP, current, 0);
+	}
 	return 0;
 }
 
@@ -443,7 +453,7 @@ static int load_aout_library(struct file *file)
 	/* We come in here for the regular a.out style of shared libraries */
 	if ((N_MAGIC(ex) != ZMAGIC && N_MAGIC(ex) != QMAGIC) || N_TRSIZE(ex) ||
 	    N_DRSIZE(ex) || ((ex.a_entry & 0xfff) && N_MAGIC(ex) == ZMAGIC) ||
-	    inode->i_size < ex.a_text+ex.a_data+N_SYMSIZE(ex)+N_TXTOFF(ex)) {
+	    i_size_read(inode) < ex.a_text+ex.a_data+N_SYMSIZE(ex)+N_TXTOFF(ex)) {
 		goto out;
 	}
 
@@ -510,8 +520,6 @@ static void __exit exit_aout_binfmt(void)
 {
 	unregister_binfmt(&aout_format);
 }
-
-EXPORT_NO_SYMBOLS;
 
 module_init(init_aout_binfmt);
 module_exit(exit_aout_binfmt);

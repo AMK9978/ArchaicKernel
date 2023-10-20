@@ -27,7 +27,7 @@
  */
  
 #include <linux/config.h>
-#include <asm/segment.h>
+#include <linux/module.h>
 #include <asm/system.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
@@ -164,3 +164,5 @@ unsigned short fddi_type_trans(struct sk_buff *skb, struct net_device *dev)
 
 	return(type);
 }
+
+EXPORT_SYMBOL(fddi_type_trans);

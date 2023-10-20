@@ -1,7 +1,7 @@
 /*
  *  linux/include/asm-arm/processor.h
  *
- *  Copyright (C) 1995 Russell King
+ *  Copyright (C) 1995-1999 Russell King
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -17,81 +17,62 @@
  */
 #define current_text_addr() ({ __label__ _l; _l: &&_l;})
 
-#define FP_SIZE 35
-
-struct fp_hard_struct {
-	unsigned int save[FP_SIZE];		/* as yet undefined */
-};
-
-struct fp_soft_struct {
-	unsigned int save[FP_SIZE];		/* undefined information */
-};
-
-union fp_state {
-	struct fp_hard_struct	hard;
-	struct fp_soft_struct	soft;
-};
-
-typedef unsigned long mm_segment_t;		/* domain register	*/
-
 #ifdef __KERNEL__
 
-#define EISA_bus 0
 #define MCA_bus 0
 #define MCA_bus__is_a_macro
 
 #include <asm/atomic.h>
 #include <asm/ptrace.h>
+#include <asm/procinfo.h>
 #include <asm/arch/memory.h>
-#include <asm/proc/processor.h>
+#include <asm/types.h>
+
+#define KERNEL_STACK_SIZE	PAGE_SIZE
+
+union debug_insn {
+	u32	arm;
+	u16	thumb;
+};
+
+struct debug_entry {
+	u32			address;
+	union debug_insn	insn;
+};
 
 struct debug_info {
-	int				nsaved;
-	struct {
-		unsigned long		address;
-		unsigned long		insn;
-	} bp[2];
+	int			nsaved;
+	struct debug_entry	bp[2];
 };
 
 struct thread_struct {
-	atomic_t			refcount;
 							/* fault info	  */
-	unsigned long			address;
-	unsigned long			trap_no;
-	unsigned long			error_code;
-							/* floating point */
-	union fp_state			fpstate;
+	unsigned long		address;
+	unsigned long		trap_no;
+	unsigned long		error_code;
 							/* debugging	  */
-	struct debug_info		debug;
-							/* context info	  */
-	struct context_save_struct	*save;
-	EXTRA_THREAD_STRUCT
+	struct debug_info	debug;
 };
 
-#define INIT_MMAP {					\
-	vm_mm:		&init_mm,			\
-	vm_page_prot:	PAGE_SHARED,			\
-	vm_flags:	VM_READ | VM_WRITE | VM_EXEC,	\
-	vm_avl_height:	1,				\
-}
+#define INIT_THREAD  {	}
 
-#define INIT_THREAD  {					\
-	refcount:	ATOMIC_INIT(1),			\
-	EXTRA_THREAD_STRUCT_INIT			\
-}
-
-/*
- * Return saved PC of a blocked thread.
- */
-static inline unsigned long thread_saved_pc(struct thread_struct *t)
-{
-	return t->save ? pc_pointer(t->save->pc) : 0;
-}
-
-static inline unsigned long get_css_fp(struct thread_struct *t)
-{
-	return t->save ? t->save->fp : 0;
-}
+#define start_thread(regs,pc,sp)					\
+({									\
+	unsigned long *stack = (unsigned long *)sp;			\
+	set_fs(USER_DS);						\
+	memzero(regs->uregs, sizeof(regs->uregs));			\
+	if (current->personality & ADDR_LIMIT_32BIT)			\
+		regs->ARM_cpsr = USR_MODE;				\
+	else								\
+		regs->ARM_cpsr = USR26_MODE;				\
+	if (elf_hwcap & HWCAP_THUMB && pc & 1)				\
+		regs->ARM_cpsr |= PSR_T_BIT;				\
+	regs->ARM_pc = pc & ~1;		/* pc */			\
+	regs->ARM_sp = sp;		/* sp */			\
+	regs->ARM_r2 = stack[2];	/* r2 (envp) */			\
+	regs->ARM_r1 = stack[1];	/* r1 (argv) */			\
+	regs->ARM_r0 = stack[0];	/* r0 (argc) */			\
+})
 
 /* Forward declaration, a strange C thing */
 struct task_struct;
@@ -99,32 +80,43 @@ struct task_struct;
 /* Free all resources held by a thread. */
 extern void release_thread(struct task_struct *);
 
-/* Copy and release all segment info associated with a VM */
-#define copy_segments(tsk, mm)		do { } while (0)
-#define release_segments(mm)		do { } while (0)
+/* Prepare to copy thread state - unlazy all lazy status */
+#define prepare_to_copy(tsk)	do { } while (0)
 
 unsigned long get_wchan(struct task_struct *p);
 
-#define THREAD_SIZE	(8192)
-
-extern struct task_struct *alloc_task_struct(void);
-extern void __free_task_struct(struct task_struct *);
-#define get_task_struct(p)	atomic_inc(&(p)->thread.refcount)
-#define free_task_struct(p)					\
- do {								\
-	if (atomic_dec_and_test(&(p)->thread.refcount))		\
-		__free_task_struct((p));			\
- } while (0)
-
-#define init_task	(init_task_union.task)
-#define init_stack	(init_task_union.stack)
-
-#define cpu_relax()	do { } while (0)
+#define cpu_relax()			barrier()
 
 /*
  * Create a new kernel thread
  */
 extern int kernel_thread(int (*fn)(void *), void *arg, unsigned long flags);
+
+#define KSTK_EIP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)->thread_info))[1019])
+#define KSTK_ESP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)->thread_info))[1017])
+
+/*
+ * Prefetching support - only ARMv5.
+ */
+#if __LINUX_ARM_ARCH__ >= 5
+
+#define ARCH_HAS_PREFETCH
+#define prefetch(ptr)				\
+	({					\
+		__asm__ __volatile__(		\
+		"pld\t%0"			\
+		:				\
+		: "o" (*(char *)(ptr))		\
+		: "cc");			\
+	})
+
+#define ARCH_HAS_PREFETCHW
+#define prefetchw(ptr)	prefetch(ptr)
+
+#define ARCH_HAS_SPINLOCK_PREFETCH
+#define spin_lock_prefetch(x) do { } while (0)
+
+#endif
 
 #endif
 

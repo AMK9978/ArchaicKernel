@@ -180,6 +180,7 @@ struct hdlcdrv_ops {
 
 struct hdlcdrv_state {
 	int magic;
+	int opened;
 
 	const struct hdlcdrv_ops *ops;
 
@@ -214,7 +215,7 @@ struct hdlcdrv_state {
 
 	struct hdlcdrv_hdlctx {
 		struct hdlcdrv_hdlcbuffer hbuf;
-		int in_hdlc_tx;
+		long in_hdlc_tx;
 		/*
 		 * 0 = send flags
 		 * 1 = send txtail (flags)
@@ -358,11 +359,11 @@ static inline int hdlcdrv_ptt(struct hdlcdrv_state *s)
 void hdlcdrv_receiver(struct net_device *, struct hdlcdrv_state *);
 void hdlcdrv_transmitter(struct net_device *, struct hdlcdrv_state *);
 void hdlcdrv_arbitrate(struct net_device *, struct hdlcdrv_state *);
-int hdlcdrv_register_hdlcdrv(struct net_device *dev, const struct hdlcdrv_ops *ops,
-			     unsigned int privsize, char *ifname,
-			     unsigned int baseaddr, unsigned int irq, 
-			     unsigned int dma);
-int hdlcdrv_unregister_hdlcdrv(struct net_device *dev);
+struct net_device *hdlcdrv_register(const struct hdlcdrv_ops *ops,
+				    unsigned int privsize, const char *ifname,
+				    unsigned int baseaddr, unsigned int irq, 
+				    unsigned int dma);
+void hdlcdrv_unregister(struct net_device *dev);
 
 /* -------------------------------------------------------------------- */
 
