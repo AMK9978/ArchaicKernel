@@ -27,6 +27,7 @@
 #include <asm/uaccess.h>
 
 #include "smb_debug.h"
+#include "proto.h"
 
 
 static int
@@ -109,7 +110,7 @@ smb_data_callback(void* ptr)
 	struct data_callback* job=ptr;
 	struct socket *socket = job->sk->socket;
 	unsigned char peek_buf[4];
-	int result;
+	int result = 0;
 	mm_segment_t fs;
 	int count = 100;   /* this is a lot, we should have some data waiting */
 	int found = 0;
@@ -150,14 +151,14 @@ smb_data_callback(void* ptr)
 	DEBUG1("found=%d, count=%d, result=%d\n", found, count, result);
 	if (found)
 		found_data(job->sk);
-	kfree(ptr);
+	smb_kfree(ptr);
 }
 
 static void
 smb_data_ready(struct sock *sk, int len)
 {
 	struct data_callback* job;
-	job = kmalloc(sizeof(struct data_callback),GFP_ATOMIC);
+	job = smb_kmalloc(sizeof(struct data_callback),GFP_ATOMIC);
 	if(job == 0) {
 		printk("smb_data_ready: lost SESSION KEEPALIVE due to OOM.\n");
 		found_data(sk);
@@ -477,14 +478,12 @@ smb_receive_trans2(struct smb_sb_info *server,
 	unsigned int total_p = 0, total_d = 0, buf_len = 0;
 	int result;
 
-	while (1)
-	{
+	while (1) {
 		result = smb_receive(server);
 		if (result < 0)
 			goto out;
 		inbuf = server->packet;
-		if (server->rcls != 0)
-		{
+		if (server->rcls != 0) {
 			*parm = *data = inbuf;
 			*ldata = *lparm = 0;
 			goto out;
@@ -508,13 +507,11 @@ smb_receive_trans2(struct smb_sb_info *server,
 		parm_len += parm_count;
 		data_len += data_count;
 
-		if (!rcv_buf)
-		{
+		if (!rcv_buf) {
 			/*
 			 * Check for fast track processing ... just this packet.
 			 */
-			if (parm_count == parm_tot && data_count == data_tot)
-			{
+			if (parm_count == parm_tot && data_count == data_tot) {
 				VERBOSE("fast track, parm=%u %u %u, data=%u %u %u\n",
 					parm_disp, parm_offset, parm_count,
 					data_disp, data_offset, data_count);
@@ -522,10 +519,6 @@ smb_receive_trans2(struct smb_sb_info *server,
 				*data  = base + data_offset;
 				goto success;
 			}
-
-			if (parm_tot > TRANS2_MAX_TRANSFER ||
-	  		    data_tot > TRANS2_MAX_TRANSFER)
-				goto out_too_long;
 
 			/*
 			 * Save the total parameter and data length.
@@ -537,14 +530,15 @@ smb_receive_trans2(struct smb_sb_info *server,
 			if (server->packet_size > buf_len)
 				buf_len = server->packet_size;
 			buf_len = smb_round_length(buf_len);
+			if (buf_len > SMB_MAX_PACKET_SIZE)
+				goto out_too_long;
 
 			rcv_buf = smb_vmalloc(buf_len);
 			if (!rcv_buf)
 				goto out_no_mem;
 			*parm = rcv_buf;
 			*data = rcv_buf + total_p;
-		}
-		else if (data_tot > total_d || parm_tot > total_p)
+		} else if (data_tot > total_d || parm_tot > total_p)
 			goto out_data_grew;
 
 		if (parm_disp + parm_count > total_p)
@@ -571,8 +565,7 @@ smb_receive_trans2(struct smb_sb_info *server,
 	 * old one, in which case we just copy the data.
 	 */
 	inbuf = server->packet;
-	if (buf_len >= server->packet_size)
-	{
+	if (buf_len >= server->packet_size) {
 		server->packet_size = buf_len;
 		server->packet = rcv_buf;
 		rcv_buf = inbuf;
@@ -682,7 +675,7 @@ smb_request(struct smb_sb_info *server)
 	 */
 	if (server->rcls) {
 		int error = smb_errno(server);
-		if (error == EBADSLT) {
+		if (error == -EBADSLT) {
 			printk(KERN_ERR "smb_request: tree ID invalid\n");
 			result = error;
 			goto bad_conn;
@@ -716,6 +709,7 @@ smb_send_trans2(struct smb_sb_info *server, __u16 trans2_command,
 	struct socket *sock = server_sock(server);
 	struct scm_cookie scm;
 	int err;
+	int mparam, mdata;
 
 	/* I know the following is very ugly, but I want to build the
 	   smb packet as efficiently as possible. */
@@ -737,19 +731,30 @@ smb_send_trans2(struct smb_sb_info *server, __u16 trans2_command,
 	struct iovec iov[4];
 	struct msghdr msg;
 
-	/* N.B. This test isn't valid! packet_size may be < max_xmit */
+	/* FIXME! this test needs to include SMB overhead too, I think ... */
 	if ((bcc + oparam) > server->opt.max_xmit)
-	{
 		return -ENOMEM;
-	}
 	p = smb_setup_header(server, SMBtrans2, smb_parameters, bcc);
+
+	/*
+	 * max parameters + max data + max setup == max_xmit to make NT4 happy
+	 * and not abort the transfer or split into multiple responses.
+	 *
+	 * -100 is to make room for headers, which OS/2 seems to include in the
+	 * size calculation while NT4 does not?
+	 */
+	mparam = SMB_TRANS2_MAX_PARAM;
+	mdata = server->opt.max_xmit - mparam - 100;
+	if (mdata < 1024) {
+		mdata = 1024;
+		mparam = 20;
+	}
 
 	WSET(server->packet, smb_tpscnt, lparam);
 	WSET(server->packet, smb_tdscnt, ldata);
-	/* N.B. these values should reflect out current packet size */
-	WSET(server->packet, smb_mprcnt, TRANS2_MAX_TRANSFER);
-	WSET(server->packet, smb_mdrcnt, TRANS2_MAX_TRANSFER);
-	WSET(server->packet, smb_msrcnt, 0);
+	WSET(server->packet, smb_mprcnt, mparam);
+	WSET(server->packet, smb_mdrcnt, mdata);
+	WSET(server->packet, smb_msrcnt, 0);    /* max setup always 0 ? */
 	WSET(server->packet, smb_flags, 0);
 	DSET(server->packet, smb_timeout, 0);
 	WSET(server->packet, smb_pscnt, lparam);
@@ -781,8 +786,7 @@ smb_send_trans2(struct smb_sb_info *server, __u16 trans2_command,
 	iov[3].iov_len = ldata;
 
 	err = scm_send(sock, &msg, &scm);
-        if (err >= 0)
-	{
+        if (err >= 0) {
 		err = sock->ops->sendmsg(sock, &msg, packet_length, &scm);
 		scm_destroy(&scm);
 	}
@@ -863,7 +867,7 @@ smb_trans2_request(struct smb_sb_info *server, __u16 trans2_command,
 	 */
 	if (server->rcls) {
 		int error = smb_errno(server);
-		if (error == EBADSLT) {
+		if (error == -EBADSLT) {
 			printk(KERN_ERR "smb_request: tree ID invalid\n");
 			result = error;
 			goto bad_conn;

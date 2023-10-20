@@ -62,6 +62,9 @@
 #include "idt77105.h"
 #endif /* CONFIG_ATM_NICSTAR_USE_IDT77105 */
 
+#if BITS_PER_LONG != 32
+#  error FIXME: this driver requires a 32-bit platform
+#endif
 
 /* Additional code ************************************************************/
 
@@ -121,7 +124,7 @@
 #define ALIGN_ADDRESS(addr, alignment) \
         bus_to_virt(ALIGN_BUS_ADDR(virt_to_bus(addr), alignment))
 
-#undef CEIL(d)
+#undef CEIL
 
 #ifndef ATM_SKB
 #define ATM_SKB(s) (&(s)->atm)
@@ -207,18 +210,12 @@
 #endif /* NS_DEBUG_SPINLOCKS */
 
 
-/* Version definition *********************************************************/
-/*
-#include <linux/version.h>
-char kernel_version[] = UTS_RELEASE;
-*/
-
 /* Function declarations ******************************************************/
 
 static u32 ns_read_sram(ns_dev *card, u32 sram_address);
 static void ns_write_sram(ns_dev *card, u32 sram_address, u32 *value, int count);
-static int ns_init_card(int i, struct pci_dev *pcidev);
-static void ns_init_card_error(ns_dev *card, int error);
+static int __init ns_init_card(int i, struct pci_dev *pcidev);
+static void __init ns_init_card_error(ns_dev *card, int error);
 static scq_info *get_scq(int size, u32 scd);
 static void free_scq(scq_info *scq, struct atm_vcc *vcc);
 static void push_rxbufs(ns_dev *card, u32 type, u32 handle1, u32 addr1,
@@ -274,13 +271,14 @@ static struct atmdev_ops atm_ops =
 static struct timer_list ns_timer;
 static char *mac[NS_MAX_CARDS];
 MODULE_PARM(mac, "1-" __MODULE_STRING(NS_MAX_CARDS) "s");
+MODULE_LICENSE("GPL");
 
 
 /* Functions*******************************************************************/
 
 #ifdef MODULE
 
-int init_module(void)
+int __init init_module(void)
 {
    int i;
    unsigned error = 0;	/* Initialized to remove compile warning */
@@ -514,7 +512,7 @@ static void ns_write_sram(ns_dev *card, u32 sram_address, u32 *value, int count)
 }
 
 
-static int ns_init_card(int i, struct pci_dev *pcidev)
+static int __init ns_init_card(int i, struct pci_dev *pcidev)
 {
    int j;
    struct ns_dev *card = NULL;
@@ -793,7 +791,7 @@ static int ns_init_card(int i, struct pci_dev *pcidev)
    u32d[0] = NS_RCTE_RAWCELLINTEN;
 #else
    u32d[0] = 0x00000000;
-#endif RCQ_SUPPORT
+#endif /* RCQ_SUPPORT */
    u32d[1] = 0x00000000;
    u32d[2] = 0x00000000;
    u32d[3] = 0xFFFFFFFF;
@@ -1010,7 +1008,7 @@ static int ns_init_card(int i, struct pci_dev *pcidev)
 
 
 
-static void ns_init_card_error(ns_dev *card, int error)
+static void __init ns_init_card_error(ns_dev *card, int error)
 {
    if (error >= 17)
    {
@@ -1360,7 +1358,7 @@ static void ns_irq_handler(int irq, void *dev_id, struct pt_regs *regs)
       printk("nicstar%d: Raw cell received and no support yet...\n",
              card->index);
 #endif /* RCQ_SUPPORT */
-      /* NOTE: the following procedure may keep a raw cell pending untill the
+      /* NOTE: the following procedure may keep a raw cell pending until the
                next interrupt. As this preliminary support is only meant to
                avoid buffer leakage, this is not an issue. */
       while (readl(card->membase + RAWCT) != card->rawch)

@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.mman.h 1.7 05/17/01 18:14:25 cort
+ */
 #ifndef __PPC_MMAN_H__
 #define __PPC_MMAN_H__
 
@@ -13,6 +16,7 @@
 #define MAP_ANONYMOUS	0x20		/* don't use a file */
 #define MAP_RENAME      MAP_ANONYMOUS   /* In SunOS terminology */
 #define MAP_NORESERVE   0x40            /* don't reserve swap pages */
+#define MAP_LOCKED	0x80
 
 #define MAP_GROWSDOWN	0x0100		/* stack-like segment */
 #define MAP_DENYWRITE	0x0800		/* ETXTBSY */

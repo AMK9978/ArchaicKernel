@@ -53,7 +53,7 @@ static struct
 		sizeof(struct ipt_entry),
 		sizeof(struct ipt_standard),
 		0, { 0, 0 }, { } },
-	      { { { { sizeof(struct ipt_standard_target), "" } }, { } },
+	      { { { { IPT_ALIGN(sizeof(struct ipt_standard_target)), "" } }, { } },
 		-NF_ACCEPT - 1 } },
 	    /* LOCAL_OUT */
 	    { { { { 0 }, { 0 }, { 0 }, { 0 }, "", "", { 0 }, { 0 }, 0, 0, 0 },
@@ -61,7 +61,7 @@ static struct
 		sizeof(struct ipt_entry),
 		sizeof(struct ipt_standard),
 		0, { 0, 0 }, { } },
-	      { { { { sizeof(struct ipt_standard_target), "" } }, { } },
+	      { { { { IPT_ALIGN(sizeof(struct ipt_standard_target)), "" } }, { } },
 		-NF_ACCEPT - 1 } }
     },
     /* ERROR */
@@ -70,7 +70,7 @@ static struct
 	sizeof(struct ipt_entry),
 	sizeof(struct ipt_error),
 	0, { 0, 0 }, { } },
-      { { { { sizeof(struct ipt_error_target), IPT_ERROR_TARGET } },
+      { { { { IPT_ALIGN(sizeof(struct ipt_error_target)), IPT_ERROR_TARGET } },
 	  { } },
 	"ERROR"
       }
@@ -148,7 +148,7 @@ ipt_local_out_hook(unsigned int hook,
 
 	ret = ipt_do_table(pskb, hook, in, out, &packet_mangler, NULL);
 	/* Reroute for ANY change. */
-	if (ret != NF_DROP && ret != NF_STOLEN
+	if (ret != NF_DROP && ret != NF_STOLEN && ret != NF_QUEUE
 	    && ((*pskb)->nh.iph->saddr != saddr
 		|| (*pskb)->nh.iph->daddr != daddr
 		|| (*pskb)->nfmark != nfmark
@@ -204,3 +204,4 @@ static void __exit fini(void)
 
 module_init(init);
 module_exit(fini);
+MODULE_LICENSE("GPL");

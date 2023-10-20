@@ -5,15 +5,19 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1996, 1997 by Ralf Baechle
+ * Copyright (C) 1996, 97, 2000, 2001 by Ralf Baechle
+ * Copyright (C) 2001 MIPS Technologies, Inc.
  */
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/signal.h>
 #include <asm/branch.h>
+#include <asm/cpu.h>
 #include <asm/inst.h>
 #include <asm/ptrace.h>
 #include <asm/uaccess.h>
+#include <asm/bootinfo.h>
+#include <asm/processor.h>
 
 /*
  * Compute the return address and do emulate branch simulation, if required.
@@ -25,11 +29,8 @@ int __compute_return_epc(struct pt_regs *regs)
 	union mips_instruction insn;
 
 	epc = regs->cp0_epc;
-	if (epc & 3) {
-		printk("%s: unaligned epc - sending SIGBUS.\n", current->comm);
-		force_sig(SIGBUS, current);
-		return -EFAULT;
-	}
+	if (epc & 3)
+		goto unaligned;
 
 	/*
 	 * Read the instruction
@@ -65,7 +66,7 @@ int __compute_return_epc(struct pt_regs *regs)
 		switch (insn.i_format.rt) {
 	 	case bltz_op:
 		case bltzl_op:
-			if (regs->regs[insn.i_format.rs] < 0)
+			if ((long)regs->regs[insn.i_format.rs] < 0)
 				epc = epc + 4 + (insn.i_format.simmediate << 2);
 			else
 				epc += 8;
@@ -74,7 +75,7 @@ int __compute_return_epc(struct pt_regs *regs)
 
 		case bgez_op:
 		case bgezl_op:
-			if (regs->regs[insn.i_format.rs] >= 0)
+			if ((long)regs->regs[insn.i_format.rs] >= 0)
 				epc = epc + 4 + (insn.i_format.simmediate << 2);
 			else
 				epc += 8;
@@ -84,7 +85,7 @@ int __compute_return_epc(struct pt_regs *regs)
 		case bltzal_op:
 		case bltzall_op:
 			regs->regs[31] = epc + 8;
-			if (regs->regs[insn.i_format.rs] < 0)
+			if ((long)regs->regs[insn.i_format.rs] < 0)
 				epc = epc + 4 + (insn.i_format.simmediate << 2);
 			else
 				epc += 8;
@@ -94,7 +95,7 @@ int __compute_return_epc(struct pt_regs *regs)
 		case bgezal_op:
 		case bgezall_op:
 			regs->regs[31] = epc + 8;
-			if (regs->regs[insn.i_format.rs] >= 0)
+			if ((long)regs->regs[insn.i_format.rs] >= 0)
 				epc = epc + 4 + (insn.i_format.simmediate << 2);
 			else
 				epc += 8;
@@ -142,7 +143,7 @@ int __compute_return_epc(struct pt_regs *regs)
 	case blez_op: /* not really i_format */
 	case blezl_op:
 		/* rt field assumed to be zero */
-		if (regs->regs[insn.i_format.rs] <= 0)
+		if ((long)regs->regs[insn.i_format.rs] <= 0)
 			epc = epc + 4 + (insn.i_format.simmediate << 2);
 		else
 			epc += 8;
@@ -152,7 +153,7 @@ int __compute_return_epc(struct pt_regs *regs)
 	case bgtz_op:
 	case bgtzl_op:
 		/* rt field assumed to be zero */
-		if (regs->regs[insn.i_format.rs] > 0)
+		if ((long)regs->regs[insn.i_format.rs] > 0)
 			epc = epc + 4 + (insn.i_format.simmediate << 2);
 		else
 			epc += 8;
@@ -163,7 +164,10 @@ int __compute_return_epc(struct pt_regs *regs)
 	 * And now the FPA/cp1 branch instructions.
 	 */
 	case cop1_op:
-		asm ("cfc1\t%0,$31":"=r" (fcr31));
+		if(!(mips_cpu.options & MIPS_CPU_FPU))
+			fcr31 = current->thread.fpu.soft.sr;
+		else
+			asm ("cfc1\t%0,$31":"=r" (fcr31));
 		bit = (insn.i_format.rt >> 2);
 		bit += (bit != 0);
 		bit += 23;
@@ -190,4 +194,9 @@ int __compute_return_epc(struct pt_regs *regs)
 	}
 
 	return 0;
+
+unaligned:
+	printk("%s: unaligned epc - sending SIGBUS.\n", current->comm);
+	force_sig(SIGBUS, current);
+	return -EFAULT;
 }

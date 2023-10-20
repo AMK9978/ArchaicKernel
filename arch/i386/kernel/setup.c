@@ -58,6 +58,19 @@
  *  Massive cleanup of CPU detection and bug handling;
  *  Transmeta CPU detection,
  *  H. Peter Anvin <hpa@zytor.com>, November 2000
+ *
+ *  Added E820 sanitization routine (removes overlapping memory regions);
+ *  Brian Moyle <bmoyle@mvista.com>, February 2001
+ *
+ *  VIA C3 Support.
+ *  Dave Jones <davej@suse.de>, March 2001
+ *
+ *  AMD Athlon/Duron/Thunderbird bluesmoke support.
+ *  Dave Jones <davej@suse.de>, April 2001.
+ *
+ *  CacheSize bug workaround updates for AMD, Intel & VIA Cyrix.
+ *  Dave Jones <davej@suse.de>, September, October 2001.
+ *
  */
 
 /*
@@ -71,7 +84,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/tty.h>
@@ -85,8 +98,10 @@
 #endif
 #include <linux/highmem.h>
 #include <linux/bootmem.h>
+#include <linux/seq_file.h>
 #include <asm/processor.h>
 #include <linux/console.h>
+#include <asm/mtrr.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/io.h>
@@ -121,6 +136,9 @@ unsigned int machine_submodel_id;
 unsigned int BIOS_revision;
 unsigned int mca_pentium_flag;
 
+/* For PCI or other memory-mapped resources */
+unsigned long pci_mem_start = 0x10000000;
+
 /*
  * Setup options
  */
@@ -136,17 +154,14 @@ struct e820map e820;
 
 unsigned char aux_device_present;
 
-#ifdef CONFIG_BLK_DEV_RAM
-extern int rd_doload;		/* 1 = load ramdisk, 0 = don't load */
-extern int rd_prompt;		/* 1 = prompt for ramdisk, 0 = don't prompt */
-extern int rd_image_start;	/* starting block # of image */
-#endif
-
+extern void mcheck_init(struct cpuinfo_x86 *c);
 extern int root_mountflags;
 extern char _text, _etext, _edata, _end;
-extern unsigned long cpu_khz;
 
 static int disable_x86_serial_nr __initdata = 1;
+static int disable_x86_fxsr __initdata = 0;
+
+int enable_acpi_smp_table;
 
 /*
  * This is set up by the setup-routine at boot-time
@@ -221,8 +236,7 @@ char visws_board_rev = -1;
 
 #define	SIO_PM_GP_EN	0x80
 
-static void
-visws_get_board_type_and_rev(void)
+static void __init visws_get_board_type_and_rev(void)
 {
 	int raw;
 
@@ -293,7 +307,7 @@ visws_get_board_type_and_rev(void)
 			visws_board_rev = raw;
 		}
 
-		printk("Silicon Graphics %s (rev %d)\n",
+		printk(KERN_INFO "Silicon Graphics %s (rev %d)\n",
 			visws_board_type == VISWS_320 ? "320" :
 			(visws_board_type == VISWS_540 ? "540" :
 					"unknown"),
@@ -394,13 +408,13 @@ static void __init probe_roms(void)
 	}
 }
 
-void __init add_memory_region(unsigned long long start,
+static void __init add_memory_region(unsigned long long start,
                                   unsigned long long size, int type)
 {
 	int x = e820.nr_map;
 
 	if (x == E820MAX) {
-	    printk("Ooops! Too many entries in the memory map!\n");
+	    printk(KERN_ERR "Ooops! Too many entries in the memory map!\n");
 	    return;
 	}
 
@@ -417,8 +431,9 @@ static void __init print_memory_map(char *who)
 	int i;
 
 	for (i = 0; i < e820.nr_map; i++) {
-		printk(" %s: %016Lx @ %016Lx ", who,
-			e820.map[i].size, e820.map[i].addr);
+		printk(" %s: %016Lx - %016Lx ", who,
+			e820.map[i].addr,
+			e820.map[i].addr + e820.map[i].size);
 		switch (e820.map[i].type) {
 		case E820_RAM:	printk("(usable)\n");
 				break;
@@ -435,6 +450,170 @@ static void __init print_memory_map(char *who)
 				break;
 		}
 	}
+}
+
+/*
+ * Sanitize the BIOS e820 map.
+ *
+ * Some e820 responses include overlapping entries.  The following 
+ * replaces the original e820 map with a new one, removing overlaps.
+ *
+ */
+static int __init sanitize_e820_map(struct e820entry * biosmap, char * pnr_map)
+{
+	struct change_member {
+		struct e820entry *pbios; /* pointer to original bios entry */
+		unsigned long long addr; /* address for this change point */
+	};
+	struct change_member change_point_list[2*E820MAX];
+	struct change_member *change_point[2*E820MAX];
+	struct e820entry *overlap_list[E820MAX];
+	struct e820entry new_bios[E820MAX];
+	struct change_member *change_tmp;
+	unsigned long current_type, last_type;
+	unsigned long long last_addr;
+	int chgidx, still_changing;
+	int overlap_entries;
+	int new_bios_entry;
+	int old_nr, new_nr;
+	int i;
+
+	/*
+		Visually we're performing the following (1,2,3,4 = memory types)...
+
+		Sample memory map (w/overlaps):
+		   ____22__________________
+		   ______________________4_
+		   ____1111________________
+		   _44_____________________
+		   11111111________________
+		   ____________________33__
+		   ___________44___________
+		   __________33333_________
+		   ______________22________
+		   ___________________2222_
+		   _________111111111______
+		   _____________________11_
+		   _________________4______
+
+		Sanitized equivalent (no overlap):
+		   1_______________________
+		   _44_____________________
+		   ___1____________________
+		   ____22__________________
+		   ______11________________
+		   _________1______________
+		   __________3_____________
+		   ___________44___________
+		   _____________33_________
+		   _______________2________
+		   ________________1_______
+		   _________________4______
+		   ___________________2____
+		   ____________________33__
+		   ______________________4_
+	*/
+
+	/* if there's only one memory region, don't bother */
+	if (*pnr_map < 2)
+		return -1;
+
+	old_nr = *pnr_map;
+
+	/* bail out if we find any unreasonable addresses in bios map */
+	for (i=0; i<old_nr; i++)
+		if (biosmap[i].addr + biosmap[i].size < biosmap[i].addr)
+			return -1;
+
+	/* create pointers for initial change-point information (for sorting) */
+	for (i=0; i < 2*old_nr; i++)
+		change_point[i] = &change_point_list[i];
+
+	/* record all known change-points (starting and ending addresses) */
+	chgidx = 0;
+	for (i=0; i < old_nr; i++)	{
+		change_point[chgidx]->addr = biosmap[i].addr;
+		change_point[chgidx++]->pbios = &biosmap[i];
+		change_point[chgidx]->addr = biosmap[i].addr + biosmap[i].size;
+		change_point[chgidx++]->pbios = &biosmap[i];
+	}
+
+	/* sort change-point list by memory addresses (low -> high) */
+	still_changing = 1;
+	while (still_changing)	{
+		still_changing = 0;
+		for (i=1; i < 2*old_nr; i++)  {
+			/* if <current_addr> > <last_addr>, swap */
+			/* or, if current=<start_addr> & last=<end_addr>, swap */
+			if ((change_point[i]->addr < change_point[i-1]->addr) ||
+				((change_point[i]->addr == change_point[i-1]->addr) &&
+				 (change_point[i]->addr == change_point[i]->pbios->addr) &&
+				 (change_point[i-1]->addr != change_point[i-1]->pbios->addr))
+			   )
+			{
+				change_tmp = change_point[i];
+				change_point[i] = change_point[i-1];
+				change_point[i-1] = change_tmp;
+				still_changing=1;
+			}
+		}
+	}
+
+	/* create a new bios memory map, removing overlaps */
+	overlap_entries=0;	 /* number of entries in the overlap table */
+	new_bios_entry=0;	 /* index for creating new bios map entries */
+	last_type = 0;		 /* start with undefined memory type */
+	last_addr = 0;		 /* start with 0 as last starting address */
+	/* loop through change-points, determining affect on the new bios map */
+	for (chgidx=0; chgidx < 2*old_nr; chgidx++)
+	{
+		/* keep track of all overlapping bios entries */
+		if (change_point[chgidx]->addr == change_point[chgidx]->pbios->addr)
+		{
+			/* add map entry to overlap list (> 1 entry implies an overlap) */
+			overlap_list[overlap_entries++]=change_point[chgidx]->pbios;
+		}
+		else
+		{
+			/* remove entry from list (order independent, so swap with last) */
+			for (i=0; i<overlap_entries; i++)
+			{
+				if (overlap_list[i] == change_point[chgidx]->pbios)
+					overlap_list[i] = overlap_list[overlap_entries-1];
+			}
+			overlap_entries--;
+		}
+		/* if there are overlapping entries, decide which "type" to use */
+		/* (larger value takes precedence -- 1=usable, 2,3,4,4+=unusable) */
+		current_type = 0;
+		for (i=0; i<overlap_entries; i++)
+			if (overlap_list[i]->type > current_type)
+				current_type = overlap_list[i]->type;
+		/* continue building up new bios map based on this information */
+		if (current_type != last_type)	{
+			if (last_type != 0)	 {
+				new_bios[new_bios_entry].size =
+					change_point[chgidx]->addr - last_addr;
+				/* move forward only if the new size was non-zero */
+				if (new_bios[new_bios_entry].size != 0)
+					if (++new_bios_entry >= E820MAX)
+						break; 	/* no more space left for new bios entries */
+			}
+			if (current_type != 0)	{
+				new_bios[new_bios_entry].addr = change_point[chgidx]->addr;
+				new_bios[new_bios_entry].type = current_type;
+				last_addr=change_point[chgidx]->addr;
+			}
+			last_type = current_type;
+		}
+	}
+	new_nr = new_bios_entry;   /* retain count for new bios entries */
+
+	/* copy new bios mapping into original location */
+	memcpy(biosmap, new_bios, new_nr*sizeof(struct e820entry));
+	*pnr_map = new_nr;
+
+	return 0;
 }
 
 /*
@@ -494,7 +673,7 @@ static int __init copy_e820_map(struct e820entry * biosmap, int nr_map)
  */
 #define LOWMEMSIZE()	(0x9f000)
 
-void __init setup_memory_region(void)
+static void __init setup_memory_region(void)
 {
 	char *who = "BIOS-e820";
 
@@ -504,6 +683,7 @@ void __init setup_memory_region(void)
 	 * Otherwise fake a memory map; one section from 0k->640k,
 	 * the next section from 1mb->appropriate_mem_k
 	 */
+	sanitize_e820_map(E820_MAP, &E820_MAP_NR);
 	if (copy_e820_map(E820_MAP, E820_MAP_NR) < 0) {
 		unsigned long mem_size;
 
@@ -518,14 +698,14 @@ void __init setup_memory_region(void)
 
 		e820.nr_map = 0;
 		add_memory_region(0, LOWMEMSIZE(), E820_RAM);
-		add_memory_region(HIGH_MEMORY, (mem_size << 10) - HIGH_MEMORY, E820_RAM);
+		add_memory_region(HIGH_MEMORY, mem_size << 10, E820_RAM);
   	}
-	printk("BIOS-provided physical RAM map:\n");
+	printk(KERN_INFO "BIOS-provided physical RAM map:\n");
 	print_memory_map(who);
 } /* setup_memory_region */
 
 
-static inline void parse_mem_cmdline (char ** cmdline_p)
+static void __init parse_mem_cmdline (char ** cmdline_p)
 {
 	char c = ' ', *to = command_line, *from = COMMAND_LINE;
 	int len = 0;
@@ -558,7 +738,7 @@ static inline void parse_mem_cmdline (char ** cmdline_p)
 				 * blow away any automatically generated
 				 * size
 				 */
-				unsigned long start_at, mem_size;
+				unsigned long long start_at, mem_size;
  
 				if (usermem == 0) {
 					/* first time in: zap the whitelist
@@ -580,6 +760,10 @@ static inline void parse_mem_cmdline (char ** cmdline_p)
 				add_memory_region(start_at, mem_size, E820_RAM);
 			}
 		}
+		/* acpismp=force forces parsing and use of the ACPI SMP table */
+		if (c == ' ' && !memcmp(from, "acpismp=force", 13)) 	
+			 enable_acpi_smp_table = 1;
+	
 		c = *(from++);
 		if (!c)
 			break;
@@ -590,14 +774,14 @@ static inline void parse_mem_cmdline (char ** cmdline_p)
 	*to = '\0';
 	*cmdline_p = command_line;
 	if (usermem) {
-		printk("user-defined physical RAM map:\n");
+		printk(KERN_INFO "user-defined physical RAM map:\n");
 		print_memory_map("user");
 	}
 }
 
 void __init setup_arch(char **cmdline_p)
 {
-	unsigned long bootmap_size;
+	unsigned long bootmap_size, low_mem_size;
 	unsigned long start_pfn, max_pfn, max_low_pfn;
 	int i;
 
@@ -767,27 +951,14 @@ void __init setup_arch(char **cmdline_p)
 	 * trampoline before removing it. (see the GDT stuff)
 	 */
 	reserve_bootmem(PAGE_SIZE, PAGE_SIZE);
-	smp_alloc_memory(); /* AP processor realmode stacks in low memory*/
 #endif
 
-#ifdef CONFIG_X86_IO_APIC
+#ifdef CONFIG_X86_LOCAL_APIC
 	/*
 	 * Find and reserve possible boot-time SMP configuration:
 	 */
 	find_smp_config();
 #endif
-	paging_init();
-#ifdef CONFIG_X86_IO_APIC
-	/*
-	 * get boot-time SMP configuration:
-	 */
-	if (smp_found_config)
-		get_smp_config();
-#endif
-#ifdef CONFIG_X86_LOCAL_APIC
-	init_apic_mappings();
-#endif
-
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (LOADER_TYPE && INITRD_START) {
 		if (INITRD_START + INITRD_SIZE <= (max_low_pfn << PAGE_SHIFT)) {
@@ -797,7 +968,7 @@ void __init setup_arch(char **cmdline_p)
 			initrd_end = initrd_start+INITRD_SIZE;
 		}
 		else {
-			printk("initrd extends beyond end of memory "
+			printk(KERN_ERR "initrd extends beyond end of memory "
 			    "(0x%08lx > 0x%08lx)\ndisabling initrd\n",
 			    INITRD_START + INITRD_SIZE,
 			    max_low_pfn << PAGE_SHIFT);
@@ -805,6 +976,25 @@ void __init setup_arch(char **cmdline_p)
 		}
 	}
 #endif
+
+	/*
+	 * NOTE: before this point _nobody_ is allowed to allocate
+	 * any memory using the bootmem allocator.
+	 */
+
+#ifdef CONFIG_SMP
+	smp_alloc_memory(); /* AP processor realmode stacks in low memory*/
+#endif
+	paging_init();
+#ifdef CONFIG_X86_LOCAL_APIC
+	/*
+	 * get boot-time SMP configuration:
+	 */
+	if (smp_found_config)
+		get_smp_config();
+	init_apic_mappings();
+#endif
+
 
 	/*
 	 * Request address space for all standard RAM and ROM resources
@@ -842,6 +1032,11 @@ void __init setup_arch(char **cmdline_p)
 	for (i = 0; i < STANDARD_IO_RESOURCES; i++)
 		request_resource(&ioport_resource, standard_io_resources+i);
 
+	/* Tell the PCI layer not to allocate too close to the RAM area.. */
+	low_mem_size = ((max_low_pfn << PAGE_SHIFT) + 0xfffff) & ~0xfffff;
+	if (low_mem_size > pci_mem_start)
+		pci_mem_start = low_mem_size;
+
 #ifdef CONFIG_VT
 #if defined(CONFIG_VGA_CONSOLE)
 	conswitchp = &vga_con;
@@ -850,6 +1045,15 @@ void __init setup_arch(char **cmdline_p)
 #endif
 #endif
 }
+
+static int cachesize_override __initdata = -1;
+static int __init cachesize_setup(char *str)
+{
+	get_option (&str, &cachesize_override);
+	return 1;
+}
+__setup("cachesize=", cachesize_setup);
+
 
 #ifndef CONFIG_X86_TSC
 static int tsc_disable __initdata = 0;
@@ -901,7 +1105,7 @@ static void __init display_cacheinfo(struct cpuinfo_x86 *c)
 
 	if (n >= 0x80000005) {
 		cpuid(0x80000005, &dummy, &dummy, &ecx, &edx);
-		printk("CPU: L1 I Cache: %dK (%d bytes/line), D cache %dK (%d bytes/line)\n",
+		printk(KERN_INFO "CPU: L1 I Cache: %dK (%d bytes/line), D cache %dK (%d bytes/line)\n",
 			edx>>24, edx&0xFF, ecx>>24, ecx&0xFF);
 		c->x86_cache_size=(ecx>>24)+(edx>>24);	
 	}
@@ -913,19 +1117,39 @@ static void __init display_cacheinfo(struct cpuinfo_x86 *c)
 	l2size = ecx >> 16;
 
 	/* AMD errata T13 (order #21922) */
-	if (c->x86_vendor == X86_VENDOR_AMD &&
-	    c->x86 == 6 &&
-	    c->x86_model == 3 &&
-	    c->x86_mask == 0) {
-		l2size = 64;
+	if ((c->x86_vendor == X86_VENDOR_AMD) && (c->x86 == 6)) {
+		if (c->x86_model == 3 && c->x86_mask == 0)	/* Duron Rev A0 */
+			l2size = 64;
+		if (c->x86_model == 4 &&
+			(c->x86_mask==0 || c->x86_mask==1))	/* Tbird rev A1/A2 */
+			l2size = 256;
 	}
+
+	/* Intel PIII Tualatin. This comes in two flavours.
+	 * One has 256kb of cache, the other 512. We have no way
+	 * to determine which, so we use a boottime override
+	 * for the 512kb model, and assume 256 otherwise.
+	 */
+	if ((c->x86_vendor == X86_VENDOR_INTEL) && (c->x86 == 6) &&
+		(c->x86_model == 11) && (l2size == 0))
+		l2size = 256;
+
+	/* VIA C3 CPUs (670-68F) need further shifting. */
+	if (c->x86_vendor == X86_VENDOR_CENTAUR && (c->x86 == 6) &&
+		((c->x86_model == 7) || (c->x86_model == 8))) {
+		l2size = l2size >> 8;
+	}
+
+	/* Allow user to override all this if necessary. */
+	if (cachesize_override != -1)
+		l2size = cachesize_override;
 
 	if ( l2size == 0 )
 		return;		/* Again, no L2 cache is possible */
 
 	c->x86_cache_size = l2size;
 
-	printk("CPU: L2 Cache: %dK (%d bytes/line)\n",
+	printk(KERN_INFO "CPU: L2 Cache: %dK (%d bytes/line)\n",
 	       l2size, ecx & 0xFF);
 }
 
@@ -934,7 +1158,7 @@ static void __init display_cacheinfo(struct cpuinfo_x86 *c)
  *	misexecution of code under Linux. Owners of such processors should
  *	contact AMD for precise details and a CPU swap.
  *
- *	See	http://www.mygale.com/~poulot/k6bug.html
+ *	See	http://www.multimania.com/poulot/k6bug.html
  *		http://www.amd.com/K6/k6docs/revgd.html
  *
  *	The following test is erm.. interesting. AMD neglected to up
@@ -948,9 +1172,14 @@ __asm__(".align 4\nvide: ret");
 static int __init init_amd(struct cpuinfo_x86 *c)
 {
 	u32 l, h;
-	unsigned long flags;
 	int mbytes = max_mapnr >> (20-PAGE_SHIFT);
 	int r;
+
+	/*
+	 *	FIXME: We should handle the K5 here. Set up the write
+	 *	range and also turn on MSR 83 bits 4 and 31 (write alloc,
+	 *	no bus pipeline)
+	 */
 
 	/* Bit 31 in normal CPUID used for nonstandard 3DNow ID;
 	   3DNow is IDd by bit 31 in extended CPUID (1*32+31) anyway */
@@ -1004,60 +1233,55 @@ static int __init init_amd(struct cpuinfo_x86 *c)
 			}
 
 			/* K6 with old style WHCR */
-			if( c->x86_model < 8 ||
-				(c->x86_model== 8 && c->x86_mask < 8))
-			{
+			if (c->x86_model < 8 ||
+			   (c->x86_model== 8 && c->x86_mask < 8)) {
 				/* We can only write allocate on the low 508Mb */
 				if(mbytes>508)
 					mbytes=508;
-					
-				rdmsr(0xC0000082, l, h);
-				if((l&0x0000FFFF)==0)
-				{		
+
+				rdmsr(MSR_K6_WHCR, l, h);
+				if ((l&0x0000FFFF)==0) {
+					unsigned long flags;
 					l=(1<<0)|((mbytes/4)<<1);
-					save_flags(flags);
-					__cli();
-					__asm__ __volatile__ ("wbinvd": : :"memory");
-					wrmsr(0xC0000082, l, h);
-					restore_flags(flags);
+					local_irq_save(flags);
+					wbinvd();
+					wrmsr(MSR_K6_WHCR, l, h);
+					local_irq_restore(flags);
 					printk(KERN_INFO "Enabling old style K6 write allocation for %d Mb\n",
 						mbytes);
-					
 				}
 				break;
 			}
-			if (c->x86_model == 8 || c->x86_model == 9 || c->x86_model == 13)
-			{
+
+			if ((c->x86_model == 8 && c->x86_mask >7) ||
+			     c->x86_model == 9 || c->x86_model == 13) {
 				/* The more serious chips .. */
-				
+
 				if(mbytes>4092)
 					mbytes=4092;
 
-				rdmsr(0xC0000082, l, h);
-				if((l&0xFFFF0000)==0)
-				{
+				rdmsr(MSR_K6_WHCR, l, h);
+				if ((l&0xFFFF0000)==0) {
+					unsigned long flags;
 					l=((mbytes>>2)<<22)|(1<<16);
-					save_flags(flags);
-					__cli();
-					__asm__ __volatile__ ("wbinvd": : :"memory");
-					wrmsr(0xC0000082, l, h);
-					restore_flags(flags);
+					local_irq_save(flags);
+					wbinvd();
+					wrmsr(MSR_K6_WHCR, l, h);
+					local_irq_restore(flags);
 					printk(KERN_INFO "Enabling new style K6 write allocation for %d Mb\n",
 						mbytes);
 				}
 
 				/*  Set MTRR capability flag if appropriate */
-				if ( (c->x86_model == 13) ||
-				     (c->x86_model == 9) ||
-				     ((c->x86_model == 8) && 
-				     (c->x86_mask >= 8)) )
+				if (c->x86_model == 13 || c->x86_model == 9 ||
+				   (c->x86_model == 8 && c->x86_mask >= 8))
 					set_bit(X86_FEATURE_K6_MTRR, &c->x86_capability);
 				break;
 			}
-
 			break;
 
 		case 6:	/* An Athlon/Duron. We can trust the BIOS probably */
+			mcheck_init(c);
 			break;		
 	}
 
@@ -1068,12 +1292,13 @@ static int __init init_amd(struct cpuinfo_x86 *c)
 /*
  * Read Cyrix DEVID registers (DIR) to get more detailed info. about the CPU
  */
-static inline void do_cyrix_devid(unsigned char *dir0, unsigned char *dir1)
+static void __init do_cyrix_devid(unsigned char *dir0, unsigned char *dir1)
 {
 	unsigned char ccr2, ccr3;
-
+	unsigned long flags;
+	
 	/* we test for DEVID by checking whether CCR3 is writable */
-	cli();
+	local_irq_save(flags);
 	ccr3 = getCx86(CX86_CCR3);
 	setCx86(CX86_CCR3, ccr3 ^ 0x80);
 	getCx86(0xc0);   /* dummy to change bus */
@@ -1097,14 +1322,17 @@ static inline void do_cyrix_devid(unsigned char *dir0, unsigned char *dir1)
 		*dir0 = getCx86(CX86_DIR0);
 		*dir1 = getCx86(CX86_DIR1);
 	}
-	sti();
+	local_irq_restore(flags);
 }
 
 /*
  * Cx86_dir0_msb is a HACK needed by check_cx686_cpuid/slop in bugs.h in
  * order to identify the Cyrix CPU model after we're out of setup.c
+ *
+ * Actually since bugs.h doesnt even reference this perhaps someone should
+ * fix the documentation ???
  */
-unsigned char Cx86_dir0_msb __initdata = 0;
+static unsigned char Cx86_dir0_msb __initdata = 0;
 
 static char Cx86_model[][9] __initdata = {
 	"Cx486", "Cx486", "5x86 ", "6x86", "MediaGX ", "6x86MX ",
@@ -1128,23 +1356,27 @@ static char cyrix_model_mult2[] __initdata = "12233445";
  * Reset the slow-loop (SLOP) bit on the 686(L) which is set by some old
  * BIOSes for compatability with DOS games.  This makes the udelay loop
  * work correctly, and improves performance.
+ *
+ * FIXME: our newer udelay uses the tsc. We dont need to frob with SLOP
  */
 
 extern void calibrate_delay(void) __init;
 
 static void __init check_cx686_slop(struct cpuinfo_x86 *c)
 {
+	unsigned long flags;
+	
 	if (Cx86_dir0_msb == 3) {
 		unsigned char ccr3, ccr5;
 
-		cli();
+		local_irq_save(flags);
 		ccr3 = getCx86(CX86_CCR3);
 		setCx86(CX86_CCR3, (ccr3 & 0x0f) | 0x10); /* enable MAPEN  */
 		ccr5 = getCx86(CX86_CCR5);
 		if (ccr5 & 2)
 			setCx86(CX86_CCR5, ccr5 & 0xfd);  /* reset SLOP */
 		setCx86(CX86_CCR3, ccr3);                 /* disable MAPEN */
-		sti();
+		local_irq_restore(flags);
 
 		if (ccr5 & 2) { /* possible wrong calibration done */
 			printk(KERN_INFO "Recalibrating delay loop with SLOP bit reset\n");
@@ -1258,8 +1490,16 @@ static void __init init_cyrix(struct cpuinfo_x86 *c)
 		break;
 
         case 5: /* 6x86MX/M II */
-		if (dir1 > 7) dir0_msn++;  /* M II */
-		else c->coma_bug = 1;      /* 6x86MX, it has the bug. */
+		if (dir1 > 7)
+		{
+			dir0_msn++;  /* M II */
+			/* Enable MMX extensions (App note 108) */
+			setCx86(CX86_CCR7, getCx86(CX86_CCR7)|1);
+		}
+		else
+		{
+			c->coma_bug = 1;      /* 6x86MX, it has the bug. */
+		}
 		tmp = (!(dir0_lsn & 7) || dir0_lsn & 1) ? 2 : 0;
 		Cx86_cb[tmp] = cyrix_model_mult2[dir0_lsn & 7];
 		p = Cx86_cb+tmp;
@@ -1291,6 +1531,248 @@ static void __init init_cyrix(struct cpuinfo_x86 *c)
 	if (p) strcat(buf, p);
 	return;
 }
+
+#ifdef CONFIG_X86_OOSTORE
+
+static u32 __init power2(u32 x)
+{
+	u32 s=1;
+	while(s<=x)
+		s<<=1;
+	return s>>=1;
+}
+
+/*
+ *	Set up an actual MCR
+ */
+ 
+static void __init winchip_mcr_insert(int reg, u32 base, u32 size, int key)
+{
+	u32 lo, hi;
+	
+	hi = base & ~0xFFF;
+	lo = ~(size-1);		/* Size is a power of 2 so this makes a mask */
+	lo &= ~0xFFF;		/* Remove the ctrl value bits */
+	lo |= key;		/* Attribute we wish to set */
+	wrmsr(reg+MSR_IDT_MCR0, lo, hi);
+	mtrr_centaur_report_mcr(reg, lo, hi);	/* Tell the mtrr driver */
+}
+
+/*
+ *	Figure what we can cover with MCR's
+ *
+ *	Shortcut: We know you can't put 4Gig of RAM on a winchip
+ */
+
+static u32 __init ramtop(void)		/* 16388 */
+{
+	int i;
+	u32 top = 0;
+	u32 clip = 0xFFFFFFFFUL;
+	
+	for (i = 0; i < e820.nr_map; i++) {
+		unsigned long start, end;
+
+		if (e820.map[i].addr > 0xFFFFFFFFUL)
+			continue;
+		/*
+		 *	Don't MCR over reserved space. Ignore the ISA hole
+		 *	we frob around that catastrophy already
+		 */
+		 			
+		if (e820.map[i].type == E820_RESERVED)
+		{
+			if(e820.map[i].addr >= 0x100000UL && e820.map[i].addr < clip)
+				clip = e820.map[i].addr;
+			continue;
+		}
+		start = e820.map[i].addr;
+		end = e820.map[i].addr + e820.map[i].size;
+		if (start >= end)
+			continue;
+		if (end > top)
+			top = end;
+	}
+	/* Everything below 'top' should be RAM except for the ISA hole.
+	   Because of the limited MCR's we want to map NV/ACPI into our
+	   MCR range for gunk in RAM 
+	   
+	   Clip might cause us to MCR insufficient RAM but that is an
+	   acceptable failure mode and should only bite obscure boxes with
+	   a VESA hole at 15Mb
+	   
+	   The second case Clip sometimes kicks in is when the EBDA is marked
+	   as reserved. Again we fail safe with reasonable results
+	*/
+	
+	if(top>clip)
+		top=clip;
+		
+	return top;
+}
+
+/*
+ *	Compute a set of MCR's to give maximum coverage
+ */
+
+static int __init winchip_mcr_compute(int nr, int key)
+{
+	u32 mem = ramtop();
+	u32 root = power2(mem);
+	u32 base = root;
+	u32 top = root;
+	u32 floor = 0;
+	int ct = 0;
+	
+	while(ct<nr)
+	{
+		u32 fspace = 0;
+
+		/*
+		 *	Find the largest block we will fill going upwards
+		 */
+
+		u32 high = power2(mem-top);	
+
+		/*
+		 *	Find the largest block we will fill going downwards
+		 */
+
+		u32 low = base/2;
+
+		/*
+		 *	Don't fill below 1Mb going downwards as there
+		 *	is an ISA hole in the way.
+		 */		
+		 
+		if(base <= 1024*1024)
+			low = 0;
+			
+		/*
+		 *	See how much space we could cover by filling below
+		 *	the ISA hole
+		 */
+		 
+		if(floor == 0)
+			fspace = 512*1024;
+		else if(floor ==512*1024)
+			fspace = 128*1024;
+
+		/* And forget ROM space */
+		
+		/*
+		 *	Now install the largest coverage we get
+		 */
+		 
+		if(fspace > high && fspace > low)
+		{
+			winchip_mcr_insert(ct, floor, fspace, key);
+			floor += fspace;
+		}
+		else if(high > low)
+		{
+			winchip_mcr_insert(ct, top, high, key);
+			top += high;
+		}
+		else if(low > 0)
+		{
+			base -= low;
+			winchip_mcr_insert(ct, base, low, key);
+		}
+		else break;
+		ct++;
+	}
+	/*
+	 *	We loaded ct values. We now need to set the mask. The caller
+	 *	must do this bit.
+	 */
+	 
+	return ct;
+}
+
+static void __init winchip_create_optimal_mcr(void)
+{
+	int i;
+	/*
+	 *	Allocate up to 6 mcrs to mark as much of ram as possible
+	 *	as write combining and weak write ordered.
+	 *
+	 *	To experiment with: Linux never uses stack operations for 
+	 *	mmio spaces so we could globally enable stack operation wc
+	 *
+	 *	Load the registers with type 31 - full write combining, all
+	 *	writes weakly ordered.
+	 */
+	int used = winchip_mcr_compute(6, 31);
+
+	/*
+	 *	Wipe unused MCRs
+	 */
+	 
+	for(i=used;i<8;i++)
+		wrmsr(MSR_IDT_MCR0+i, 0, 0);
+}
+
+static void __init winchip2_create_optimal_mcr(void)
+{
+	u32 lo, hi;
+	int i;
+
+	/*
+	 *	Allocate up to 6 mcrs to mark as much of ram as possible
+	 *	as write combining, weak store ordered.
+	 *
+	 *	Load the registers with type 25
+	 *		8	-	weak write ordering
+	 *		16	-	weak read ordering
+	 *		1	-	write combining
+	 */
+
+	int used = winchip_mcr_compute(6, 25);
+	
+	/*
+	 *	Mark the registers we are using.
+	 */
+	 
+	rdmsr(MSR_IDT_MCR_CTRL, lo, hi);
+	for(i=0;i<used;i++)
+		lo|=1<<(9+i);
+	wrmsr(MSR_IDT_MCR_CTRL, lo, hi);
+	
+	/*
+	 *	Wipe unused MCRs
+	 */
+	 
+	for(i=used;i<8;i++)
+		wrmsr(MSR_IDT_MCR0+i, 0, 0);
+}
+
+/*
+ *	Handle the MCR key on the Winchip 2.
+ */
+
+static void __init winchip2_unprotect_mcr(void)
+{
+	u32 lo, hi;
+	u32 key;
+	
+	rdmsr(MSR_IDT_MCR_CTRL, lo, hi);
+	lo&=~0x1C0;	/* blank bits 8-6 */
+	key = (lo>>17) & 7;
+	lo |= key<<6;	/* replace with unlock key */
+	wrmsr(MSR_IDT_MCR_CTRL, lo, hi);
+}
+
+static void __init winchip2_protect_mcr(void)
+{
+	u32 lo, hi;
+	
+	rdmsr(MSR_IDT_MCR_CTRL, lo, hi);
+	lo&=~0x1C0;	/* blank bits 8-6 */
+	wrmsr(MSR_IDT_MCR_CTRL, lo, hi);
+}
+	
+#endif
 
 static void __init init_centaur(struct cpuinfo_x86 *c)
 {
@@ -1333,8 +1815,21 @@ static void __init init_centaur(struct cpuinfo_x86 *c)
 				name="C6";
 				fcr_set=ECX8|DSMC|EDCTLB|EMMX|ERETSTK;
 				fcr_clr=DPDC;
-				printk("Disabling bugged TSC.\n");
+				printk(KERN_NOTICE "Disabling bugged TSC.\n");
 				clear_bit(X86_FEATURE_TSC, &c->x86_capability);
+#ifdef CONFIG_X86_OOSTORE
+				winchip_create_optimal_mcr();
+				/* Enable
+					write combining on non-stack, non-string
+					write combining on string, all types
+					weak write ordering 
+					
+				   The C6 original lacks weak read order 
+				   
+				   Note 0x120 is write only on Winchip 1 */
+				   
+				wrmsr(MSR_IDT_MCR_CTRL, 0x01F0001F, 0);
+#endif				
 				break;
 			case 8:
 				switch(c->x86_mask) {
@@ -1350,11 +1845,37 @@ static void __init init_centaur(struct cpuinfo_x86 *c)
 				}
 				fcr_set=ECX8|DSMC|DTLOCK|EMMX|EBRPRED|ERETSTK|E2MMX|EAMD3D;
 				fcr_clr=DPDC;
+#ifdef CONFIG_X86_OOSTORE
+				winchip2_unprotect_mcr();
+				winchip2_create_optimal_mcr();
+				rdmsr(MSR_IDT_MCR_CTRL, lo, hi);
+				/* Enable
+					write combining on non-stack, non-string
+					write combining on string, all types
+					weak write ordering 
+				*/
+				lo|=31;				
+				wrmsr(MSR_IDT_MCR_CTRL, lo, hi);
+				winchip2_protect_mcr();
+#endif
 				break;
 			case 9:
 				name="3";
 				fcr_set=ECX8|DSMC|DTLOCK|EMMX|EBRPRED|ERETSTK|E2MMX|EAMD3D;
 				fcr_clr=DPDC;
+#ifdef CONFIG_X86_OOSTORE
+				winchip2_unprotect_mcr();
+				winchip2_create_optimal_mcr();
+				rdmsr(MSR_IDT_MCR_CTRL, lo, hi);
+				/* Enable
+					write combining on non-stack, non-string
+					write combining on string, all types
+					weak write ordering 
+				*/
+				lo|=31;				
+				wrmsr(MSR_IDT_MCR_CTRL, lo, hi);
+				winchip2_protect_mcr();
+#endif
 				break;
 			case 10:
 				name="4";
@@ -1364,16 +1885,14 @@ static void __init init_centaur(struct cpuinfo_x86 *c)
 				name="??";
 			}
 
-			/* get FCR  */
-			rdmsr(0x107, lo, hi);
-
+			rdmsr(MSR_IDT_FCR1, lo, hi);
 			newlo=(lo|fcr_set) & (~fcr_clr);
 
 			if (newlo!=lo) {
-				printk("Centaur FCR was 0x%X now 0x%X\n", lo, newlo );
-				wrmsr(0x107, newlo, hi );
+				printk(KERN_INFO "Centaur FCR was 0x%X now 0x%X\n", lo, newlo );
+				wrmsr(MSR_IDT_FCR1, newlo, hi );
 			} else {
-				printk("Centaur FCR is 0x%X\n",lo);
+				printk(KERN_INFO "Centaur FCR is 0x%X\n",lo);
 			}
 			/* Emulate MTRRs using Centaur's MCR. */
 			set_bit(X86_FEATURE_CENTAUR_MCR, &c->x86_capability);
@@ -1390,19 +1909,18 @@ static void __init init_centaur(struct cpuinfo_x86 *c)
 				c->x86_cache_size = (cc>>24)+(dd>>24);
 			}
 			sprintf( c->x86_model_id, "WinChip %s", name );
+			mcheck_init(c);
 			break;
 
 		case 6:
 			switch (c->x86_model) {
-				case 6:	/* Cyrix III */
-					rdmsr (0x1107, lo, hi);
+				case 6 ... 8:		/* Cyrix III family */
+					rdmsr (MSR_VIA_FCR, lo, hi);
 					lo |= (1<<1 | 1<<7);	/* Report CX8 & enable PGE */
-					wrmsr (0x1107, lo, hi);
+					wrmsr (MSR_VIA_FCR, lo, hi);
 
 					set_bit(X86_FEATURE_CX8, &c->x86_capability);
-					rdmsr (0x80000001, lo, hi);
-					if (hi & (1<<31))
-						set_bit(X86_FEATURE_3DNOW, &c->x86_capability);
+					set_bit(X86_FEATURE_3DNOW, &c->x86_capability);
 
 					get_model_name(c);
 					display_cacheinfo(c);
@@ -1410,7 +1928,6 @@ static void __init init_centaur(struct cpuinfo_x86 *c)
 			}
 			break;
 	}
-
 }
 
 
@@ -1428,7 +1945,7 @@ static void __init init_transmeta(struct cpuinfo_x86 *c)
 	max = cpuid_eax(0x80860000);
 	if ( max >= 0x80860001 ) {
 		cpuid(0x80860001, &dummy, &cpu_rev, &cpu_freq, &cpu_flags); 
-		printk("CPU: Processor revision %u.%u.%u.%u, %u MHz\n",
+		printk(KERN_INFO "CPU: Processor revision %u.%u.%u.%u, %u MHz\n",
 		       (cpu_rev >> 24) & 0xff,
 		       (cpu_rev >> 16) & 0xff,
 		       (cpu_rev >> 8) & 0xff,
@@ -1437,7 +1954,7 @@ static void __init init_transmeta(struct cpuinfo_x86 *c)
 	}
 	if ( max >= 0x80860002 ) {
 		cpuid(0x80860002, &dummy, &cms_rev1, &cms_rev2, &dummy);
-		printk("CPU: Code Morphing Software revision %u.%u.%u-%u-%u\n",
+		printk(KERN_INFO "CPU: Code Morphing Software revision %u.%u.%u-%u-%u\n",
 		       (cms_rev1 >> 24) & 0xff,
 		       (cms_rev1 >> 16) & 0xff,
 		       (cms_rev1 >> 8) & 0xff,
@@ -1466,7 +1983,7 @@ static void __init init_transmeta(struct cpuinfo_x86 *c)
 		      (void *)&cpu_info[56],
 		      (void *)&cpu_info[60]);
 		cpu_info[64] = '\0';
-		printk("CPU: %s\n", cpu_info);
+		printk(KERN_INFO "CPU: %s\n", cpu_info);
 	}
 
 	/* Unhide possibly hidden capability flags */
@@ -1476,6 +1993,31 @@ static void __init init_transmeta(struct cpuinfo_x86 *c)
 	wrmsr(0x80860004, cap_mask, uk);
 }
 
+
+static void __init init_rise(struct cpuinfo_x86 *c)
+{
+	printk("CPU: Rise iDragon");
+	if (c->x86_model > 2)
+		printk(" II");
+	printk("\n");
+
+	/* Unhide possibly hidden capability flags
+	   The mp6 iDragon family don't have MSRs.
+	   We switch on extra features with this cpuid weirdness: */
+	__asm__ (
+		"movl $0x6363452a, %%eax\n\t"
+		"movl $0x3231206c, %%ecx\n\t"
+		"movl $0x2a32313a, %%edx\n\t"
+		"cpuid\n\t"
+		"movl $0x63634523, %%eax\n\t"
+		"movl $0x32315f6c, %%ecx\n\t"
+		"movl $0x2333313a, %%edx\n\t"
+		"cpuid\n\t" : : : "eax", "ebx", "ecx", "edx"
+	);
+	set_bit(X86_FEATURE_CX8, &c->x86_capability);
+}
+
+
 extern void trap_init_f00f_bug(void);
 
 static void __init init_intel(struct cpuinfo_x86 *c)
@@ -1483,7 +2025,6 @@ static void __init init_intel(struct cpuinfo_x86 *c)
 #ifndef CONFIG_M686
 	static int f00f_workaround_enabled = 0;
 #endif
-	extern void mcheck_init(struct cpuinfo_x86 *c);
 	char *p = NULL;
 	unsigned int l1i = 0, l1d = 0, l2 = 0, l3 = 0; /* Cache sizes */
 
@@ -1498,7 +2039,7 @@ static void __init init_intel(struct cpuinfo_x86 *c)
 		c->f00f_bug = 1;
 		if ( !f00f_workaround_enabled ) {
 			trap_init_f00f_bug();
-			printk(KERN_INFO "Intel Pentium with F0 0F bug - workaround enabled.\n");
+			printk(KERN_NOTICE "Intel Pentium with F0 0F bug - workaround enabled.\n");
 			f00f_workaround_enabled = 1;
 		}
 	}
@@ -1567,12 +2108,10 @@ static void __init init_intel(struct cpuinfo_x86 *c)
 				case 4:
 					if ( c->x86 > 6 && dl ) {
 						/* P4 family */
-						if ( dl ) {
-							/* L3 cache */
-							cs = 128 << (dl-1);
-							l3 += cs;
-							break;
-						}
+						/* L3 cache */
+						cs = 128 << (dl-1);
+						l3 += cs;
+						break;
 					}
 					/* else same as 8 - fall through */
 				case 8:
@@ -1608,12 +2147,12 @@ static void __init init_intel(struct cpuinfo_x86 *c)
 			}
 		}
 		if ( l1i || l1d )
-			printk("CPU: L1 I cache: %dK, L1 D cache: %dK\n",
+			printk(KERN_INFO "CPU: L1 I cache: %dK, L1 D cache: %dK\n",
 			       l1i, l1d);
 		if ( l2 )
-			printk("CPU: L2 cache: %dK\n", l2);
+			printk(KERN_INFO "CPU: L2 cache: %dK\n", l2);
 		if ( l3 )
-			printk("CPU: L3 cache: %dK\n", l3);
+			printk(KERN_INFO "CPU: L3 cache: %dK\n", l3);
 
 		/*
 		 * This assumes the L3 cache is shared; it typically lives in
@@ -1729,8 +2268,8 @@ static struct cpu_model_info cpu_models[] __initdata = {
 	  { "Nx586", NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	    NULL, NULL, NULL, NULL, NULL, NULL, NULL }},
 	{ X86_VENDOR_RISE,	5,
-	  { "mP6", "mP6", NULL, NULL, NULL, NULL, NULL,
-	    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL }},
+	  { "iDragon", NULL, "iDragon", NULL, NULL, NULL, NULL,
+	    NULL, "iDragon II", "iDragon II", NULL, NULL, NULL, NULL, NULL, NULL }},
 };
 
 /* Look up CPU names by table lookup. */
@@ -1780,21 +2319,31 @@ static void __init squash_the_stupid_serial_number(struct cpuinfo_x86 *c)
 	    disable_x86_serial_nr ) {
 		/* Disable processor serial number */
 		unsigned long lo,hi;
-		rdmsr(0x119,lo,hi);
+		rdmsr(MSR_IA32_BBL_CR_CTL,lo,hi);
 		lo |= 0x200000;
-		wrmsr(0x119,lo,hi);
-		printk(KERN_INFO "CPU serial number disabled.\n");
+		wrmsr(MSR_IA32_BBL_CR_CTL,lo,hi);
+		printk(KERN_NOTICE "CPU serial number disabled.\n");
 		clear_bit(X86_FEATURE_PN, &c->x86_capability);
+
+		/* Disabling the serial number may affect the cpuid level */
+		c->cpuid_level = cpuid_eax(0);
 	}
 }
 
 
-int __init x86_serial_nr_setup(char *s)
+static int __init x86_serial_nr_setup(char *s)
 {
 	disable_x86_serial_nr = 0;
 	return 1;
 }
 __setup("serialnumber", x86_serial_nr_setup);
+
+static int __init x86_fxsr_setup(char * s)
+{
+	disable_x86_fxsr = 1;
+	return 1;
+}
+__setup("nofxsr", x86_fxsr_setup);
 
 
 /* Standard macro to see if a specific flag is changeable */
@@ -1865,8 +2414,35 @@ static int __init id_and_try_enable_cpuid(struct cpuinfo_x86 *c)
 
 	/* Detect Cyrix with disabled CPUID */
 	if ( c->x86 == 4 && test_cyrix_52div() ) {
+		unsigned char dir0, dir1;
+		
 		strcpy(c->x86_vendor_id, "CyrixInstead");
-	}
+	        c->x86_vendor = X86_VENDOR_CYRIX;
+	        
+	        /* Actually enable cpuid on the older cyrix */
+	    
+	    	/* Retrieve CPU revisions */
+	    	
+		do_cyrix_devid(&dir0, &dir1);
+
+		dir0>>=4;		
+		
+		/* Check it is an affected model */
+		
+   	        if (dir0 == 5 || dir0 == 3)
+   	        {
+			unsigned char ccr3, ccr4;
+			unsigned long flags;
+			printk(KERN_INFO "Enabling CPUID on Cyrix processor.\n");
+			local_irq_save(flags);
+			ccr3 = getCx86(CX86_CCR3);
+			setCx86(CX86_CCR3, (ccr3 & 0x0f) | 0x10); /* enable MAPEN  */
+			ccr4 = getCx86(CX86_CCR4);
+			setCx86(CX86_CCR4, ccr4 | 0x80);          /* enable cpuid  */
+			setCx86(CX86_CCR3, ccr3);                 /* disable MAPEN */
+			local_irq_restore(flags);
+		}
+	} else
 
 	/* Detect NexGen with old hypercode */
 	if ( deep_magic_nexgen_probe() ) {
@@ -1908,7 +2484,6 @@ void __init identify_cpu(struct cpuinfo_x86 *c)
 		      (int *)&c->x86_vendor_id[4]);
 		
 		get_cpu_vendor(c);
-
 		/* Initialize the standard set of capabilities */
 		/* Note that the vendor-specific code below might override */
 
@@ -1941,7 +2516,7 @@ void __init identify_cpu(struct cpuinfo_x86 *c)
 		}
 	}
 
-	printk("CPU: Before vendor init, caps: %08x %08x %08x, vendor = %d\n",
+	printk(KERN_DEBUG "CPU: Before vendor init, caps: %08x %08x %08x, vendor = %d\n",
 	       c->x86_capability[0],
 	       c->x86_capability[1],
 	       c->x86_capability[2],
@@ -1961,6 +2536,15 @@ void __init identify_cpu(struct cpuinfo_x86 *c)
 	case X86_VENDOR_UNKNOWN:
 	default:
 		/* Not much we can do here... */
+		/* Check if at least it has cpuid */
+		if (c->cpuid_level == -1)
+		{
+			/* No cpuid. It must be an ancient CPU */
+			if (c->x86 == 4)
+				strcpy(c->x86_model_id, "486");
+			else if (c->x86 == 3)
+				strcpy(c->x86_model_id, "386");
+		}
 		break;
 
 	case X86_VENDOR_CYRIX:
@@ -1986,9 +2570,13 @@ void __init identify_cpu(struct cpuinfo_x86 *c)
 	case X86_VENDOR_TRANSMETA:
 		init_transmeta(c);
 		break;
+
+	case X86_VENDOR_RISE:
+		init_rise(c);
+		break;
 	}
 	
-	printk("CPU: After vendor init, caps: %08x %08x %08x %08x\n",
+	printk(KERN_DEBUG "CPU: After vendor init, caps: %08x %08x %08x %08x\n",
 	       c->x86_capability[0],
 	       c->x86_capability[1],
 	       c->x86_capability[2],
@@ -2000,10 +2588,16 @@ void __init identify_cpu(struct cpuinfo_x86 *c)
 	 */
 
 	/* TSC disabled? */
-#ifdef CONFIG_TSC
+#ifndef CONFIG_X86_TSC
 	if ( tsc_disable )
 		clear_bit(X86_FEATURE_TSC, &c->x86_capability);
 #endif
+
+	/* FXSR disabled? */
+	if (disable_x86_fxsr) {
+		clear_bit(X86_FEATURE_FXSR, &c->x86_capability);
+		clear_bit(X86_FEATURE_XMM, &c->x86_capability);
+	}
 
 	/* Disable the PN if appropriate */
 	squash_the_stupid_serial_number(c);
@@ -2022,7 +2616,7 @@ void __init identify_cpu(struct cpuinfo_x86 *c)
 
 	/* Now the feature flags better reflect actual CPU features! */
 
-	printk("CPU: After generic, caps: %08x %08x %08x %08x\n",
+	printk(KERN_DEBUG "CPU:     After generic, caps: %08x %08x %08x %08x\n",
 	       c->x86_capability[0],
 	       c->x86_capability[1],
 	       c->x86_capability[2],
@@ -2040,7 +2634,7 @@ void __init identify_cpu(struct cpuinfo_x86 *c)
 			boot_cpu_data.x86_capability[i] &= c->x86_capability[i];
 	}
 
-	printk("CPU: Common caps: %08x %08x %08x %08x\n",
+	printk(KERN_DEBUG "CPU:             Common caps: %08x %08x %08x %08x\n",
 	       boot_cpu_data.x86_capability[0],
 	       boot_cpu_data.x86_capability[1],
 	       boot_cpu_data.x86_capability[2],
@@ -2090,11 +2684,8 @@ void __init print_cpu_info(struct cpuinfo_x86 *c)
 /*
  *	Get CPU information for use by the procfs.
  */
-
-int get_cpuinfo(char * buffer)
+static int show_cpuinfo(struct seq_file *m, void *v)
 {
-	char *p = buffer;
-
 	/* 
 	 * These flag bits must match the definitions in <asm/cpufeature.h>.
 	 * NULL means this bit is undefined or reserved; either way it doesn't
@@ -2128,73 +2719,90 @@ int get_cpuinfo(char * buffer)
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	};
-	struct cpuinfo_x86 *c = cpu_data;
-	int i, n;
+	struct cpuinfo_x86 *c = v;
+	int i, n = c - cpu_data;
+	int fpu_exception;
 
-	for (n = 0; n < NR_CPUS; n++, c++) {
-		int fpu_exception;
 #ifdef CONFIG_SMP
-		if (!(cpu_online_map & (1<<n)))
-			continue;
+	if (!(cpu_online_map & (1<<n)))
+		return 0;
 #endif
-		p += sprintf(p,"processor\t: %d\n"
-			"vendor_id\t: %s\n"
-			"cpu family\t: %d\n"
-			"model\t\t: %d\n"
-			"model name\t: %s\n",
-			n,
-			c->x86_vendor_id[0] ? c->x86_vendor_id : "unknown",
-			c->x86,
-			c->x86_model,
-			c->x86_model_id[0] ? c->x86_model_id : "unknown");
+	seq_printf(m, "processor\t: %d\n"
+		"vendor_id\t: %s\n"
+		"cpu family\t: %d\n"
+		"model\t\t: %d\n"
+		"model name\t: %s\n",
+		n,
+		c->x86_vendor_id[0] ? c->x86_vendor_id : "unknown",
+		c->x86,
+		c->x86_model,
+		c->x86_model_id[0] ? c->x86_model_id : "unknown");
 
-		if (c->x86_mask || c->cpuid_level >= 0)
-			p += sprintf(p, "stepping\t: %d\n", c->x86_mask);
-		else
-			p += sprintf(p, "stepping\t: unknown\n");
+	if (c->x86_mask || c->cpuid_level >= 0)
+		seq_printf(m, "stepping\t: %d\n", c->x86_mask);
+	else
+		seq_printf(m, "stepping\t: unknown\n");
 
-		if ( test_bit(X86_FEATURE_TSC, &c->x86_capability) ) {
-			p += sprintf(p, "cpu MHz\t\t: %lu.%03lu\n",
-				cpu_khz / 1000, (cpu_khz % 1000));
-		}
-
-		/* Cache size */
-		if (c->x86_cache_size >= 0)
-			p += sprintf(p, "cache size\t: %d KB\n", c->x86_cache_size);
-		
-		/* We use exception 16 if we have hardware math and we've either seen it or the CPU claims it is internal */
-		fpu_exception = c->hard_math && (ignore_irq13 || cpu_has_fpu);
-		p += sprintf(p, "fdiv_bug\t: %s\n"
-			        "hlt_bug\t\t: %s\n"
-			        "f00f_bug\t: %s\n"
-			        "coma_bug\t: %s\n"
-			        "fpu\t\t: %s\n"
-			        "fpu_exception\t: %s\n"
-			        "cpuid level\t: %d\n"
-			        "wp\t\t: %s\n"
-			        "flags\t\t:",
-			     c->fdiv_bug ? "yes" : "no",
-			     c->hlt_works_ok ? "no" : "yes",
-			     c->f00f_bug ? "yes" : "no",
-			     c->coma_bug ? "yes" : "no",
-			     c->hard_math ? "yes" : "no",
-			     fpu_exception ? "yes" : "no",
-			     c->cpuid_level,
-			     c->wp_works_ok ? "yes" : "no");
-
-		for ( i = 0 ; i < 32*NCAPINTS ; i++ )
-			if ( test_bit(i, &c->x86_capability) &&
-			     x86_cap_flags[i] != NULL )
-				p += sprintf(p, " %s", x86_cap_flags[i]);
-
-		p += sprintf(p, "\nbogomips\t: %lu.%02lu\n\n",
-			     c->loops_per_jiffy/(500000/HZ),
-			     (c->loops_per_jiffy/(5000/HZ)) % 100);
+	if ( test_bit(X86_FEATURE_TSC, &c->x86_capability) ) {
+		seq_printf(m, "cpu MHz\t\t: %lu.%03lu\n",
+			cpu_khz / 1000, (cpu_khz % 1000));
 	}
-	return p - buffer;
+
+	/* Cache size */
+	if (c->x86_cache_size >= 0)
+		seq_printf(m, "cache size\t: %d KB\n", c->x86_cache_size);
+	
+	/* We use exception 16 if we have hardware math and we've either seen it or the CPU claims it is internal */
+	fpu_exception = c->hard_math && (ignore_irq13 || cpu_has_fpu);
+	seq_printf(m, "fdiv_bug\t: %s\n"
+			"hlt_bug\t\t: %s\n"
+			"f00f_bug\t: %s\n"
+			"coma_bug\t: %s\n"
+			"fpu\t\t: %s\n"
+			"fpu_exception\t: %s\n"
+			"cpuid level\t: %d\n"
+			"wp\t\t: %s\n"
+			"flags\t\t:",
+		     c->fdiv_bug ? "yes" : "no",
+		     c->hlt_works_ok ? "no" : "yes",
+		     c->f00f_bug ? "yes" : "no",
+		     c->coma_bug ? "yes" : "no",
+		     c->hard_math ? "yes" : "no",
+		     fpu_exception ? "yes" : "no",
+		     c->cpuid_level,
+		     c->wp_works_ok ? "yes" : "no");
+
+	for ( i = 0 ; i < 32*NCAPINTS ; i++ )
+		if ( test_bit(i, &c->x86_capability) &&
+		     x86_cap_flags[i] != NULL )
+			seq_printf(m, " %s", x86_cap_flags[i]);
+
+	seq_printf(m, "\nbogomips\t: %lu.%02lu\n\n",
+		     c->loops_per_jiffy/(500000/HZ),
+		     (c->loops_per_jiffy/(5000/HZ)) % 100);
+	return 0;
 }
 
-static unsigned long cpu_initialized __initdata = 0;
+static void *c_start(struct seq_file *m, loff_t *pos)
+{
+	return *pos < NR_CPUS ? cpu_data + *pos : NULL;
+}
+static void *c_next(struct seq_file *m, void *v, loff_t *pos)
+{
+	++*pos;
+	return c_start(m, pos);
+}
+static void c_stop(struct seq_file *m, void *v)
+{
+}
+struct seq_operations cpuinfo_op = {
+	start:	c_start,
+	next:	c_next,
+	stop:	c_stop,
+	show:	show_cpuinfo,
+};
+
+unsigned long cpu_initialized __initdata = 0;
 
 /*
  * cpu_init() initializes state that is per-CPU. Some data is already
@@ -2208,16 +2816,16 @@ void __init cpu_init (void)
 	struct tss_struct * t = &init_tss[nr];
 
 	if (test_and_set_bit(nr, &cpu_initialized)) {
-		printk("CPU#%d already initialized!\n", nr);
+		printk(KERN_WARNING "CPU#%d already initialized!\n", nr);
 		for (;;) __sti();
 	}
-	printk("Initializing CPU#%d\n", nr);
+	printk(KERN_INFO "Initializing CPU#%d\n", nr);
 
 	if (cpu_has_vme || cpu_has_tsc || cpu_has_de)
 		clear_in_cr4(X86_CR4_VME|X86_CR4_PVI|X86_CR4_TSD|X86_CR4_DE);
 #ifndef CONFIG_X86_TSC
 	if (tsc_disable && cpu_has_tsc) {
-		printk("Disabling TSC...\n");
+		printk(KERN_NOTICE "Disabling TSC...\n");
 		/**** FIX-HPA: DOES THIS REALLY BELONG HERE? ****/
 		clear_bit(X86_FEATURE_TSC, boot_cpu_data.x86_capability);
 		set_in_cr4(X86_CR4_TSD);
@@ -2265,6 +2873,53 @@ void __init cpu_init (void)
 	stts();
 }
 
+/*
+ *	Early probe support logic for ppro memory erratum #50
+ *
+ *	This is called before we do cpu ident work
+ */
+ 
+int __init ppro_with_ram_bug(void)
+{
+	char vendor_id[16];
+	int ident;
+
+	/* Must have CPUID */
+	if(!have_cpuid_p())
+		return 0;
+	if(cpuid_eax(0)<1)
+		return 0;
+	
+	/* Must be Intel */
+	cpuid(0, &ident, 
+		(int *)&vendor_id[0],
+		(int *)&vendor_id[8],
+		(int *)&vendor_id[4]);
+	
+	if(memcmp(vendor_id, "IntelInside", 12))
+		return 0;
+	
+	ident = cpuid_eax(1);
+
+	/* Model 6 */
+
+	if(((ident>>8)&15)!=6)
+		return 0;
+	
+	/* Pentium Pro */
+
+	if(((ident>>4)&15)!=1)
+		return 0;
+	
+	if((ident&15) < 8)
+	{
+		printk(KERN_INFO "Pentium Pro with Errata#50 detected. Taking evasive action.\n");
+		return 1;
+	}
+	printk(KERN_INFO "Your Pentium Pro seems ok.\n");
+	return 0;
+}
+	
 /*
  * Local Variables:
  * mode:c

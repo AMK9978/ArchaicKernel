@@ -24,7 +24,7 @@
 #include <linux/nfs_fs.h>
 #include <linux/nfs_mount.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/pagemap.h>
 #include <linux/lockd/bind.h>
 #include <linux/smp_lock.h>
@@ -41,6 +41,7 @@ static int  nfs_file_flush(struct file *);
 static int  nfs_fsync(struct file *, struct dentry *dentry, int datasync);
 
 struct file_operations nfs_file_operations = {
+	llseek:		generic_file_llseek,
 	read:		nfs_file_read,
 	write:		nfs_file_write,
 	mmap:		nfs_file_mmap,
@@ -154,16 +155,15 @@ nfs_fsync(struct file *file, struct dentry *dentry, int datasync)
  */
 static int nfs_prepare_write(struct file *file, struct page *page, unsigned offset, unsigned to)
 {
-	kmap(page);
 	return nfs_flush_incompatible(file, page);
 }
+
 static int nfs_commit_write(struct file *file, struct page *page, unsigned offset, unsigned to)
 {
 	long status;
 	loff_t pos = ((loff_t)page->index<<PAGE_CACHE_SHIFT) + to;
 	struct inode *inode = page->mapping->host;
 
-	kunmap(page);
 	lock_kernel();
 	status = nfs_updatepage(file, page, offset, to-offset);
 	unlock_kernel();
@@ -264,7 +264,7 @@ nfs_lock(struct file *filp, int cmd, struct file_lock *fl)
 
 	/* Fake OK code if mounted without NLM support */
 	if (NFS_SERVER(inode)->flags & NFS_MOUNT_NONLM) {
-		if (cmd == F_GETLK)
+		if (IS_GETLK(cmd))
 			status = LOCK_USE_CLNT;
 		goto out_ok;
 	}
@@ -283,27 +283,34 @@ nfs_lock(struct file *filp, int cmd, struct file_lock *fl)
 	 * Flush all pending writes before doing anything
 	 * with locks..
 	 */
-	down(&filp->f_dentry->d_inode->i_sem);
+	filemap_fdatasync(inode->i_mapping);
+	down(&inode->i_sem);
 	status = nfs_wb_all(inode);
-	up(&filp->f_dentry->d_inode->i_sem);
+	up(&inode->i_sem);
+	filemap_fdatawait(inode->i_mapping);
 	if (status < 0)
 		return status;
 
-	if ((status = nlmclnt_proc(inode, cmd, fl)) < 0)
+	lock_kernel();
+	status = nlmclnt_proc(inode, cmd, fl);
+	unlock_kernel();
+	if (status < 0)
 		return status;
-	else
-		status = 0;
+	
+	status = 0;
 
 	/*
 	 * Make sure we clear the cache whenever we try to get the lock.
 	 * This makes locking act as a cache coherency point.
 	 */
  out_ok:
-	if ((cmd == F_SETLK || cmd == F_SETLKW) && fl->fl_type != F_UNLCK) {
-		down(&filp->f_dentry->d_inode->i_sem);
+	if ((IS_SETLK(cmd) || IS_SETLKW(cmd)) && fl->fl_type != F_UNLCK) {
+		filemap_fdatasync(inode->i_mapping);
+		down(&inode->i_sem);
 		nfs_wb_all(inode);      /* we may have slept */
+		up(&inode->i_sem);
+		filemap_fdatawait(inode->i_mapping);
 		nfs_zap_caches(inode);
-		up(&filp->f_dentry->d_inode->i_sem);
 	}
 	return status;
 }

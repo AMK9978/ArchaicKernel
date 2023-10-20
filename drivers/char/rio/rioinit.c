@@ -36,7 +36,7 @@ static char *_rioinit_c_sccs_ = "@(#)rioinit.c	1.3";
 #define __NO_VERSION__
 #include <linux/config.h>
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
 #include <asm/io.h>
 #include <asm/system.h>
@@ -1446,7 +1446,7 @@ struct rio_info	* p;
 				}
 				RIODefaultName(p, HostP, rup);
 			}
-			HostP->UnixRups[rup].RupLock = -1;
+			HostP->UnixRups[rup].RupLock = SPIN_LOCK_UNLOCKED;
 		}
 	}
 }

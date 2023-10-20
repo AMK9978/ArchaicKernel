@@ -1,4 +1,4 @@
-/* $Id: sys_sunos.c,v 1.130 2000/08/12 13:25:41 davem Exp $
+/* $Id: sys_sunos.c,v 1.135 2001/08/13 14:40:10 davem Exp $
  * sys_sunos.c: SunOS specific syscall compatibility support.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -28,7 +28,7 @@
 #include <linux/utsname.h>
 #include <linux/major.h>
 #include <linux/stat.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/pagemap.h>
 #include <linux/errno.h>
 #include <linux/smp.h>
@@ -116,9 +116,9 @@ asmlinkage unsigned long sunos_mmap(unsigned long addr, unsigned long len,
 	}
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	retval = do_mmap(file, addr, len, prot, flags, off);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 	if(!ret_type)
 		retval = ((retval < PAGE_OFFSET) ? 0 : retval);
 
@@ -145,7 +145,7 @@ asmlinkage int sunos_brk(unsigned long brk)
 	unsigned long rlim;
 	unsigned long newbrk, oldbrk;
 
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	if(ARCH_SUN4C_SUN4) {
 		if(brk >= 0x20000000 && brk < 0xe0000000) {
 			goto out;
@@ -208,7 +208,7 @@ asmlinkage int sunos_brk(unsigned long brk)
 	do_brk(oldbrk, newbrk-oldbrk);
 	retval = 0;
 out:
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 	return retval;
 }
 
@@ -322,7 +322,7 @@ struct sunos_dirent_callback {
 #define ROUND_UP(x) (((x)+sizeof(long)-1) & ~(sizeof(long)-1))
 
 static int sunos_filldir(void * __buf, const char * name, int namlen,
-			 off_t offset, ino_t ino, unsigned int d_type)
+			 loff_t offset, ino_t ino, unsigned int d_type)
 {
 	struct sunos_dirent * dirent;
 	struct sunos_dirent_callback * buf = (struct sunos_dirent_callback *) __buf;
@@ -403,7 +403,7 @@ struct sunos_direntry_callback {
 };
 
 static int sunos_filldirentry(void * __buf, const char * name, int namlen,
-			      off_t offset, ino_t ino, unsigned int d_type)
+			      loff_t offset, ino_t ino, unsigned int d_type)
 {
 	struct sunos_direntry * dirent;
 	struct sunos_direntry_callback * buf = (struct sunos_direntry_callback *) __buf;
@@ -620,8 +620,6 @@ struct sunos_nfs_mount_args {
 };
 
 
-extern dev_t get_unnamed_dev(void);
-extern void put_unnamed_dev(dev_t);
 extern asmlinkage int sys_connect(int fd, struct sockaddr *uservaddr, int addrlen);
 extern asmlinkage int sys_socket(int family, int type, int protocol);
 extern asmlinkage int sys_bind(int fd, struct sockaddr *umyaddr, int addrlen);
@@ -749,7 +747,7 @@ static int sunos_nfs_mount(char *dir_name, int linux_flags, void *data)
 asmlinkage int
 sunos_mount(char *type, char *dir, int flags, void *data)
 {
-	int linux_flags = MS_MGC_MSK; /* new semantics */
+	int linux_flags = 0;
 	int ret = -EINVAL;
 	char *dev_fname = 0;
 	char *dir_page, *type_page;
@@ -834,7 +832,6 @@ asmlinkage int sunos_setpgrp(pid_t pid, pid_t pgid)
 }
 
 /* So stupid... */
-extern asmlinkage int sys_wait4(pid_t, unsigned int *, int, struct rusage *);
 asmlinkage int sunos_wait4(pid_t pid, unsigned int *stat_addr, int options, struct rusage *ru)
 {
 	int ret;

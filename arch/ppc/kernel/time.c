@@ -1,5 +1,7 @@
 /*
- * $Id: time.c,v 1.57 1999/10/21 03:08:16 cort Exp $
+ * BK Id: SCCS/s.time.c 1.26 10/05/01 08:29:42 trini
+ */
+/*
  * Common time routines among all ppc machines.
  *
  * Written by Cort Dougan (cort@cs.nmt.edu) to merge
@@ -50,6 +52,7 @@
 #include <linux/param.h>
 #include <linux/string.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/timex.h>
 #include <linux/kernel_stat.h>
@@ -67,7 +70,9 @@
 
 #include <asm/time.h>
 
-void smp_local_timer_interrupt(struct pt_regs *);
+unsigned long disarm_decr[NR_CPUS];
+
+extern int do_sys_settimeofday(struct timeval *tv, struct timezone *tz);
 
 /* keep track of when we need to update the rtc */
 time_t last_rtc_update;
@@ -84,6 +89,10 @@ extern unsigned long wall_jiffies;
 
 static long time_offset;
 
+spinlock_t rtc_lock = SPIN_LOCK_UNLOCKED;
+
+EXPORT_SYMBOL(rtc_lock);
+
 /* Timer interrupt helper function */
 static inline int tb_delta(unsigned *jiffy_stamp) {
 	int delta;
@@ -97,6 +106,36 @@ static inline int tb_delta(unsigned *jiffy_stamp) {
 	return delta;
 }
 
+extern unsigned long prof_cpu_mask;
+extern unsigned int * prof_buffer;
+extern unsigned long prof_len;
+extern unsigned long prof_shift;
+extern char _stext;
+
+static inline void ppc_do_profile (unsigned long nip)
+{
+	if (!prof_buffer)
+		return;
+
+	/*
+	 * Only measure the CPUs specified by /proc/irq/prof_cpu_mask.
+	 * (default is all CPUs.)
+	 */
+	if (!((1<<smp_processor_id()) & prof_cpu_mask))
+		return;
+
+	nip -= (unsigned long) &_stext;
+	nip >>= prof_shift;
+	/*
+	 * Don't ignore out-of-bounds EIP values silently,
+	 * put them into the last histogram slot, so if
+	 * present, they will show up as a sharp peak.
+	 */
+	if (nip > prof_len-1)
+		nip = prof_len-1;
+	atomic_inc((atomic_t *)&prof_buffer[nip]);
+}
+
 /*
  * timer_interrupt - gets called when the decrementer overflows,
  * with interrupts disabled.
@@ -107,12 +146,20 @@ int timer_interrupt(struct pt_regs * regs)
 	int next_dec;
 	unsigned long cpu = smp_processor_id();
 	unsigned jiffy_stamp = last_jiffy_stamp(cpu);
+	extern void do_IRQ(struct pt_regs *);
+
+	if (atomic_read(&ppc_n_lost_interrupts) != 0)
+		do_IRQ(regs);
 
 	hardirq_enter(cpu);
 	
-	do { 
+	while ((next_dec = tb_ticks_per_jiffy - tb_delta(&jiffy_stamp)) < 0) {
 		jiffy_stamp += tb_ticks_per_jiffy;
-	  	if (smp_processor_id()) continue;
+		if (!user_mode(regs))
+			ppc_do_profile(instruction_pointer(regs));
+	  	if (smp_processor_id())
+			continue;
+
 		/* We are in an interrupt, no need to save/restore flags */
 		write_lock(&xtime_lock);
 		tb_last_stamp = jiffy_stamp;
@@ -145,18 +192,23 @@ int timer_interrupt(struct pt_regs * regs)
 				last_rtc_update += 60;
 		}
 		write_unlock(&xtime_lock);
-	} while((next_dec = tb_ticks_per_jiffy - tb_delta(&jiffy_stamp)) < 0);
-	set_dec(next_dec);
+	}
+	if ( !disarm_decr[smp_processor_id()] )
+		set_dec(next_dec);
 	last_jiffy_stamp(cpu) = jiffy_stamp;
 
 #ifdef CONFIG_SMP
 	smp_local_timer_interrupt(regs);
-#endif		
-	
+#endif /* CONFIG_SMP */
+
 	if (ppc_md.heartbeat && !ppc_md.heartbeat_count--)
 		ppc_md.heartbeat();
-	
+
 	hardirq_exit(cpu);
+
+	if (softirq_pending(cpu))
+		do_softirq();
+
 	return 1; /* lets ret_from_int know we can do checks */
 }
 
@@ -176,14 +228,14 @@ void do_gettimeofday(struct timeval *tv)
 	/* As long as timebases are not in sync, gettimeofday can only
 	 * have jiffy resolution on SMP.
 	 */
-	if (_machine != _MACH_Pmac)
+	if (!smp_tb_synchronized)
 		delta = 0;
 #endif /* CONFIG_SMP */
 	lost_ticks = jiffies - wall_jiffies;
 	read_unlock_irqrestore(&xtime_lock, flags);
 
 	usec += mulhwu(tb_to_us, tb_ticks_per_jiffy * lost_ticks + delta);
-	while (usec > 1000000) {
+	while (usec >= 1000000) {
 	  	sec++;
 		usec -= 1000000;
 	}
@@ -264,27 +316,30 @@ void __init time_init(void)
 	 * makes things more complex. Repeatedly read the RTC until the
 	 * next second boundary to try to achieve some precision...
 	 */
-	stamp = get_native_tbl();
-	sec = ppc_md.get_rtc_time();
-	elapsed = 0;
-	do {
-		old_stamp = stamp; 
-		old_sec = sec;
+	if (ppc_md.get_rtc_time) {
 		stamp = get_native_tbl();
-		if (__USE_RTC() && stamp < old_stamp) old_stamp -= 1000000000;
-		elapsed += stamp - old_stamp;
 		sec = ppc_md.get_rtc_time();
-	} while ( sec == old_sec && elapsed < 2*HZ*tb_ticks_per_jiffy);
-	if (sec==old_sec) {
-		printk("Warning: real time clock seems stuck!\n");
+		elapsed = 0;
+		do {
+			old_stamp = stamp; 
+			old_sec = sec;
+			stamp = get_native_tbl();
+			if (__USE_RTC() && stamp < old_stamp) old_stamp -= 1000000000;
+			elapsed += stamp - old_stamp;
+			sec = ppc_md.get_rtc_time();
+		} while ( sec == old_sec && elapsed < 2*HZ*tb_ticks_per_jiffy);
+		if (sec==old_sec) {
+			printk("Warning: real time clock seems stuck!\n");
+		}
+		write_lock_irqsave(&xtime_lock, flags);
+		xtime.tv_sec = sec;
+		last_jiffy_stamp(0) = tb_last_stamp = stamp;
+		xtime.tv_usec = 0;
+		/* No update now, we just read the time from the RTC ! */
+		last_rtc_update = xtime.tv_sec;
+		write_unlock_irqrestore(&xtime_lock, flags);
 	}
-	write_lock_irqsave(&xtime_lock, flags);
-	xtime.tv_sec = sec;
-	last_jiffy_stamp(0) = tb_last_stamp = stamp;
-	xtime.tv_usec = 0;
-	/* No update now, we just read the time from the RTC ! */
-	last_rtc_update = xtime.tv_sec;
-	write_unlock_irqrestore(&xtime_lock, flags);
+
 	/* Not exact, but the timer interrupt takes care of this */
 	set_dec(tb_ticks_per_jiffy);
 
@@ -297,6 +352,8 @@ void __init time_init(void)
         	tz.tz_dsttime = 0;
         	do_sys_settimeofday(NULL, &tz);
         }
+
+       do_get_fast_time = do_gettimeofday;
 }
 
 #define TICK_SIZE tick

@@ -13,7 +13,7 @@
 #include <linux/fcntl.h>
 #include <linux/stat.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/pagemap.h>
 #include <linux/smp_lock.h>
 
@@ -24,12 +24,28 @@
 #include <linux/smb_fs.h>
 
 #include "smb_debug.h"
+#include "proto.h"
 
 static int
 smb_fsync(struct file *file, struct dentry * dentry, int datasync)
 {
+	struct smb_sb_info *server = server_from_dentry(dentry);
+	int result;
+
 	VERBOSE("sync file %s/%s\n", DENTRY_PATH(dentry));
-	return 0;
+
+	/*
+	 * The VFS will writepage() all dirty pages for us, but we
+	 * should send a SMBflush to the server, letting it know that
+	 * we want things synchronized with actual storage.
+	 *
+	 * Note: this function requires all pages to have been written already
+	 *       (should be ok with writepage_sync)
+	 */
+	smb_lock_server(server);
+	result = smb_proc_flush(server, dentry->d_inode->u.smbfs_i.fileid);
+	smb_unlock_server(server);
+	return result;
 }
 
 /*
@@ -38,7 +54,7 @@ smb_fsync(struct file *file, struct dentry * dentry, int datasync)
 static int
 smb_readpage_sync(struct dentry *dentry, struct page *page)
 {
-	char *buffer = page_address(page);
+	char *buffer = kmap(page);
 	unsigned long offset = page->index << PAGE_CACHE_SHIFT;
 	int rsize = smb_get_rsize(server_from_dentry(dentry));
 	int count = PAGE_SIZE;
@@ -76,6 +92,7 @@ smb_readpage_sync(struct dentry *dentry, struct page *page)
 	result = 0;
 
 io_error:
+	kunmap(page);
 	UnlockPage(page);
 	return result;
 }
@@ -88,8 +105,6 @@ smb_readpage(struct file *file, struct page *page)
 {
 	int		error;
 	struct dentry  *dentry = file->f_dentry;
-
-	DEBUG1("readpage %p\n", page_address(page));
 
 	get_page(page);
 	error = smb_readpage_sync(dentry, page);
@@ -105,7 +120,7 @@ static int
 smb_writepage_sync(struct inode *inode, struct page *page,
 		   unsigned long offset, unsigned int count)
 {
-	u8 *buffer = page_address(page) + offset;
+	char *buffer = kmap(page) + offset;
 	int wsize = smb_get_wsize(server_from_inode(inode));
 	int result, written = 0;
 
@@ -137,10 +152,12 @@ smb_writepage_sync(struct inode *inode, struct page *page,
 		 * Update the inode now rather than waiting for a refresh.
 		 */
 		inode->i_mtime = inode->i_atime = CURRENT_TIME;
+		inode->u.smbfs_i.flags |= SMB_F_LOCALWRITE;
 		if (offset > inode->i_size)
 			inode->i_size = offset;
-		inode->u.smbfs_i.cache_valid |= SMB_F_LOCALWRITE;
 	} while (count);
+
+	kunmap(page);
 	return written ? written : result;
 }
 
@@ -206,8 +223,7 @@ smb_file_read(struct file * file, char * buf, size_t count, loff_t *ppos)
 		(unsigned long) count, (unsigned long) *ppos);
 
 	status = smb_revalidate_inode(dentry);
-	if (status)
-	{
+	if (status) {
 		PARANOIA("%s/%s validation failed, error=%Zd\n",
 			 DENTRY_PATH(dentry), status);
 		goto out;
@@ -232,8 +248,7 @@ smb_file_mmap(struct file * file, struct vm_area_struct * vma)
 		DENTRY_PATH(dentry), vma->vm_start, vma->vm_end);
 
 	status = smb_revalidate_inode(dentry);
-	if (status)
-	{
+	if (status) {
 		PARANOIA("%s/%s validation failed, error=%d\n",
 			 DENTRY_PATH(dentry), status);
 		goto out;
@@ -293,8 +308,7 @@ smb_file_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 		(unsigned long) count, (unsigned long) *ppos);
 
 	result = smb_revalidate_inode(dentry);
-	if (result)
-	{
+	if (result) {
 		PARANOIA("%s/%s validation failed, error=%Zd\n",
 			 DENTRY_PATH(dentry), result);
 		goto out;
@@ -304,8 +318,7 @@ smb_file_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 	if (result)
 		goto out;
 
-	if (count > 0)
-	{
+	if (count > 0) {
 		result = generic_file_write(file, buf, count, ppos);
 		VERBOSE("pos=%ld, size=%ld, mtime=%ld, atime=%ld\n",
 			(long) file->f_pos, (long) dentry->d_inode->i_size,
@@ -364,6 +377,7 @@ smb_file_permission(struct inode *inode, int mask)
 
 struct file_operations smb_file_operations =
 {
+	llseek:		generic_file_llseek,
 	read:		smb_file_read,
 	write:		smb_file_write,
 	ioctl:		smb_ioctl,

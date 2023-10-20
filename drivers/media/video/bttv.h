@@ -57,7 +57,7 @@
 #define BTTV_TYPHOON_TVIEW 0x24
 #define BTTV_PXELVWPLTVPRO 0x25
 #define BTTV_MAGICTVIEW063 0x26
-#define BTTV_PINNACLERAVE  0x27
+#define BTTV_PINNACLE      0x27
 #define BTTV_STB2          0x28
 #define BTTV_AVPHONE98     0x29
 #define BTTV_PV951         0x2a
@@ -70,7 +70,24 @@
 #define BTTV_GVBCTV3PCI    0x31
 #define BTTV_PXELVWPLTVPAK 0x32
 #define BTTV_EAGLE         0x33
-#define BTTV_PINNACLESTUDIO 0x34
+#define BTTV_PINNACLEPRO   0x34
+#define BTTV_TVIEW_RDS_FM  0x35
+#define BTTV_LIFETEC_9415  0x36
+#define BTTV_BESTBUY_EASYTV 0x37
+#define BTTV_FLYVIDEO_98FM 0x38
+#define BTTV_GMV1          0x3d
+#define BTTV_BESTBUY_EASYTV2 0x3e
+#define BTTV_ATI_TVWONDER  0x3f
+#define BTTV_ATI_TVWONDERVE 0x40
+#define BTTV_FLYVIDEO2000   0x41
+#define BTTV_TERRATVALUER   0x42
+#define BTTV_GVBCTV4PCI     0x43
+#define BTTV_VOODOOTV_FM    0x44
+#define BTTV_AIMMS          0x45
+#define BTTV_PV_BT878P_PLUS 0x46
+#define BTTV_FLYVIDEO98EZ   0x47
+#define BTTV_PV_BT878P_9B   0x48
+
 
 /* i2c address list */
 #define I2C_TSA5522        0xc2
@@ -78,6 +95,7 @@
 #define I2C_TDA8425        0x82
 #define I2C_TDA9840        0x84
 #define I2C_TDA9850        0xb6 /* also used by 9855,9873 */
+#define I2C_TDA9874A       0xb0 /* also used by 9875 */
 #define I2C_TDA9875        0xb0
 #define I2C_HAUPEE         0xa0
 #define I2C_STBEE          0xae
@@ -87,8 +105,8 @@
 #define I2C_DPL3518	   0x84
 
 /* more card-specific defines */
-#define PT2254_L_CHANEL 0x10
-#define PT2254_R_CHANEL 0x08
+#define PT2254_L_CHANNEL 0x10
+#define PT2254_R_CHANNEL 0x08
 #define PT2254_DBS_IN_2 0x400
 #define PT2254_DBS_IN_10 0x20000
 #define WINVIEW_PT2254_CLK  0x40
@@ -111,6 +129,7 @@ struct tvcard
 
 	/* i2c audio flags */
 	int no_msp34xx:1;
+	int no_tda9875:1;
 	int needs_tvaudio:1;
 
 	/* other settings */
@@ -120,6 +139,7 @@ struct tvcard
 #define PLL_35   2
 
 	int tuner_type;
+	int has_radio;
 	void (*audio_hook)(struct bttv *btv, struct video_audio *v, int set);
 };
 
@@ -132,7 +152,7 @@ extern void bttv_init_card(struct bttv *btv);
 
 /* card-specific funtions */
 extern void tea5757_set_freq(struct bttv *btv, unsigned short freq);
-extern void bttv_hauppauge_boot_msp34xx(struct bttv *btv);
+extern void bttv_boot_msp34xx(struct bttv *btv, int pin);
 
 /* kernel cmd line parse helper */
 extern int bttv_parse(char *str, int max, int *vals);
@@ -147,7 +167,7 @@ extern int bttv_handle_chipset(struct bttv *btv);
 
 /* returns card type + card ID (for bt878-based ones)
    for possible values see lines below beginning with #define BTTV_UNKNOWN
-   returns negative value if error ocurred 
+   returns negative value if error occurred 
 */
 extern int bttv_get_cardinfo(unsigned int card, int *type, int *cardid);
 
@@ -156,19 +176,19 @@ extern int bttv_get_id(unsigned int card);
 
 /* sets GPOE register (BT848_GPIO_OUT_EN) to new value:
    data | (current_GPOE_value & ~mask)
-   returns negative value if error ocurred
+   returns negative value if error occurred
 */
 extern int bttv_gpio_enable(unsigned int card,
 			    unsigned long mask, unsigned long data);
 
 /* fills data with GPDATA register contents
-   returns negative value if error ocurred
+   returns negative value if error occurred
 */
 extern int bttv_read_gpio(unsigned int card, unsigned long *data);
 
 /* sets GPDATA register to new value:
   (data & mask) | (current_GPDATA_value & ~mask)
-  returns negative value if error ocurred 
+  returns negative value if error occurred 
 */
 extern int bttv_write_gpio(unsigned int card,
 			   unsigned long mask, unsigned long data);
@@ -178,23 +198,25 @@ extern int bttv_write_gpio(unsigned int card,
    in interrupt handler if BT848_INT_GPINT bit is set - this queue is activated
    (wake_up_interruptible) and following call to the function bttv_read_gpio 
    should return new value of GPDATA,
-   returns NULL value if error ocurred or queue is not available
+   returns NULL value if error occurred or queue is not available
    WARNING: because there is no buffer for GPIO data, one MUST 
    process data ASAP
 */
 extern wait_queue_head_t* bttv_get_gpio_queue(unsigned int card);
 
 /* i2c */
-#define I2C_CLIENTS_MAX 8
-struct i2c_algo_bit_data bttv_i2c_algo_template;
-struct i2c_adapter bttv_i2c_adap_template;
-struct i2c_client bttv_i2c_client_template;
-void bttv_bit_setscl(void *data, int state);
-void bttv_bit_setsda(void *data, int state);
-void bttv_call_i2c_clients(struct bttv *btv, unsigned int cmd, void *arg);
-int bttv_I2CRead(struct bttv *btv, unsigned char addr, char *probe_for);
-int bttv_I2CWrite(struct bttv *btv, unsigned char addr, unsigned char b1,
-	     unsigned char b2, int both);
-void bttv_readee(struct bttv *btv, unsigned char *eedata, int addr);
+#define I2C_CLIENTS_MAX 16
+extern void bttv_bit_setscl(void *data, int state);
+extern void bttv_bit_setsda(void *data, int state);
+extern void bttv_call_i2c_clients(struct bttv *btv, unsigned int cmd, void *arg);
+extern int bttv_I2CRead(struct bttv *btv, unsigned char addr, char *probe_for);
+extern int bttv_I2CWrite(struct bttv *btv, unsigned char addr, unsigned char b1,
+			 unsigned char b2, int both);
+extern void bttv_readee(struct bttv *btv, unsigned char *eedata, int addr);
 
 #endif /* _BTTV_H_ */
+/*
+ * Local variables:
+ * c-basic-offset: 8
+ * End:
+ */

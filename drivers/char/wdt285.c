@@ -136,7 +136,7 @@ static int watchdog_ioctl(struct inode *inode, struct file *file,
 	switch(cmd)
 	{
 		default:
-			return -ENOIOCTLCMD;
+			return -ENOTTY;
 		case WDIOC_GETSUPPORT:
 			i = verify_area(VERIFY_WRITE, (void*) arg, sizeof(struct watchdog_info));
 			if (i)
@@ -190,6 +190,7 @@ EXPORT_NO_SYMBOLS;
 
 MODULE_AUTHOR("Phil Blundell <pb@nexus.co.uk>");
 MODULE_DESCRIPTION("21285 watchdog driver");
+MODULE_LICENSE("GPL");
 
 MODULE_PARM(soft_margin,"i");
 MODULE_PARM_DESC(soft_margin,"Watchdog timeout in seconds");

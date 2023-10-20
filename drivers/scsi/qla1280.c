@@ -220,7 +220,7 @@ END OF TERMS AND CONDITIONS
 #include "ql1280_fw.h"
 
 #include <linux/stat.h>
-#include <linux/malloc.h>        /* for kmalloc() */
+#include <linux/slab.h>        /* for kmalloc() */
 
 
 #ifndef KERNEL_VERSION
@@ -810,6 +810,11 @@ qla1280_detect(Scsi_Host_Template *template)
 #endif
                 /* found a adapter */
 		host = scsi_register(template, sizeof(scsi_qla_host_t));
+                if (!host) { 
+			printk(KERN_WARNING "qla1280: Failed to register host, aborting.\n");
+                        return 0;
+                }
+		scsi_set_pci_device(host, pdev);
 		ha = (scsi_qla_host_t *) host->hostdata;
 		/* Clear our data area */
 		for( j =0, cp = (char *)ha;  j < sizeof(scsi_qla_host_t); j++)
@@ -1095,7 +1100,7 @@ qla1280_queuecommand(Scsi_Cmnd *cmd, void (*fn)(Scsi_Cmnd *))
     CMD_HANDLE(cmd) = (unsigned char *)handle;
 
     /* Bookkeeping information */
-    sp->r_start = jiffies;       /* time the request was recieved */
+    sp->r_start = jiffies;       /* time the request was received */
     sp->u_start = 0;              
 
     /* add the command to our queue */
@@ -1523,6 +1528,7 @@ void qla1280_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
     if(test_and_set_bit(QLA1280_IN_ISR_BIT, &ha->flags))
     {
         COMTRACE('X')
+        spin_unlock_irqrestore(&io_request_lock, cpu_flags);
         return;
     }
     ha->isr_count++;
@@ -6806,6 +6812,7 @@ static char	*qla1280_get_token(char *cmdline, char *str )
         *cp = '\0';
         return( cp );
 }
+MODULE_LICENSE("GPL");
 
 /*
  * Overrides for Emacs so that we almost follow Linus's tabbing style.

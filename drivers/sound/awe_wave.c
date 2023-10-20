@@ -206,13 +206,15 @@ static awe_chan_info channels[AWE_MAX_CHANNELS];
 int io = AWE_DEFAULT_BASE_ADDR; /* Emu8000 base address */
 int memsize = AWE_DEFAULT_MEM_SIZE; /* memory size in Kbytes */
 #if defined CONFIG_ISAPNP || defined CONFIG_ISAPNP_MODULE
-static int isapnp = 1;
+static int isapnp = -1;
 #else
 static int isapnp = 0;
 #endif
 
 MODULE_AUTHOR("Takashi Iwai <iwai@ww.uni-erlangen.de>");
 MODULE_DESCRIPTION("SB AWE32/64 WaveTable driver");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(io, "i");
 MODULE_PARM_DESC(io, "base i/o port of Emu8000");
 MODULE_PARM(memsize, "i");
@@ -4772,15 +4774,24 @@ awe_detect_base(int addr)
 	
 #if defined CONFIG_ISAPNP || defined CONFIG_ISAPNP_MODULE
 static struct {
+	unsigned short card_vendor, card_device;
 	unsigned short vendor;
 	unsigned short function;
 	char *name;
 } isapnp_awe_list[] __initdata = {
-	{ISAPNP_VENDOR('C','T','L'), ISAPNP_FUNCTION(0x0021), "AWE32 WaveTable"},
-	{ISAPNP_VENDOR('C','T','L'), ISAPNP_FUNCTION(0x0022), "AWE64 WaveTable"},
-	{ISAPNP_VENDOR('C','T','L'), ISAPNP_FUNCTION(0x0023), "AWE64 Gold WaveTable"},
-	{0,}
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('C','T','L'), ISAPNP_FUNCTION(0x0021),
+		"AWE32 WaveTable" },
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('C','T','L'), ISAPNP_FUNCTION(0x0022),
+		"AWE64 WaveTable" },
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('C','T','L'), ISAPNP_FUNCTION(0x0023),
+		"AWE64 Gold WaveTable" },
+	{0}
 };
+
+MODULE_DEVICE_TABLE(isapnp, isapnp_awe_list);
 
 static struct pci_dev *idev = NULL;
 
@@ -4834,10 +4845,12 @@ awe_detect(void)
 	if (isapnp) {
 		if (awe_probe_isapnp(&io) < 0) {
 			printk(KERN_ERR "AWE32: No ISAPnP cards found\n");
-			return 0;
+			if (isapnp != -1)
+			  return 0;
+		} else {
+			setup_ports(io, 0, 0);
+			return 1;
 		}
-		setup_ports(io, 0, 0);
-		return 1;
 	}
 #endif /* isapnp */
 
@@ -4862,7 +4875,7 @@ awe_detect(void)
 /* any three numbers you like */
 #define UNIQUE_ID1	0x1234
 #define UNIQUE_ID2	0x4321
-#define UNIQUE_ID3	0xFFFF
+#define UNIQUE_ID3	0xABCD
 
 static void __init
 awe_check_dram(void)

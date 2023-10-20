@@ -5,7 +5,7 @@
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 1998-2000 by David Mosberger-Tang <davidm@hpl.hp.com>
+# Copyright (C) 1998-2001 by David Mosberger-Tang <davidm@hpl.hp.com>
 #
 
 NM := $(CROSS_COMPILE)nm -B
@@ -14,25 +14,27 @@ AWK := awk
 export AWK
 
 LINKFLAGS = -static -T arch/$(ARCH)/vmlinux.lds
-AFLAGS += -Wa,-x 
 AFLAGS_KERNEL := -mconstant-gp
 EXTRA	=
 
-CFLAGS := $(CFLAGS) -pipe $(EXTRA) -Wa,-x -ffixed-r13 -mfixed-range=f10-f15,f32-f127 \
-	  -funwind-tables -falign-functions=32
-# -frename-registers
+CFLAGS := $(CFLAGS) -pipe $(EXTRA) -ffixed-r13 -mfixed-range=f10-f15,f32-f127 \
+	  -falign-functions=32
+# -ffunction-sections
 CFLAGS_KERNEL := -mconstant-gp
 
-ifeq ($(CONFIG_ITANIUM_ASTEP_SPECIFIC),y)
-	CFLAGS += -ma-step
+GCC_VERSION=$(shell $(CROSS_COMPILE)$(HOSTCC) -v 2>&1 | fgrep 'gcc version' | cut -f3 -d' ' | cut -f1 -d'.')
+
+ifneq ($(GCC_VERSION),2)
+	CFLAGS += -frename-registers --param max-inline-insns=400
 endif
+
 ifeq ($(CONFIG_ITANIUM_BSTEP_SPECIFIC),y)
 	CFLAGS += -mb-step
 endif
 
 ifdef CONFIG_IA64_GENERIC
 	CORE_FILES      :=      arch/$(ARCH)/hp/hp.a	\
-				arch/$(ARCH)/sn/sn.a	\
+				arch/$(ARCH)/sn/sn.o	\
 				arch/$(ARCH)/dig/dig.a	\
 				arch/$(ARCH)/sn/io/sgiio.o \
 				$(CORE_FILES)
@@ -52,15 +54,14 @@ ifdef CONFIG_IA64_HP_SIM
                                 $(CORE_FILES)
 endif
 
-ifdef CONFIG_IA64_SGI_SN1
-CFLAGS += -DBRINGUP
-        SUBDIRS         :=      arch/$(ARCH)/sn/sn1	\
-				arch/$(ARCH)/sn		\
+ifdef CONFIG_IA64_SGI_SN
+	CFLAGS		+= -DBRINGUP
+        SUBDIRS         :=      arch/$(ARCH)/sn/kernel	\
 				arch/$(ARCH)/sn/io	\
 				arch/$(ARCH)/sn/fprom	\
 				$(SUBDIRS)
-        CORE_FILES      :=      arch/$(ARCH)/sn/sn.a	\
-				arch/$(ARCH)/sn/io/sgiio.o\
+        CORE_FILES      :=      arch/$(ARCH)/sn/kernel/sn.o	\
+				arch/$(ARCH)/sn/io/sgiio.o	\
 				$(CORE_FILES)
 endif
 
@@ -103,6 +104,11 @@ arch/$(ARCH)/vmlinux.lds: arch/$(ARCH)/vmlinux.lds.S FORCE
 
 FORCE: ;
 
+compressed: vmlinux
+	$(OBJCOPY) --strip-all vmlinux vmlinux-tmp
+	gzip vmlinux-tmp
+	mv vmlinux-tmp.gz vmlinux.gz
+
 rawboot:
 	@$(MAKEBOOT) rawboot
 
@@ -120,8 +126,6 @@ srmboot:
 	@$(MAKEBOOT) srmboot
 
 archclean:
-	@$(MAKE) -C arch/$(ARCH)/kernel clean
-	@$(MAKE) -C arch/$(ARCH)/tools clean
 	@$(MAKEBOOT) clean
 
 archmrproper:

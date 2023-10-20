@@ -33,7 +33,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/delay.h>
@@ -50,16 +50,23 @@
 #include <asm/pgtable.h>
 #include <asm/page.h>
 #include <asm/irq.h>
+#include <asm/semaphore.h>
 
 #include "planb.h"
 #include "saa7196.h"
 
-
 /* Would you mind for some ugly debugging? */
-//#define DEBUG(x...) printk(KERN_DEBUG ## x) /* Debug driver */
-#define DEBUG(x...) 		/* Don't debug driver */	
-//#define IDEBUG(x...) printk(KERN_DEBUG ## x) /* Debug interrupt part */
+#if 0
+#define DEBUG(x...) printk(KERN_DEBUG ## x) /* Debug driver */
+#else
+#define DEBUG(x...) 		/* Don't debug driver */
+#endif
+
+#if 0
+#define IDEBUG(x...) printk(KERN_DEBUG ## x) /* Debug interrupt part */
+#else
 #define IDEBUG(x...) 		/* Don't debug interrupt part */
+#endif
 
 /* Ever seen a Mac with more than 1 of these? */
 #define PLANB_MAX 1
@@ -69,9 +76,13 @@ static struct planb planbs[PLANB_MAX];
 static volatile struct planb_registers *planb_regs;
 
 static int def_norm = PLANB_DEF_NORM;	/* default norm */
+static int video_nr = -1;
 
 MODULE_PARM(def_norm, "i");
 MODULE_PARM_DESC(def_norm, "Default startup norm (0=PAL, 1=NTSC, 2=SECAM)");
+MODULE_PARM(video_nr,"i");
+MODULE_LICENSE("GPL");
+
 
 /* ------------------ PlanB Exported Functions ------------------ */
 static long planb_write(struct video_device *, const char *, unsigned long, int);
@@ -324,41 +335,14 @@ static volatile struct dbdma_cmd *cmd_geo_setup(
 /* misc. supporting functions */
 /******************************/
 
-static void __planb_wait(struct planb *pb)
-{
-	DECLARE_WAITQUEUE(wait, current);
-
-	add_wait_queue(&pb->lockq, &wait);
-repeat:
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	if (pb->lock) {
-		schedule();
-		goto repeat;
-	}
-	remove_wait_queue(&pb->lockq, &wait);
-	current->state = TASK_RUNNING;
-}
-
-static inline void planb_wait(struct planb *pb)
-{
-	DEBUG("PlanB: planb_wait\n");
-	if(pb->lock)
-		__planb_wait(pb);
-}
-
 static inline void planb_lock(struct planb *pb)
 {
-	DEBUG("PlanB: planb_lock\n");
-	if(pb->lock)
-		__planb_wait(pb);
-	pb->lock = 1;
+	down(&pb->lock);
 }
 
 static inline void planb_unlock(struct planb *pb)
 {
-	DEBUG("PlanB: planb_unlock\n");
-	pb->lock = 0;
-	wake_up(&pb->lockq);
+	up(&pb->lock);
 }
 
 /***************/
@@ -2037,6 +2021,7 @@ static int planb_mmap(struct video_device *dev, const char *adr, unsigned long s
 
 static struct video_device planb_template=
 {
+	owner:		THIS_MODULE,
 	name:		PLANB_DEVICE_NAME,
 	type:		VID_TYPE_OVERLAY,
 	hardware:	VID_HARDWARE_PLANB,
@@ -2095,7 +2080,7 @@ static int init_planb(struct planb *pb)
 	pb->tab_size = PLANB_MAXLINES + 40;
 	pb->suspend = 0;
 	pb->lock = 0;
-	init_waitqueue_head(&pb->lockq);
+	init_MUTEX(&pb->lock);
 	pb->ch1_cmd = 0;
 	pb->ch2_cmd = 0;
 	pb->mask = 0;
@@ -2167,7 +2152,7 @@ static int init_planb(struct planb *pb)
 	pb->intr_mask = PLANB_FRM_IRQ;
 	enable_irq(pb->irq);
 
-	if(video_register_device(&pb->video_dev, VFL_TYPE_GRABBER)<0)
+	if(video_register_device(&pb->video_dev, VFL_TYPE_GRABBER, video_nr)<0)
 		return -1;
 
 	return 0;
@@ -2292,14 +2277,8 @@ static void release_planb(void)
 	}
 }
 
-#ifdef MODULE
-
-int init_module(void)
+static int __init init_planbs(void)
 {
-#else
-int __init init_planbs(struct video_init *unused)
-{
-#endif
 	int i;
   
 	if (find_planb()<=0)
@@ -2317,11 +2296,10 @@ int __init init_planbs(struct video_init *unused)
 	return 0;
 }
 
-#ifdef MODULE
-
-void cleanup_module(void)
+static void __exit exit_planbs(void)
 {
 	release_planb();
 }
 
-#endif
+module_init(init_planbs);
+module_exit(exit_planbs);

@@ -6,13 +6,12 @@
 
 #ifdef __KERNEL__
 
-#if LINUX_VERSION_CODE >= 0x020100
 #include <linux/poll.h>
-#endif
 #include <linux/devfs_fs_kernel.h>
 
 struct video_device
 {
+	struct module *owner;
 	char name[32];
 	int type;
 	int hardware;
@@ -34,9 +33,8 @@ struct video_device
 	devfs_handle_t devfs_handle;
 };
 
-extern int videodev_init(void);
 #define VIDEO_MAJOR	81
-extern int video_register_device(struct video_device *, int type);
+extern int video_register_device(struct video_device *, int type, int nr);
 
 #define VFL_TYPE_GRABBER	0
 #define VFL_TYPE_VBI		1
@@ -93,7 +91,7 @@ struct video_tuner
 {
 	int tuner;
 	char name[32];
-	ulong rangelow, rangehigh;	/* Tuner range */
+	unsigned long rangelow, rangehigh;	/* Tuner range */
 	__u32 flags;
 #define VIDEO_TUNER_PAL		1
 #define VIDEO_TUNER_NTSC	2
@@ -187,7 +185,7 @@ struct video_capture
 {
 	__u32 	x,y;			/* Offsets into image */
 	__u32	width, height;		/* Area to capture */
-	__u16	decimation;		/* Decimation divder */
+	__u16	decimation;		/* Decimation divider */
 	__u16	flags;			/* Flags for capture */
 #define VIDEO_CAPTURE_ODD		0	/* Temporal */
 #define VIDEO_CAPTURE_EVEN		1
@@ -374,15 +372,10 @@ struct video_code
 #define VID_HARDWARE_ZR36067	26	/* Zoran ZR36067/36060 */
 #define VID_HARDWARE_OV511	27	
 #define VID_HARDWARE_ZR356700	28	/* Zoran 36700 series */
-
-/*
- *	Initialiser list
- */
- 
-struct video_init
-{
-	char *name;
-	int (*init)(struct video_init *);
-};
+#define VID_HARDWARE_W9966	29
+#define VID_HARDWARE_SE401	30	/* SE401 USB webcams */
+#define VID_HARDWARE_PWC	31	/* Philips webcams */
+#define VID_HARDWARE_MEYE	32	/* Sony Vaio MotionEye cameras */
+#define VID_HARDWARE_CPIA2	33
 
 #endif

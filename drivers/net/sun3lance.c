@@ -3,7 +3,7 @@
 
   Sun3 Lance ethernet driver, by Sam Creasey (sammy@users.qual.net).  
   This driver is a part of the linux kernel, and is thus distributed
-  under the GNU Public License.
+  under the GNU General Public License.
   
   The values used in LANCE_OBIO and LANCE_IRQ seem to be empirically
   true for the correct IRQ and address of the lance registers.  They
@@ -31,7 +31,7 @@ static char *version = "sun3lance.c: v1.1 11/17/1999  Sam Creasey (sammy@oh.veri
 #include <linux/string.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
@@ -70,6 +70,8 @@ static int lance_debug = LANCE_DEBUG;
 static int lance_debug = 1;
 #endif
 MODULE_PARM(lance_debug, "i");
+MODULE_PARM_DESC(lance_debug, "SUN3 Lance debug level (0-3)");
+MODULE_LICENSE("GPL");
 
 #define	DPRINTK(n,a) \
 	do {  \
@@ -148,9 +150,9 @@ struct lance_private {
      	int new_rx, new_tx;	/* The next free ring entry */
 	int old_tx, old_rx;     /* ring entry to be processed */
 	struct net_device_stats stats;
-/* These two must be ints for set_bit() */
-	int					tx_full;
-	int					lock;
+/* These two must be longs for set_bit() */
+	long					tx_full;
+	long					lock;
 };
 
 /* I/O register access macros */
@@ -243,7 +245,7 @@ static void set_multicast_list( struct net_device *dev );
 
 int __init sun3lance_probe( struct net_device *dev )
 {	
-	static int found = 0;
+	static int found;
 
 	if(found)
 		return(ENODEV);
@@ -262,7 +264,7 @@ static int __init lance_probe( struct net_device *dev)
 	
 	struct lance_private	*lp;
 	int 			i;
-	static int 		did_version = 0;
+	static int 		did_version;
 	int found = 0;
 	volatile unsigned short *ioaddr_probe;
 	unsigned short tmp1, tmp2;
@@ -303,8 +305,11 @@ static int __init lance_probe( struct net_device *dev)
 	}
 
 	init_etherdev( dev, sizeof(struct lance_private) );
-	if (!dev->priv)
+	if (!dev->priv) {
 		dev->priv = kmalloc( sizeof(struct lance_private), GFP_KERNEL );
+		if (!dev->priv)
+			return 0;
+	}
 	lp = (struct lance_private *)dev->priv;
 	MEM = (struct lance_memory *)sun3_dvma_malloc(sizeof(struct
 							     lance_memory)); 
@@ -582,7 +587,7 @@ static void lance_interrupt( int irq, void *dev_id, struct pt_regs *fp)
 	struct net_device *dev = dev_id;
 	struct lance_private *lp = dev->priv;
 	int csr0;
-	static int in_interrupt = 0;
+	static int in_interrupt;
 
 	if (dev == NULL) {
 		DPRINTK( 1, ( "lance_interrupt(): invalid dev_id\n" ));
@@ -780,8 +785,9 @@ static int lance_rx( struct net_device *dev )
 
 				skb->protocol = eth_type_trans( skb, dev );
 				netif_rx( skb );
+				dev->last_rx = jiffies;
 				lp->stats.rx_packets++;
-				lp->stats.rx_bytes += skb->len;
+				lp->stats.rx_bytes += pkt_len;
 			}
 		}
 
@@ -876,7 +882,7 @@ static void set_multicast_list( struct net_device *dev )
 
 
 #ifdef MODULE
-static char devicename[9] = { 0, };
+static char devicename[9];
 
 static struct net_device sun3lance_dev =
 {

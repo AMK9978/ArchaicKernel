@@ -11,6 +11,7 @@
  * 
  *     Copyright (c) 1998-2000 Dag Brattli <dagb@cs.uit.no>, 
  *     All Rights Reserved.
+ *     Copyright (c) 2000-2001 Jean Tourrilhes <jt@hpl.hp.com>
  *     
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -36,12 +37,6 @@
 #include <net/irda/parameters.h>
 #include <net/irda/qos.h>
 #include <net/irda/irlap.h>
-#ifdef CONFIG_IRDA_COMPRESSION
-#include <net/irda/irlap_comp.h>
-#include "../../drivers/net/zlib.h"
-
-#define CI_BZIP2  27 /* Random pick */
-#endif
 
 /*
  * Maximum values of the baud rate we negociate with the other end.
@@ -70,10 +65,6 @@ static int irlap_param_additional_bofs(void *instance, irda_param_t *parm,
 				       int get);
 static int irlap_param_min_turn_time(void *instance, irda_param_t *param, 
 				     int get);
-static int value_index(__u32 value, __u32 *array, int size);
-static __u32 byte_value(__u8 byte, __u32 *array);
-static __u32 index_value(int index, __u32 *array);
-static int value_lower_bits(__u32 value, __u32 *array, int size, __u16 *field);
 
 __u32 min_turn_times[]  = { 10000, 5000, 1000, 500, 100, 50, 10, 0 }; /* us */
 __u32 baud_rates[]      = { 2400, 9600, 19200, 38400, 57600, 115200, 576000, 
@@ -82,10 +73,6 @@ __u32 data_sizes[]      = { 64, 128, 256, 512, 1024, 2048 };        /* bytes */
 __u32 add_bofs[]        = { 48, 24, 12, 5, 3, 2, 1, 0 };            /* bytes */
 __u32 max_turn_times[]  = { 500, 250, 100, 50 };                    /* ms */
 __u32 link_disc_times[] = { 3, 8, 12, 16, 20, 25, 30, 40 };         /* secs */
-
-#ifdef CONFIG_IRDA_COMPRESSION
-__u32 compressions[] = { CI_BZIP2, CI_DEFLATE, CI_DEFLATE_DRAFT };
-#endif
 
 __u32 max_line_capacities[10][4] = {
        /* 500 ms     250 ms  100 ms  50 ms (max turn time) */
@@ -130,6 +117,98 @@ static pi_major_info_t pi_major_call_table[] = {
 
 static pi_param_info_t irlap_param_info = { pi_major_call_table, 2, 0x7f, 7 };
 
+/* ---------------------- LOCAL SUBROUTINES ---------------------- */
+/* Note : we start with a bunch of local subroutines.
+ * As the compiler is "one pass", this is the only way to get them to
+ * inline properly...
+ * Jean II
+ */
+/*
+ * Function value_index (value, array, size)
+ *
+ *    Returns the index to the value in the specified array
+ */
+static inline int value_index(__u32 value, __u32 *array, int size)
+{
+	int i;
+	
+	for (i=0; i < size; i++)
+		if (array[i] == value)
+			break;
+	return i;
+}
+
+/*
+ * Function index_value (index, array)
+ *
+ *    Returns value to index in array, easy!
+ *
+ */
+static inline __u32 index_value(int index, __u32 *array) 
+{
+	return array[index];
+}
+
+/*
+ * Function msb_index (word)
+ *
+ *    Returns index to most significant bit (MSB) in word
+ *
+ */
+int msb_index (__u16 word) 
+{
+	__u16 msb = 0x8000;
+	int index = 15;   /* Current MSB */
+	
+	while (msb) {
+		if (word & msb)
+			break;   /* Found it! */
+		msb >>=1;
+		index--;
+	}
+	return index;
+}
+
+static inline __u32 byte_value(__u8 byte, __u32 *array) 
+{
+	int index;
+
+	ASSERT(array != NULL, return -1;);
+
+	index = msb_index(byte);
+
+	return index_value(index, array);
+}
+
+/*
+ * Function value_lower_bits (value, array)
+ *
+ *    Returns a bit field marking all possibility lower than value.
+ *    We may need a "value_higher_bits" in the future...
+ */
+static inline int value_lower_bits(__u32 value, __u32 *array, int size, __u16 *field)
+{
+	int	i;
+	__u16	mask = 0x1;
+	__u16	result = 0x0;
+
+	for (i=0; i < size; i++) {
+		/* Add the current value to the bit field, shift mask */
+		result |= mask;
+		mask <<= 1;
+		/* Finished ? */
+		if (array[i] >= value)
+			break;
+	}
+	/* Send back a valid index */
+	if(i >= size)
+	  i = size - 1;	/* Last item */
+	*field = result;
+	return i;
+}
+
+/* -------------------------- MAIN CALLS -------------------------- */
+
 /*
  * Function irda_qos_compute_intersection (qos, new)
  *
@@ -149,10 +228,6 @@ void irda_qos_compute_intersection(struct qos_info *qos, struct qos_info *new)
 	qos->data_size.bits       &= new->data_size.bits;
 	qos->link_disc_time.bits  &= new->link_disc_time.bits;
 	qos->additional_bofs.bits &= new->additional_bofs.bits;
-
-#ifdef CONFIG_IRDA_COMPRESSION
-	qos->compression.bits     &= new->compression.bits;
-#endif
 
 	irda_qos_bits_to_value(qos);
 }
@@ -192,10 +267,6 @@ void irda_init_max_qos_capabilies(struct qos_info *qos)
 	qos->data_size.bits       = 0x3f;
 	qos->link_disc_time.bits &= 0xff;
 	qos->additional_bofs.bits = 0xff;
-
-#ifdef CONFIG_IRDA_COMPRESSION	
-	qos->compression.bits     = 0x03;
-#endif
 }
 
 /*
@@ -258,7 +329,7 @@ void irlap_adjust_qos_settings(struct qos_info *qos)
 			WARNING(__FUNCTION__ "(), nothing more we can do!\n");
 		}
 	}
-#endif CONFIG_IRDA_DYNAMIC_WINDOW
+#endif /* CONFIG_IRDA_DYNAMIC_WINDOW */
 }
 
 /*
@@ -271,20 +342,10 @@ void irlap_adjust_qos_settings(struct qos_info *qos)
 int irlap_qos_negotiate(struct irlap_cb *self, struct sk_buff *skb) 
 {
 	int ret;
-#ifdef CONFIG_IRDA_COMPRESSION
-	int comp_seen = FALSE;
-#endif
+	
 	ret = irda_param_extract_all(self, skb->data, skb->len, 
 				     &irlap_param_info);
 	
-#ifdef CONFIG_IRDA_COMPRESSION
-	if (!comp_seen) {
-		IRDA_DEBUG( 4, __FUNCTION__ "(), Compression not seen!\n");
-		self->qos_tx.compression.bits = 0x00;
-		self->qos_rx.compression.bits = 0x00;
-	}
-#endif
-
 	/* Convert the negotiated bits to values */
 	irda_qos_bits_to_value(&self->qos_tx);
 	irda_qos_bits_to_value(&self->qos_rx);
@@ -305,10 +366,6 @@ int irlap_qos_negotiate(struct irlap_cb *self, struct sk_buff *skb)
 		   self->qos_tx.min_turn_time.value);
 	IRDA_DEBUG(2, "Setting LINK_DISC to %d secs.\n", 
 		   self->qos_tx.link_disc_time.value);
-#ifdef CONFIG_IRDA_COMPRESSION
-	IRDA_DEBUG(2, "Setting COMPRESSION to %d\n", 
-		   self->qos_tx.compression.value);
-#endif	
 	return ret;
 }
 
@@ -399,8 +456,8 @@ static int irlap_param_baud_rate(void *instance, irda_param_t *param, int get)
 		 *  Stations must agree on baud rate, so calculate
 		 *  intersection 
 		 */
-		IRDA_DEBUG(2, "Requested BAUD_RATE: 0x%04x\n", param->pv.s);
-		final = param->pv.s & self->qos_rx.baud_rate.bits;
+		IRDA_DEBUG(2, "Requested BAUD_RATE: 0x%04x\n", (__u16) param->pv.i);
+		final = (__u16) param->pv.i & self->qos_rx.baud_rate.bits;
 
 		IRDA_DEBUG(2, "Final BAUD_RATE: 0x%04x\n", final);
 		self->qos_tx.baud_rate.bits = final;
@@ -427,14 +484,14 @@ static int irlap_param_link_disconnect(void *instance, irda_param_t *param,
 	ASSERT(self->magic == LAP_MAGIC, return -1;);
 	
 	if (get)
-		param->pv.b = self->qos_rx.link_disc_time.bits;
+		param->pv.i = self->qos_rx.link_disc_time.bits;
 	else {
 		/*  
 		 *  Stations must agree on link disconnect/threshold 
 		 *  time.
 		 */
-		IRDA_DEBUG(2, "LINK_DISC: %02x\n", param->pv.b);
-		final = param->pv.b & self->qos_rx.link_disc_time.bits;
+		IRDA_DEBUG(2, "LINK_DISC: %02x\n", (__u8) param->pv.i);
+		final = (__u8) param->pv.i & self->qos_rx.link_disc_time.bits;
 
 		IRDA_DEBUG(2, "Final LINK_DISC: %02x\n", final);
 		self->qos_tx.link_disc_time.bits = final;
@@ -459,9 +516,9 @@ static int irlap_param_max_turn_time(void *instance, irda_param_t *param,
 	ASSERT(self->magic == LAP_MAGIC, return -1;);
 	
 	if (get)
-		param->pv.b = self->qos_rx.max_turn_time.bits;
+		param->pv.i = self->qos_rx.max_turn_time.bits;
 	else
-		self->qos_tx.max_turn_time.bits = param->pv.b;
+		self->qos_tx.max_turn_time.bits = (__u8) param->pv.i;
 
 	return 0;
 }
@@ -481,9 +538,9 @@ static int irlap_param_data_size(void *instance, irda_param_t *param, int get)
 	ASSERT(self->magic == LAP_MAGIC, return -1;);
 	
 	if (get)
-		param->pv.b = self->qos_rx.data_size.bits;
+		param->pv.i = self->qos_rx.data_size.bits;
 	else
-		self->qos_tx.data_size.bits = param->pv.b;
+		self->qos_tx.data_size.bits = (__u8) param->pv.i;
 
 	return 0;
 }
@@ -504,9 +561,9 @@ static int irlap_param_window_size(void *instance, irda_param_t *param,
 	ASSERT(self->magic == LAP_MAGIC, return -1;);
 	
 	if (get)
-		param->pv.b = self->qos_rx.window_size.bits;
+		param->pv.i = self->qos_rx.window_size.bits;
 	else
-		self->qos_tx.window_size.bits = param->pv.b;
+		self->qos_tx.window_size.bits = (__u8) param->pv.i;
 
 	return 0;
 }
@@ -525,9 +582,9 @@ static int irlap_param_additional_bofs(void *instance, irda_param_t *param, int 
 	ASSERT(self->magic == LAP_MAGIC, return -1;);
 	
 	if (get)
-		param->pv.b = self->qos_rx.additional_bofs.bits;
+		param->pv.i = self->qos_rx.additional_bofs.bits;
 	else
-		self->qos_tx.additional_bofs.bits = param->pv.b;
+		self->qos_tx.additional_bofs.bits = (__u8) param->pv.i;
 
 	return 0;
 }
@@ -547,9 +604,9 @@ static int irlap_param_min_turn_time(void *instance, irda_param_t *param,
 	ASSERT(self->magic == LAP_MAGIC, return -1;);
 	
 	if (get)
-		param->pv.b = self->qos_rx.min_turn_time.bits;
+		param->pv.i = self->qos_rx.min_turn_time.bits;
 	else
-		self->qos_tx.min_turn_time.bits = param->pv.b;
+		self->qos_tx.min_turn_time.bits = (__u8) param->pv.i;
 
 	return 0;
 }
@@ -596,99 +653,6 @@ __u32 irlap_requested_line_capacity(struct qos_info *qos)
 	return line_capacity;			       		  
 }
 
-__u32 irlap_min_turn_time_in_bytes(__u32 speed, __u32 min_turn_time)
-{
-	__u32 bytes;
-	
-	bytes = speed * min_turn_time / 10000000;
-	
-	return bytes;
-}
-
-static __u32 byte_value(__u8 byte, __u32 *array) 
-{
-	int index;
-
-	ASSERT(array != NULL, return -1;);
-
-	index = msb_index(byte);
-
-	return index_value(index, array);
-}
-
-/*
- * Function msb_index (word)
- *
- *    Returns index to most significant bit (MSB) in word
- *
- */
-int msb_index (__u16 word) 
-{
-	__u16 msb = 0x8000;
-	int index = 15;   /* Current MSB */
-	
-	while (msb) {
-		if (word & msb)
-			break;   /* Found it! */
-		msb >>=1;
-		index--;
-	}
-	return index;
-}
-
-/*
- * Function value_index (value, array, size)
- *
- *    Returns the index to the value in the specified array
- */
-static int value_index(__u32 value, __u32 *array, int size)
-{
-	int i;
-	
-	for (i=0; i < size; i++)
-		if (array[i] == value)
-			break;
-	return i;
-}
-
-/*
- * Function index_value (index, array)
- *
- *    Returns value to index in array, easy!
- *
- */
-static __u32 index_value(int index, __u32 *array) 
-{
-	return array[index];
-}
-
-/*
- * Function value_lower_bits (value, array)
- *
- *    Returns a bit field marking all possibility lower than value.
- *    We may need a "value_higher_bits" in the future...
- */
-static int value_lower_bits(__u32 value, __u32 *array, int size, __u16 *field)
-{
-	int	i;
-	__u16	mask = 0x1;
-	__u16	result = 0x0;
-
-	for (i=0; i < size; i++) {
-		/* Add the current value to the bit field, shift mask */
-		result |= mask;
-		mask <<= 1;
-		/* Finished ? */
-		if (array[i] >= value)
-			break;
-	}
-	/* Send back a valid index */
-	if(i >= size)
-	  i = size - 1;	/* Last item */
-	*field = result;
-	return i;
-}
-
 void irda_qos_bits_to_value(struct qos_info *qos)
 {
 	int index;
@@ -715,12 +679,4 @@ void irda_qos_bits_to_value(struct qos_info *qos)
 	
 	index = msb_index(qos->additional_bofs.bits);
 	qos->additional_bofs.value = add_bofs[index];
-
-#ifdef CONFIG_IRDA_COMPRESSION
-	index = msb_index(qos->compression.bits);
-	if (index >= 0)
-		qos->compression.value = compressions[index];
-	else 
-		qos->compression.value = 0;
-#endif
 }

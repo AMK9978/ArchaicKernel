@@ -40,7 +40,7 @@ struct ti_lynx {
                 u32 product;
         } phyic;
 
-        enum { clear, have_intr, have_aux_buf, have_pcl_mem,
+        enum { clear, have_host_struct,  have_intr, have_aux_buf, have_pcl_mem,
                have_1394_buffers, have_iomappings } state;
         
         /* remapped memory spaces */
@@ -80,6 +80,8 @@ struct ti_lynx {
         struct hpsb_host *host;
 
         int phyid, isroot;
+        int selfid_size;
+        int phy_reg0;
 
         spinlock_t phy_reg_lock;
 
@@ -104,7 +106,7 @@ struct ti_lynx {
                 pcl_t pcl_start;
                 int chan_count;
                 int next, last, used, running;
-                struct tq_struct tq;
+                struct tasklet_struct tq;
                 spinlock_t lock;
         } iso_rcv;
 };
@@ -123,23 +125,23 @@ struct memdata {
 /*
  * Register read and write helper functions.
  */
-inline static void reg_write(const struct ti_lynx *lynx, int offset, u32 data)
+static inline void reg_write(const struct ti_lynx *lynx, int offset, u32 data)
 {
         writel(data, lynx->registers + offset);
 }
 
-inline static u32 reg_read(const struct ti_lynx *lynx, int offset)
+static inline u32 reg_read(const struct ti_lynx *lynx, int offset)
 {
         return readl(lynx->registers + offset);
 }
 
-inline static void reg_set_bits(const struct ti_lynx *lynx, int offset,
+static inline void reg_set_bits(const struct ti_lynx *lynx, int offset,
                                 u32 mask)
 {
         reg_write(lynx, offset, (reg_read(lynx, offset) | mask));
 }
 
-inline static void reg_clear_bits(const struct ti_lynx *lynx, int offset,
+static inline void reg_clear_bits(const struct ti_lynx *lynx, int offset,
                                   u32 mask)
 {
         reg_write(lynx, offset, (reg_read(lynx, offset) & ~mask));
@@ -248,9 +250,9 @@ inline static void reg_clear_bits(const struct ti_lynx *lynx, int offset,
 #define FIFO_SIZES                        0xa00
 
 #define FIFO_CONTROL                      0xa10
-#define GRF_FLUSH                         (1<<4)
-#define ITF_FLUSH                         (1<<3)
-#define ATF_FLUSH                         (1<<2)
+#define FIFO_CONTROL_GRF_FLUSH            (1<<4)
+#define FIFO_CONTROL_ITF_FLUSH            (1<<3)
+#define FIFO_CONTROL_ATF_FLUSH            (1<<2)
 
 #define FIFO_XMIT_THRESHOLD               0xa14
 
@@ -285,8 +287,8 @@ inline static void reg_clear_bits(const struct ti_lynx *lynx, int offset,
 #define DMA_WORD1_CMP_MATCH_OTHERBUS      (1<<15)
 #define DMA_WORD1_CMP_MATCH_BROADCAST     (1<<14)
 #define DMA_WORD1_CMP_MATCH_BUS_BCAST     (1<<13)
-#define DMA_WORD1_CMP_MATCH_NODE_BCAST    (1<<12)
-#define DMA_WORD1_CMP_MATCH_LOCAL         (1<<11)
+#define DMA_WORD1_CMP_MATCH_LOCAL_NODE    (1<<12)
+#define DMA_WORD1_CMP_MATCH_EXACT         (1<<11)
 #define DMA_WORD1_CMP_ENABLE_SELF_ID      (1<<10)
 #define DMA_WORD1_CMP_ENABLE_MASTER       (1<<8)
 
@@ -368,7 +370,7 @@ struct ti_pcl {
 
 #ifdef CONFIG_IEEE1394_PCILYNX_LOCALRAM
 
-inline static void put_pcl(const struct ti_lynx *lynx, pcl_t pclid,
+static inline void put_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                            const struct ti_pcl *pcl)
 {
         int i;
@@ -376,11 +378,11 @@ inline static void put_pcl(const struct ti_lynx *lynx, pcl_t pclid,
         u32 *out = (u32 *)(lynx->local_ram + pclid * sizeof(struct ti_pcl));
 
         for (i = 0; i < 32; i++, out++, in++) {
-                writel(cpu_to_le32(*in), out);
+                writel(*in, out);
         }
 }
 
-inline static void get_pcl(const struct ti_lynx *lynx, pcl_t pclid,
+static inline void get_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                            struct ti_pcl *pcl)
 {
         int i;
@@ -388,25 +390,25 @@ inline static void get_pcl(const struct ti_lynx *lynx, pcl_t pclid,
         u32 *in = (u32 *)(lynx->local_ram + pclid * sizeof(struct ti_pcl));
 
         for (i = 0; i < 32; i++, out++, in++) {
-                *out = le32_to_cpu(readl(in));
+                *out = readl(in);
         }
 }
 
-inline static u32 pcl_bus(const struct ti_lynx *lynx, pcl_t pclid)
+static inline u32 pcl_bus(const struct ti_lynx *lynx, pcl_t pclid)
 {
         return pci_resource_start(lynx->dev, 1) + pclid * sizeof(struct ti_pcl);
 }
 
 #else /* CONFIG_IEEE1394_PCILYNX_LOCALRAM */
 
-inline static void put_pcl(const struct ti_lynx *lynx, pcl_t pclid,
+static inline void put_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                            const struct ti_pcl *pcl)
 {
         memcpy_le32((u32 *)(lynx->pcl_mem + pclid * sizeof(struct ti_pcl)),
                     (u32 *)pcl, sizeof(struct ti_pcl));
 }
 
-inline static void get_pcl(const struct ti_lynx *lynx, pcl_t pclid,
+static inline void get_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                            struct ti_pcl *pcl)
 {
         memcpy_le32((u32 *)pcl,
@@ -414,7 +416,7 @@ inline static void get_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                     sizeof(struct ti_pcl));
 }
 
-inline static u32 pcl_bus(const struct ti_lynx *lynx, pcl_t pclid)
+static inline u32 pcl_bus(const struct ti_lynx *lynx, pcl_t pclid)
 {
         return lynx->pcl_mem_dma + pclid * sizeof(struct ti_pcl);
 }
@@ -425,14 +427,14 @@ inline static u32 pcl_bus(const struct ti_lynx *lynx, pcl_t pclid)
 #if defined (CONFIG_IEEE1394_PCILYNX_LOCALRAM) || defined (__BIG_ENDIAN)
 typedef struct ti_pcl pcltmp_t;
 
-inline static struct ti_pcl *edit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
+static inline struct ti_pcl *edit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                                       pcltmp_t *tmp)
 {
         get_pcl(lynx, pclid, tmp);
         return tmp;
 }
 
-inline static void commit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
+static inline void commit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                               pcltmp_t *tmp)
 {
         put_pcl(lynx, pclid, tmp);
@@ -441,20 +443,20 @@ inline static void commit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
 #else
 typedef int pcltmp_t; /* just a dummy */
 
-inline static struct ti_pcl *edit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
+static inline struct ti_pcl *edit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                                       pcltmp_t *tmp)
 {
         return lynx->pcl_mem + pclid * sizeof(struct ti_pcl);
 }
 
-inline static void commit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
+static inline void commit_pcl(const struct ti_lynx *lynx, pcl_t pclid,
                               pcltmp_t *tmp)
 {
 }
 #endif
 
 
-inline static void run_sub_pcl(const struct ti_lynx *lynx, pcl_t pclid, int idx,
+static inline void run_sub_pcl(const struct ti_lynx *lynx, pcl_t pclid, int idx,
                                int dmachan)
 {
         reg_write(lynx, DMA0_CURRENT_PCL + dmachan * 0x20,
@@ -463,7 +465,7 @@ inline static void run_sub_pcl(const struct ti_lynx *lynx, pcl_t pclid, int idx,
                   DMA_CHAN_CTRL_ENABLE | DMA_CHAN_CTRL_LINK);
 }
 
-inline static void run_pcl(const struct ti_lynx *lynx, pcl_t pclid, int dmachan)
+static inline void run_pcl(const struct ti_lynx *lynx, pcl_t pclid, int dmachan)
 {
         run_sub_pcl(lynx, pclid, 0, dmachan);
 }

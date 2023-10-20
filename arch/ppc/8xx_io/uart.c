@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.uart.c 1.19 10/26/01 09:59:32 trini
+ */
+/*
  *  UART driver for MPC860 CPM SCC or SMC
  *  Copyright (c) 1997 Dan Malek (dmalek@jlc.net)
  *
@@ -34,13 +37,16 @@
 #include <linux/fcntl.h>
 #include <linux/ptrace.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <asm/uaccess.h>
 #include <asm/8xx_immap.h>
 #include <asm/mpc8xx.h>
-#include "commproc.h"
+#include <asm/commproc.h>
+#ifdef CONFIG_MAGIC_SYSRQ
+#include <linux/sysrq.h>
+#endif
 
 #ifdef CONFIG_KGDB
 extern void breakpoint(void);
@@ -53,10 +59,22 @@ extern int  kgdb_output_string (const char* s, unsigned int count);
 
 /* this defines the index into rs_table for the port to use
 */
-#ifndef CONFIG_SERIAL_CONSOLE_PORT
-#define CONFIG_SERIAL_CONSOLE_PORT	0
-#endif
-#endif
+# ifndef CONFIG_SERIAL_CONSOLE_PORT
+#  ifdef CONFIG_SCC3_ENET
+#   ifdef CONFIG_CONS_SMC2
+#    define CONFIG_SERIAL_CONSOLE_PORT	0	/* Console on SMC2 is 1st port */
+#   else
+#    error "Can't use SMC1 for console with Ethernet on SCC3"
+#   endif
+#  else	/* ! CONFIG_SCC3_ENET */
+#   ifdef CONFIG_CONS_SMC2			/* Console on SMC2 */
+#    define CONFIG_SERIAL_CONSOLE_PORT	1
+#   else					/* Console on SMC1 */
+#    define CONFIG_SERIAL_CONSOLE_PORT	0
+#   endif /* CONFIG_CONS_SMC2 */
+#  endif  /* CONFIG_SCC3_ENET */
+# endif	  /* CONFIG_SERIAL_CONSOLE_PORT */
+#endif	  /* CONFIG_SERIAL_CONSOLE */
 
 #if 0
 /* SCC2 for console
@@ -75,6 +93,15 @@ static DECLARE_TASK_QUEUE(tq_serial);
 static struct tty_driver serial_driver, callout_driver;
 static int serial_refcount;
 static int serial_console_setup(struct console *co, char *options);
+
+static void serial_console_write(struct console *c, const char *s,
+				unsigned count);
+static kdev_t serial_console_device(struct console *c);
+static int serial_console_wait_key(struct console *co);
+
+#if defined(CONFIG_SERIAL_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
+static unsigned long break_pressed; /* break, really ... */
+#endif
 
 /*
  * Serial driver configuration section.  Here are the various options:
@@ -118,14 +145,22 @@ static int serial_console_setup(struct console *co, char *options);
  */
 static struct serial_state rs_table[] = {
 	/* UART CLK   PORT          IRQ      FLAGS  NUM   */
-	{ 0,     0, PROFF_SMC1, CPMVEC_SMC1,   0,    0 },    /* SMC1 ttyS0 */
-#ifdef CONFIG_8xxSMC2
-	{ 0,     0, PROFF_SMC2, CPMVEC_SMC2,   0,    1 },    /* SMC2 ttyS1 */
+#ifndef CONFIG_SCC3_ENET	/* SMC1 not usable with Ethernet on SCC3 */
+  	{ 0,     0, PROFF_SMC1, CPMVEC_SMC1,   0,    0 },    /* SMC1 ttyS0 */
 #endif
-#ifdef CONFIG_8xxSCC
-	{ 0,     0, PROFF_SCC2, CPMVEC_SCC2,   0,    (NUM_IS_SCC | 1) },    /* SCC2 ttyS2 */
-	{ 0,     0, PROFF_SCC3, CPMVEC_SCC3,   0,    (NUM_IS_SCC | 2) },    /* SCC3 ttyS3 */
-#endif
+#if !defined(CONFIG_USB_MPC8xx) && !defined(CONFIG_USB_CLIENT_MPC8xx)
+# ifdef CONFIG_SMC2_UART
+  	{ 0,     0, PROFF_SMC2, CPMVEC_SMC2,   0,    1 },    /* SMC2 ttyS1 */
+# endif
+# ifdef CONFIG_USE_SCC_IO
+  	{ 0,     0, PROFF_SCC2, CPMVEC_SCC2,   0,    (NUM_IS_SCC | 1) },    /* SCC2 ttyS2 */
+  	{ 0,     0, PROFF_SCC3, CPMVEC_SCC3,   0,    (NUM_IS_SCC | 2) },    /* SCC3 ttyS3 */
+# endif
+  #else /* CONFIG_USB_xxx */
+# ifdef CONFIG_USE_SCC_IO
+  	{ 0,     0, PROFF_SCC3, CPMVEC_SCC3,   0,    (NUM_IS_SCC | 2) },    /* SCC3 ttyS3 */
+# endif
+#endif	/* CONFIG_USB_xxx */
 };
 
 #define NR_PORTS	(sizeof(rs_table)/sizeof(struct serial_state))
@@ -178,6 +213,16 @@ typedef struct serial_info {
 	cbd_t			*tx_bd_base;
 	cbd_t			*tx_cur;
 } ser_info_t;
+
+static struct console sercons = {
+	name:		"ttyS",
+	write:		serial_console_write,
+	device:		serial_console_device,
+	wait_key:	serial_console_wait_key,
+	setup:		serial_console_setup,
+	flags:		CON_PRINTBUFFER,
+	index:		CONFIG_SERIAL_CONSOLE_PORT,
+};
 
 static void change_speed(ser_info_t *info);
 static void rs_8xx_wait_until_sent(struct tty_struct *tty, int timeout);
@@ -302,7 +347,7 @@ static _INLINE_ void rs_sched_event(ser_info_t *info,
 	mark_bh(SERIAL_BH);
 }
 
-static _INLINE_ void receive_chars(ser_info_t *info)
+static _INLINE_ void receive_chars(ser_info_t *info, struct pt_regs *regs)
 {
 	struct tty_struct *tty = info->tty;
 	unsigned char ch, *cp;
@@ -390,7 +435,7 @@ static _INLINE_ void receive_chars(ser_info_t *info)
 				}
 				 */
 				status &= info->read_status_mask;
-		
+
 				if (status & (BD_SC_BR)) {
 #ifdef SERIAL_DEBUG_INTR
 					printk("handling break....");
@@ -417,6 +462,17 @@ static _INLINE_ void receive_chars(ser_info_t *info)
 					}
 				}
 			}
+#if defined(CONFIG_SERIAL_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
+			if (break_pressed && info->line == sercons.index) {
+				if (ch != 0 && time_before(jiffies, 
+							break_pressed + HZ*5)) {
+					handle_sysrq(ch, regs, NULL, NULL);
+					break_pressed = 0;
+					goto ignore_char;
+				} else
+					break_pressed = 0;
+			}
+#endif
 			if (tty->flip.count >= TTY_FLIPBUF_SIZE)
 				break;
 
@@ -425,6 +481,9 @@ static _INLINE_ void receive_chars(ser_info_t *info)
 			tty->flip.count++;
 		}
 
+#if defined(CONFIG_SERIAL_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
+	ignore_char:	
+#endif
 		/* This BD is ready to be used again.  Clear status.
 		 * Get next BD.
 		 */
@@ -436,17 +495,27 @@ static _INLINE_ void receive_chars(ser_info_t *info)
 		else
 			bdp++;
 	}
-
 	info->rx_cur = (cbd_t *)bdp;
 
 	queue_task(&tty->flip.tqueue, &tq_timer);
 }
 
-static _INLINE_ void receive_break(ser_info_t *info)
+static _INLINE_ void receive_break(ser_info_t *info, struct pt_regs *regs)
 {
 	struct tty_struct *tty = info->tty;
 
 	info->state->icount.brk++;
+
+#if defined(CONFIG_SERIAL_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
+	if (info->line == sercons.index) {
+		if (!break_pressed) {
+			break_pressed = jiffies;
+			return;
+		} else
+			break_pressed = 0;
+	}
+#endif
+
 	/* Check to see if there is room in the tty buffer for
 	 * the break.  If not, we exit now, losing the break.  FIXME
 	 */
@@ -459,7 +528,7 @@ static _INLINE_ void receive_break(ser_info_t *info)
 	queue_task(&tty->flip.tqueue, &tq_timer);
 }
 
-static _INLINE_ void transmit_chars(ser_info_t *info)
+static _INLINE_ void transmit_chars(ser_info_t *info, struct pt_regs *regs)
 {
 	
 	if ((info->flags & TX_WAKEUP) ||
@@ -548,7 +617,7 @@ static _INLINE_ void check_modem_status(struct async_struct *info)
 /*
  * This is the serial driver's interrupt routine for a single port
  */
-static void rs_8xx_interrupt(void *dev_id)
+static void rs_8xx_interrupt(void *dev_id, struct pt_regs *regs)
 {
 	u_char	events;
 	int	idx;
@@ -562,21 +631,23 @@ static void rs_8xx_interrupt(void *dev_id)
 	if (info->state->smc_scc_num & NUM_IS_SCC) {
 		sccp = &cpmp->cp_scc[idx];
 		events = sccp->scc_scce;
+		if (events & SMCM_BRKE)
+			receive_break(info, regs);
 		if (events & SCCM_RX)
-			receive_chars(info);
+			receive_chars(info, regs);
 		if (events & SCCM_TX)
-			transmit_chars(info);
+			transmit_chars(info, regs);
 		sccp->scc_scce = events;
 	}
 	else {
 		smcp = &cpmp->cp_smc[idx];
 		events = smcp->smc_smce;
 		if (events & SMCM_BRKE)
-			receive_break(info);
+			receive_break(info, regs);
 		if (events & SMCM_RX)
-			receive_chars(info);
+			receive_chars(info, regs);
 		if (events & SMCM_TX)
-			transmit_chars(info);
+			transmit_chars(info, regs);
 		smcp->smc_smce = events;
 	}
 	
@@ -807,7 +878,7 @@ static void shutdown(ser_info_t * info)
 static void change_speed(ser_info_t *info)
 {
 	int	baud_rate;
-	unsigned cflag, cval, scval, prev_mode;
+	unsigned cflag, cval, scval, prev_mode, new_mode;
 	int	i, bits, sbits, idx;
 	unsigned long	flags;
 	struct serial_state *state;
@@ -848,10 +919,10 @@ static void change_speed(ser_info_t *info)
 		cval |= SMCMR_PEN;
 		scval |= SCU_PMSR_PEN;
 		bits++;
-	}
-	if (!(cflag & PARODD)) {
-		cval |= SMCMR_PM_EVEN;
-		scval |= (SCU_PMSR_REVP | SCU_PMSR_TEVP);
+		if (!(cflag & PARODD)) {
+			cval |= SMCMR_PM_EVEN;
+			scval |= (SCU_PMSR_REVP | SCU_PMSR_TEVP);
+		}
 	}
 
 	/* Determine divisor based on baud rate */
@@ -924,7 +995,13 @@ static void change_speed(ser_info_t *info)
 	idx = PORT_NUM(state->smc_scc_num);
 	if (state->smc_scc_num & NUM_IS_SCC) {
 		sccp = &cpmp->cp_scc[idx];
-		sccp->scc_pmsr = (sbits << 12) | scval;
+		new_mode = (sbits << 12) | scval;
+		prev_mode = sccp->scc_pmsr;
+		if (!(prev_mode & SCU_PMSR_PEN)) 
+			/* If parity is disabled, mask out even/odd */
+			prev_mode &= ~(SCU_PMSR_TPM|SCU_PMSR_RPM);
+		if (prev_mode != new_mode)
+			sccp->scc_pmsr = new_mode;
 	}
 	else {
 		smcp = &cpmp->cp_smc[idx];
@@ -934,8 +1011,13 @@ static void change_speed(ser_info_t *info)
 		 * present.
 		 */
 		prev_mode = smcp->smc_smcmr;
-		smcp->smc_smcmr = smcr_mk_clen(bits) | cval |  SMCMR_SM_UART;
-		smcp->smc_smcmr |= (prev_mode & (SMCMR_REN | SMCMR_TEN));
+		new_mode = smcr_mk_clen(bits) | cval |  SMCMR_SM_UART;
+		new_mode |= (prev_mode & (SMCMR_REN | SMCMR_TEN));
+		if (!(prev_mode & SMCMR_PEN))
+			/* If parity is disabled, mask out even/odd */
+			prev_mode &= ~SMCMR_PM_EVEN;
+		if (prev_mode != new_mode)
+			smcp->smc_smcmr = new_mode;
 	}
 
 	m8xx_cpm_setbrg((state - rs_table), baud_rate);
@@ -2405,17 +2487,6 @@ static kdev_t serial_console_device(struct console *c)
 	return MKDEV(TTY_MAJOR, 64 + c->index);
 }
 
-
-static struct console sercons = {
-	name:		"ttyS",
-	write:		serial_console_write,
-	device:		serial_console_device,
-	wait_key:	serial_console_wait_key,
-	setup:		serial_console_setup,
-	flags:		CON_PRINTBUFFER,
-	index:		CONFIG_SERIAL_CONSOLE_PORT,
-};
-
 /*
  *	Register console.
  */
@@ -2513,7 +2584,7 @@ int __init rs_8xx_init(void)
 
 	/* Configure SCC2, SCC3, and SCC4 instead of port A parallel I/O.
 	 */
-#ifdef CONFIG_8xxSCC
+#ifdef CONFIG_USE_SCC_IO
 #ifndef CONFIG_MBX
 	/* The "standard" configuration through the 860.
 	*/
@@ -2727,16 +2798,16 @@ int __init rs_8xx_init(void)
 				 * parallel I/O.  On 823/850 these are on
 				 * port A for SMC2.
 				 */
-#ifndef CONFIG_8xx_ALTSMC2
+#ifndef CONFIG_ALTSMC2
 				iobits = 0xc0 << (idx * 4);
 				cp->cp_pbpar |= iobits;
 				cp->cp_pbdir &= ~iobits;
 				cp->cp_pbodr &= ~iobits;
 #else
+				iobits = 0xc0;
 				if (idx == 0) {
 					/* SMC1 on Port B, like all 8xx.
 					*/
-					iobits = 0xc0;
 					cp->cp_pbpar |= iobits;
 					cp->cp_pbdir &= ~iobits;
 					cp->cp_pbodr &= ~iobits;
@@ -2744,12 +2815,11 @@ int __init rs_8xx_init(void)
 				else {
 					/* SMC2 is on Port A.
 					*/
-					iobits = 0x300;
 					immap->im_ioport.iop_papar |= iobits;
 					immap->im_ioport.iop_padir &= ~iobits;
 					immap->im_ioport.iop_paodr &= ~iobits;
 				}
-#endif
+#endif /* CONFIG_ALTSMC2 */
 
 				/* Connect the baud rate generator to the
 				 * SMC based upon index in rs_table.  Also
@@ -2836,6 +2906,9 @@ static int __init serial_console_setup(struct console *co, char *options)
 	for (bidx = 0; bidx < (sizeof(baud_table) / sizeof(int)); bidx++)
 		if (bd->bi_baudrate == baud_table[bidx])
 			break;
+	/* make sure we have a useful value */
+	if (bidx == (sizeof(baud_table) / sizeof(int)))
+		bidx = 13;	/* B9600 */
 
 	co->cflag = CREAD|CLOCAL|bidx|CS8;
 	baud_idx = bidx;
@@ -2958,7 +3031,7 @@ static int __init serial_console_setup(struct console *co, char *options)
 		*/
 		chan = smc_chan_map[idx];
 		cp->cp_cpcr = mk_cr_cmd(chan, CPM_CR_INIT_TRX) | CPM_CR_FLG;
-		printk("");
+		printk("%s", "");
 		while (cp->cp_cpcr & CPM_CR_FLG);
 
 		/* Set UART mode, 8 bit, no parity, one stop.

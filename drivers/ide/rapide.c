@@ -9,7 +9,7 @@
  */
 
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/blkdev.h>
 #include <linux/errno.h>
 #include <linux/ide.h>
@@ -17,7 +17,7 @@
 
 #include <asm/ecard.h>
 
-static const card_ids __init rapide_cids[] = {
+static card_ids __init rapide_cids[] = {
 	{ MANU_YELLOWSTONE, PROD_YELLOWSTONE_RAPIDE32 },
 	{ 0xffff, 0xffff }
 };
@@ -69,6 +69,7 @@ int __init rapide_init(void)
 }
 
 #ifdef MODULE
+MODULE_LICENSE("GPL");
 
 int init_module (void)
 {

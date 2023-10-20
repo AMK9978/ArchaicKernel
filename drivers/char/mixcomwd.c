@@ -165,7 +165,7 @@ static int mixcomwd_ioctl(struct inode *inode, struct file *file,
 			mixcomwd_ping();
 			break;
 		default:
-			return -ENOIOCTLCMD;
+			return -ENOTTY;
 	}
 	return 0;
 }
@@ -269,3 +269,6 @@ static void __exit mixcomwd_exit(void)
 
 module_init(mixcomwd_init);
 module_exit(mixcomwd_exit);
+
+MODULE_LICENSE("GPL");
+EXPORT_NO_SYMBOLS;

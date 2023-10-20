@@ -11,6 +11,7 @@
  */
 
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
@@ -25,6 +26,10 @@
 
 #define ALIGN(val, align) ((unsigned long)	\
 	(((unsigned long) (val) + ((align) - 1)) & ~((align) - 1)))
+
+#define SG_ENT_VIRT_ADDRESS(sg)	((sg)->address ? (sg)->address			\
+				 : page_address((sg)->page) + (sg)->offset)
+#define SG_ENT_PHYS_ADDRESS(SG)	virt_to_phys(SG_ENT_VIRT_ADDRESS(SG))
 
 /*
  * log of the size of each IO TLB slab.  The number of slabs is command line controllable.
@@ -50,14 +55,14 @@ static unsigned int *io_tlb_list;
 static unsigned int io_tlb_index;
 
 /*
- * We need to save away the original address corresponding to a mapped entry for the sync 
+ * We need to save away the original address corresponding to a mapped entry for the sync
  * operations.
  */
 static unsigned char **io_tlb_orig_addr;
 
 /*
  * Protect the above data structures in the map and unmap calls
- */ 
+ */
 static spinlock_t io_tlb_lock = SPIN_LOCK_UNLOCKED;
 
 static int __init
@@ -132,7 +137,7 @@ map_single (struct pci_dev *hwdev, char *buffer, size_t size, int direction)
 	{
 		wrap = index = ALIGN(io_tlb_index, stride);
 
-		if (index >= io_tlb_nslabs) 
+		if (index >= io_tlb_nslabs)
 			wrap = index = 0;
 
 		do {
@@ -164,12 +169,12 @@ map_single (struct pci_dev *hwdev, char *buffer, size_t size, int direction)
 		} while (index != wrap);
 
 		/*
-		 * XXX What is a suitable recovery mechanism here?  We cannot 
+		 * XXX What is a suitable recovery mechanism here?  We cannot
 		 * sleep because we are called from with in interrupts!
 		 */
 		panic("map_single: could not allocate software IO TLB (%ld bytes)", size);
-found:
 	}
+  found:
 	spin_unlock_irqrestore(&io_tlb_lock, flags);
 
 	/*
@@ -199,9 +204,9 @@ unmap_single (struct pci_dev *hwdev, char *dma_addr, size_t size, int direction)
 	 */
 	if ((direction == PCI_DMA_FROMDEVICE) || (direction == PCI_DMA_BIDIRECTIONAL))
 		/*
- 	 	 * bounce... copy the data back into the original buffer * and delete the
- 	 	 * bounce buffer.
- 	 	 */
+		 * bounce... copy the data back into the original buffer * and delete the
+		 * bounce buffer.
+		 */
 		memcpy(buffer, dma_addr, size);
 
 	/*
@@ -236,9 +241,9 @@ sync_single (struct pci_dev *hwdev, char *dma_addr, size_t size, int direction)
 	char *buffer = io_tlb_orig_addr[index];
 
 	/*
-  	 * bounce... copy the data back into/from the original buffer
+	 * bounce... copy the data back into/from the original buffer
 	 * XXX How do you handle PCI_DMA_BIDIRECTIONAL here ?
- 	 */
+	 */
 	if (direction == PCI_DMA_FROMDEVICE)
 		memcpy(buffer, dma_addr, size);
 	else if (direction == PCI_DMA_TODEVICE)
@@ -262,7 +267,7 @@ swiotlb_alloc_consistent (struct pci_dev *hwdev, size_t size, dma_addr_t *dma_ha
 
 	memset(ret, 0, size);
 	pci_addr = virt_to_phys(ret);
-	if ((pci_addr & ~hwdev->dma_mask) != 0)
+	if (hwdev && (pci_addr & ~hwdev->dma_mask) != 0)
 		panic("swiotlb_alloc_consistent: allocated memory is out of range for PCI device");
 	*dma_handle = pci_addr;
 	return ret;
@@ -298,8 +303,8 @@ swiotlb_map_single (struct pci_dev *hwdev, void *ptr, size_t size, int direction
 		 */
 		return pci_addr;
 
-	/* 
-	 * get a bounce buffer: 
+	/*
+	 * get a bounce buffer:
 	 */
 	pci_addr = virt_to_phys(map_single(hwdev, ptr, size, direction));
 
@@ -325,12 +330,8 @@ mark_clean (void *addr, size_t size)
 	pg_addr = PAGE_ALIGN((unsigned long) addr);
 	end = (unsigned long) addr + size;
 	while (pg_addr + PAGE_SIZE <= end) {
-#if 0
-		set_bit(PG_arch_1, virt_to_page(pg_addr));
-#else
-		if (!VALID_PAGE(virt_to_page(pg_addr)))
-			printk("Invalid addr %lx!!!\n", pg_addr);
-#endif
+		struct page *page = virt_to_page(pg_addr);
+		set_bit(PG_arch_1, &page->flags);
 		pg_addr += PAGE_SIZE;
 	}
 }
@@ -395,15 +396,20 @@ swiotlb_sync_single (struct pci_dev *hwdev, dma_addr_t pci_addr, size_t size, in
 int
 swiotlb_map_sg (struct pci_dev *hwdev, struct scatterlist *sg, int nelems, int direction)
 {
+	void *addr;
 	int i;
 
 	if (direction == PCI_DMA_NONE)
 		BUG();
 
 	for (i = 0; i < nelems; i++, sg++) {
-		sg->orig_address = sg->address;
-		if ((virt_to_phys(sg->address) & ~hwdev->dma_mask) != 0) {
-			sg->address = map_single(hwdev, sg->address, sg->length, direction);
+		sg->orig_address = SG_ENT_VIRT_ADDRESS(sg);
+		if ((SG_ENT_PHYS_ADDRESS(sg) & ~hwdev->dma_mask) != 0) {
+			addr = map_single(hwdev, sg->address, sg->length, direction);
+			if (sg->address)
+				sg->address = addr;
+			else
+				sg->page = virt_to_page(addr);
 		}
 	}
 	return nelems;
@@ -422,9 +428,12 @@ swiotlb_unmap_sg (struct pci_dev *hwdev, struct scatterlist *sg, int nelems, int
 		BUG();
 
 	for (i = 0; i < nelems; i++, sg++)
-		if (sg->orig_address != sg->address) {
-			unmap_single(hwdev, sg->address, sg->length, direction);
-			sg->address = sg->orig_address;
+		if (sg->orig_address != SG_ENT_VIRT_ADDRESS(sg)) {
+			unmap_single(hwdev, SG_ENT_VIRT_ADDRESS(sg), sg->length, direction);
+			if (sg->address)
+				sg->address = sg->orig_address;
+			else
+				sg->page = virt_to_page(sg->orig_address);
 		} else if (direction == PCI_DMA_FROMDEVICE)
 			mark_clean(sg->address, sg->length);
 }
@@ -445,12 +454,23 @@ swiotlb_sync_sg (struct pci_dev *hwdev, struct scatterlist *sg, int nelems, int 
 		BUG();
 
 	for (i = 0; i < nelems; i++, sg++)
-		if (sg->orig_address != sg->address)
-			sync_single(hwdev, sg->address, sg->length, direction);
+		if (sg->orig_address != SG_ENT_VIRT_ADDRESS(sg))
+			sync_single(hwdev, SG_ENT_VIRT_ADDRESS(sg), sg->length, direction);
 }
 
 unsigned long
 swiotlb_dma_address (struct scatterlist *sg)
 {
-	return virt_to_phys(sg->address);
+	return SG_ENT_PHYS_ADDRESS(sg);
 }
+
+EXPORT_SYMBOL(swiotlb_init);
+EXPORT_SYMBOL(swiotlb_map_single);
+EXPORT_SYMBOL(swiotlb_unmap_single);
+EXPORT_SYMBOL(swiotlb_map_sg);
+EXPORT_SYMBOL(swiotlb_unmap_sg);
+EXPORT_SYMBOL(swiotlb_sync_single);
+EXPORT_SYMBOL(swiotlb_sync_sg);
+EXPORT_SYMBOL(swiotlb_dma_address);
+EXPORT_SYMBOL(swiotlb_alloc_consistent);
+EXPORT_SYMBOL(swiotlb_free_consistent);

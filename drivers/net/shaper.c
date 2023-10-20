@@ -76,7 +76,7 @@
 #include <linux/ptrace.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/netdevice.h>
@@ -283,7 +283,7 @@ static void shaper_queue_xmit(struct shaper *shaper, struct sk_buff *skb)
 				shaper->dev->name,newskb->priority);
 		dev_queue_xmit(newskb);
 
-                shaper->stats.tx_bytes+=newskb->len;
+                shaper->stats.tx_bytes += skb->len;
 		shaper->stats.tx_packets++;
 
                 if(sh_debug)
@@ -651,8 +651,6 @@ static int __init shaper_probe(struct net_device *dev)
 	 *	Intialise the packet queues
 	 */
 	 
-	dev_init_buffers(dev);
-	
 	/*
 	 *	Handlers for when we attach to a device.
 	 */
@@ -684,6 +682,7 @@ static int shapers = 1;
 #ifdef MODULE
 
 MODULE_PARM(shapers, "i");
+MODULE_PARM_DESC(shapers, "Traffic shaper: maximum nuber of shapers");
 
 #else /* MODULE */
 
@@ -744,4 +743,5 @@ static void __exit shaper_exit (void)
 
 module_init(shaper_init);
 module_exit(shaper_exit);
+MODULE_LICENSE("GPL");
 

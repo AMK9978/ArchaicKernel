@@ -443,10 +443,10 @@ sys32_execve(abi64_no_regargs, struct pt_regs regs)
 	 *  `execve' frees all current memory we only have to do an
 	 *  `munmap' if the `execve' failes.
 	 */
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	av = (char **) do_mmap_pgoff(0, 0, len, PROT_READ | PROT_WRITE,
 				     MAP_PRIVATE | MAP_ANONYMOUS, 0);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 
 	if (IS_ERR(av))
 		return (long) av;
@@ -584,9 +584,6 @@ put_rusage (struct rusage32 *ru, struct rusage *r)
 	err |= __put_user (r->ru_nivcsw, &ru->ru_nivcsw);
 	return err;
 }
-
-extern asmlinkage int sys_wait4(pid_t pid, unsigned int * stat_addr,
-				int options, struct rusage * ru);
 
 asmlinkage int
 sys32_wait4(__kernel_pid_t32 pid, unsigned int * stat_addr, int options,
@@ -745,7 +742,9 @@ sys32_getrusage(int who, struct rusage32 *ru)
 	set_fs (KERNEL_DS);
 	ret = sys_getrusage(who, &r);
 	set_fs (old_fs);
-	if (put_rusage (ru, &r)) return -EFAULT;
+	if (put_rusage (ru, &r))
+		return -EFAULT;
+
 	return ret;
 }
 
@@ -755,7 +754,6 @@ get_tv32(struct timeval *o, struct timeval32 *i)
 	return (!access_ok(VERIFY_READ, i, sizeof(*i)) ||
 		(__get_user(o->tv_sec, &i->tv_sec) |
 		 __get_user(o->tv_usec, &i->tv_usec)));
-	return ENOSYS;
 }
 
 static inline long
@@ -766,7 +764,6 @@ get_it32(struct itimerval *o, struct itimerval32 *i)
 		 __get_user(o->it_interval.tv_usec, &i->it_interval.tv_usec) |
 		 __get_user(o->it_value.tv_sec, &i->it_value.tv_sec) |
 		 __get_user(o->it_value.tv_usec, &i->it_value.tv_usec)));
-	return ENOSYS;
 }
 
 static inline long
@@ -780,12 +777,11 @@ put_tv32(struct timeval32 *o, struct timeval *i)
 static inline long
 put_it32(struct itimerval32 *o, struct itimerval *i)
 {
-	return (!access_ok(VERIFY_WRITE, i, sizeof(*i)) ||
+	return (!access_ok(VERIFY_WRITE, o, sizeof(*o)) ||
 		(__put_user(i->it_interval.tv_sec, &o->it_interval.tv_sec) |
 		 __put_user(i->it_interval.tv_usec, &o->it_interval.tv_usec) |
 		 __put_user(i->it_value.tv_sec, &o->it_value.tv_sec) |
 		 __put_user(i->it_value.tv_usec, &o->it_value.tv_usec)));
-	return ENOSYS;
 }
 
 extern int do_getitimer(int which, struct itimerval *value);
@@ -842,6 +838,7 @@ sys32_alarm(unsigned int seconds)
 	/* And we'd better return too much than too little anyway */
 	if (it_old.it_value.tv_usec)
 		oldalarm++;
+
 	return oldalarm;
 }
 
@@ -1541,11 +1538,11 @@ do_sys32_semctl(int first, int second, int third, void *uptr)
 	err = -EFAULT;
 	if (get_user (pad, (u32 *)uptr))
 		return err;
-	if(third == SETVAL)
+	if ((third & ~IPC_64) == SETVAL)
 		fourth.val = (int)pad;
 	else
 		fourth.__pad = (void *)A(pad);
-	switch (third) {
+	switch (third & ~IPC_64) {
 
 	case IPC_INFO:
 	case IPC_RMID:

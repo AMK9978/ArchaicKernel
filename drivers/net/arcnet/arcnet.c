@@ -3,7 +3,7 @@
  * 
  * Written 1997 by David Woodhouse.
  * Written 1994-1999 by Avery Pennarun.
- * Written 1999-2000 by Martin Mares <mj@suse.cz>.
+ * Written 1999-2000 by Martin Mares <mj@ucw.cz>.
  * Derived from skeleton.c by Donald Becker.
  *
  * Special thanks to Contemporary Controls, Inc. (www.ccontrols.com)
@@ -16,7 +16,7 @@
  * skeleton.c Written 1993 by Donald Becker.
  * Copyright 1993 United States Government as represented by the
  * Director, National Security Agency.  This software may only be used
- * and distributed according to the terms of the GNU Public License as
+ * and distributed according to the terms of the GNU General Public License as
  * modified by SRC, incorporated herein by reference.
  *
  * **********************
@@ -107,7 +107,7 @@ static int go_tx(struct net_device *dev);
 
 void __init arcnet_init(void)
 {
-	static int arcnet_inited = 0;
+	static int arcnet_inited;
 	int count;
 
 	if (arcnet_inited++)
@@ -361,8 +361,6 @@ void arcdev_setup(struct net_device *dev)
 	dev->get_stats = arcnet_get_stats;
 	dev->hard_header = arcnet_header;
 	dev->rebuild_header = arcnet_rebuild_header;
-
-	dev_init_buffers(dev);
 }
 
 
@@ -528,7 +526,7 @@ static int arcnet_rebuild_header(struct sk_buff *skb)
 	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
 	int status = 0;		/* default is failure */
 	unsigned short type;
-	uint8_t daddr;
+	uint8_t daddr=0;
 
 	if (skb->nh.raw - skb->mac.raw != 2) {
 		BUGMSG(D_NORMAL,
@@ -696,6 +694,9 @@ static void arcnet_timeout(struct net_device *dev)
 		       msg, status, lp->intmask, lp->lasttrans_dest);
 		lp->last_timeout = jiffies;
 	}
+
+	if (lp->cur_tx == -1)
+		netif_wake_queue(dev);
 }
 
 

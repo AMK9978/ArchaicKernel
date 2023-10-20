@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.prep_nvram.h 1.7 05/17/01 18:14:25 cort
+ */
+/*
  * PreP compliant NVRAM access
  */
 
@@ -20,6 +23,11 @@
 #ifdef __KERNEL__
 #ifndef _PPC_PREP_NVRAM_H
 #define _PPC_PREP_NVRAM_H
+
+#define MAX_PREP_NVRAM 0x8000
+#define PREP_NVRAM_AS0	0x74
+#define PREP_NVRAM_AS1	0x75
+#define PREP_NVRAM_DATA	0x77
 
 #define NVSIZE 4096	/* size of NVRAM */
 #define OSAREASIZE 512	/* size of OSArea space */

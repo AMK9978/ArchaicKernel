@@ -1,12 +1,12 @@
 /******************************************************************************
  *
  * Name: actbl1.h - ACPI 1.0 tables
- *       $Revision: 15 $
+ *       $Revision: 17 $
  *
  *****************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -34,7 +34,7 @@
 /*************************************/
 typedef struct
 {
-	ACPI_TABLE_HEADER       header;                 /* Table header */
+	acpi_table_header       header;                 /* Table header */
 	u32                     table_offset_entry [1]; /* Array of pointers to other */
 			 /* ACPI tables */
 } RSDT_DESCRIPTOR_REV1;
@@ -51,11 +51,11 @@ typedef struct
 	u32                     hardware_signature;     /* hardware configuration signature */
 	u32                     firmware_waking_vector; /* ACPI OS waking vector */
 	u32                     global_lock;            /* Global Lock */
-	u32                     S4_bios_f       : 1;    /* Indicates if S4_bIOS support is present */
+	u32                     S4bios_f        : 1;    /* Indicates if S4BIOS support is present */
 	u32                     reserved1       : 31;   /* must be 0 */
 	u8                      resverved3 [40];        /* reserved - must be zero */
 
-} FACS_DESCRIPTOR_REV1;
+} facs_descriptor_rev1;
 
 
 /************************************/
@@ -64,7 +64,7 @@ typedef struct
 /************************************/
 typedef struct
 {
-	ACPI_TABLE_HEADER       header;                 /* table header */
+	acpi_table_header       header;                 /* table header */
 	u32                     firmware_ctrl;          /* Physical address of FACS */
 	u32                     dsdt;                   /* Physical address of DSDT */
 	u8                      model;                  /* System Interrupt Model */
@@ -73,7 +73,7 @@ typedef struct
 	u32                     smi_cmd;                /* Port address of SMI command port */
 	u8                      acpi_enable;            /* value to write to smi_cmd to enable ACPI */
 	u8                      acpi_disable;           /* value to write to smi_cmd to disable ACPI */
-	u8                      S4_bios_req;            /* Value to write to SMI CMD to enter S4_bIOS state */
+	u8                      S4bios_req;             /* Value to write to SMI CMD to enter S4BIOS state */
 	u8                      reserved2;              /* reserved - must be zero */
 	u32                     pm1a_evt_blk;           /* Port address of Power Mgt 1a Acpi_event Reg Blk */
 	u32                     pm1b_evt_blk;           /* Port address of Power Mgt 1b Acpi_event Reg Blk */
@@ -114,7 +114,7 @@ typedef struct
 	u32                     tmr_val_ext     : 1;    /* tmr_val is 32 bits */
 	u32                     reserved5       : 23;   /* reserved - must be zero */
 
-}  FADT_DESCRIPTOR_REV1;
+}  fadt_descriptor_rev1;
 
 #pragma pack()
 

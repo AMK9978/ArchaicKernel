@@ -1,4 +1,4 @@
-/*  $Id: process.c,v 1.154 2000/10/05 06:12:57 anton Exp $
+/*  $Id: process.c,v 1.157 2001/11/13 00:57:05 davem Exp $
  *  linux/arch/sparc/kernel/process.c
  *
  *  Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -19,7 +19,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/config.h>
@@ -268,8 +268,8 @@ void show_stackframe(struct sparc_stackf *sf)
 
 void show_regs(struct pt_regs * regs)
 {
-        printk("PSR: %08lx PC: %08lx NPC: %08lx Y: %08lx\n", regs->psr,
-	       regs->pc, regs->npc, regs->y);
+        printk("PSR: %08lx PC: %08lx NPC: %08lx Y: %08lx    %s\n", regs->psr,
+	       regs->pc, regs->npc, regs->y, print_tainted());
 	printk("g0: %08lx g1: %08lx g2: %08lx g3: %08lx ",
 	       regs->u_regs[0], regs->u_regs[1], regs->u_regs[2],
 	       regs->u_regs[3]);
@@ -455,11 +455,7 @@ clone_stackframe(struct sparc_stackf *dst, struct sparc_stackf *src)
  *       allocate the task_struct and kernel stack in
  *       do_fork().
  */
-#ifdef CONFIG_SMP
-extern void ret_from_smpfork(void);
-#else
-extern void ret_from_syscall(void);
-#endif
+extern void ret_from_fork(void);
 
 int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 		unsigned long unused,
@@ -493,13 +489,8 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 	copy_regwin(new_stack, (((struct reg_window *) regs) - 1));
 
 	p->thread.ksp = (unsigned long) new_stack;
-#ifdef CONFIG_SMP
-	p->thread.kpc = (((unsigned long) ret_from_smpfork) - 0x8);
-	p->thread.kpsr = current->thread.fork_kpsr | PSR_PIL;
-#else
-	p->thread.kpc = (((unsigned long) ret_from_syscall) - 0x8);
+	p->thread.kpc = (((unsigned long) ret_from_fork) - 0x8);
 	p->thread.kpsr = current->thread.fork_kpsr;
-#endif
 	p->thread.kwim = current->thread.fork_kwim;
 
 	/* This is used for sun4c only */

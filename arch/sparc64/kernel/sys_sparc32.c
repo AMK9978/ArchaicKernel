@@ -1,4 +1,4 @@
-/* $Id: sys_sparc32.c,v 1.171 2000/12/13 16:34:55 davem Exp $
+/* $Id: sys_sparc32.c,v 1.182 2001/10/18 09:06:36 davem Exp $
  * sys_sparc32.c: Conversion between 32bit and 64bit native syscalls.
  *
  * Copyright (C) 1997,1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
@@ -25,7 +25,7 @@
 #include <linux/sem.h>
 #include <linux/msg.h>
 #include <linux/shm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/uio.h>
 #include <linux/nfs_fs.h>
 #include <linux/smb_fs.h>
@@ -1192,7 +1192,7 @@ struct readdir_callback32 {
 };
 
 static int fillonedir(void * __buf, const char * name, int namlen,
-		      off_t offset, ino_t ino, unsigned int d_type)
+		      loff_t offset, ino_t ino, unsigned int d_type)
 {
 	struct readdir_callback32 * buf = (struct readdir_callback32 *) __buf;
 	struct old_linux_dirent32 * dirent;
@@ -1247,7 +1247,7 @@ struct getdents_callback32 {
 	int error;
 };
 
-static int filldir(void * __buf, const char * name, int namlen, off_t offset, ino_t ino,
+static int filldir(void * __buf, const char * name, int namlen, loff_t offset, ino_t ino,
 		   unsigned int d_type)
 {
 	struct linux_dirent32 * dirent;
@@ -1793,9 +1793,6 @@ static int put_rusage (struct rusage32 *ru, struct rusage *r)
 	err |= __put_user (r->ru_nivcsw, &ru->ru_nivcsw);
 	return err;
 }
-
-extern asmlinkage int sys_wait4(pid_t pid,unsigned int * stat_addr,
-				int options, struct rusage * ru);
 
 asmlinkage int sys32_wait4(__kernel_pid_t32 pid, unsigned int *stat_addr, int options, struct rusage32 *ru)
 {
@@ -3496,6 +3493,7 @@ sys32_get_kernel_syms(struct kernel_sym *table)
 
 #endif  /* CONFIG_MODULES */
 
+#if defined(CONFIG_NFSD) || defined(CONFIG_NFSD_MODULE)
 /* Stuff for NFS server syscalls... */
 struct nfsctl_svc32 {
 	u16			svc32_port;
@@ -3818,6 +3816,13 @@ done:
 		kfree(kres);
 	return err;
 }
+#else /* !NFSD */
+extern asmlinkage long sys_ni_syscall(void);
+int asmlinkage sys32_nfsservctl(int cmd, void *notused, void *notused2)
+{
+	return sys_ni_syscall();
+}
+#endif
 
 /* Translations due to time_t size differences.  Which affects all
    sorts of things, like timeval and itimerval.  */
@@ -3994,6 +3999,12 @@ asmlinkage ssize_t32 sys32_pwrite(unsigned int fd, char *ubuf,
 	return sys_pwrite(fd, ubuf, count, ((loff_t)AA(poshi) << 32) | AA(poslo));
 }
 
+extern asmlinkage ssize_t sys_readahead(int fd, loff_t offset, size_t count);
+
+asmlinkage ssize_t32 sys32_readahead(int fd, u32 offhi, u32 offlo, s32 count)
+{
+	return sys_readahead(fd, ((loff_t)AA(offhi) << 32) | AA(offlo), count);
+}
 
 extern asmlinkage ssize_t sys_sendfile(int out_fd, int in_fd, off_t *offset, size_t count);
 
@@ -4010,7 +4021,7 @@ asmlinkage int sys32_sendfile(int out_fd, int in_fd, __kernel_off_t32 *offset, s
 	ret = sys_sendfile(out_fd, in_fd, offset ? &of : NULL, count);
 	set_fs(old_fs);
 	
-	if (!ret && offset && put_user(of, offset))
+	if (offset && put_user(of, offset))
 		return -EFAULT;
 		
 	return ret;
@@ -4136,26 +4147,37 @@ asmlinkage unsigned long sys32_mremap(unsigned long addr,
 		goto out;
 	if (addr > 0xf0000000UL - old_len)
 		goto out;
-	down(&current->mm->mmap_sem);
-	vma = find_vma(current->mm, addr);
-	if (vma && (vma->vm_flags & VM_SHARED))
-		current->thread.flags |= SPARC_FLAG_MMAPSHARED;
+	down_write(&current->mm->mmap_sem);
 	if (flags & MREMAP_FIXED) {
 		if (new_addr > 0xf0000000UL - new_len)
 			goto out_sem;
 	} else if (addr > 0xf0000000UL - new_len) {
+		unsigned long map_flags = 0;
+		struct file *file = NULL;
+
 		ret = -ENOMEM;
 		if (!(flags & MREMAP_MAYMOVE))
 			goto out_sem;
-		new_addr = get_unmapped_area(addr, new_len);
-		if (!new_addr)
+
+		vma = find_vma(current->mm, addr);
+		if (vma) {
+			if (vma->vm_flags & VM_SHARED)
+				map_flags |= MAP_SHARED;
+			file = vma->vm_file;
+		}
+
+		/* MREMAP_FIXED checked above. */
+		new_addr = get_unmapped_area(file, addr, new_len,
+				    vma ? vma->vm_pgoff : 0,
+				    map_flags);
+		ret = new_addr;
+		if (new_addr & ~PAGE_MASK)
 			goto out_sem;
 		flags |= MREMAP_FIXED;
 	}
 	ret = do_mremap(addr, old_len, new_len, flags, new_addr);
 out_sem:
-	current->thread.flags &= ~(SPARC_FLAG_MMAPSHARED);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 out:
 	return ret;       
 }

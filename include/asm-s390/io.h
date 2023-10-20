@@ -27,11 +27,11 @@
 extern inline unsigned long virt_to_phys(volatile void * address)
 {
 	unsigned long real_address;
-	__asm__ ("   lra    %0,0(0,%1)\n"
+	__asm__ ("   lra    %0,0(%1)\n"
                  "   jz     0f\n"
                  "   sr     %0,%0\n"
                  "0:"
-                 : "=a" (real_address) : "a" (address) );
+                 : "=a" (real_address) : "a" (address) : "cc" );
         return real_address;
 }
 

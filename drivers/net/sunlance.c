@@ -1,4 +1,4 @@
-/* $Id: sunlance.c,v 1.105 2000/10/22 16:08:38 davem Exp $
+/* $Id: sunlance.c,v 1.109 2001/10/21 06:35:29 davem Exp $
  * lance.c: Linux/Sparc/Lance driver
  *
  *	Written 1995, 1996 by Miguel de Icaza
@@ -66,10 +66,10 @@
 
 #undef DEBUG_DRIVER
 
-static char *version =
+static char version[] =
 	"sunlance.c:v2.00 11/Sep/99 Miguel de Icaza (miguel@nuclecu.unam.mx)\n";
 
-static char *lancestr = "LANCE";
+static char lancestr[] = "LANCE";
 
 #include <linux/config.h>
 #include <linux/module.h>
@@ -82,7 +82,7 @@ static char *lancestr = "LANCE";
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -291,7 +291,7 @@ int sparc_lance_debug = 2;
 
 #define LANCE_ADDR(x) ((long)(x) & ~0xff000000)
 
-static struct lance_private *root_lance_dev = NULL;
+static struct lance_private *root_lance_dev;
 
 /* Load the CSR registers */
 static void load_csrs(struct lance_private *lp)
@@ -552,6 +552,7 @@ static void lance_rx_dvma(struct net_device *dev)
 					 len, 0);
 			skb->protocol = eth_type_trans(skb, dev);
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
 		}
 
@@ -723,6 +724,7 @@ static void lance_rx_pio(struct net_device *dev)
 			lance_piocopy_to_skb(skb, &(ib->rx_buf[entry][0]), len);
 			skb->protocol = eth_type_trans(skb, dev);
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
 		}
 
@@ -963,9 +965,6 @@ static int lance_open(struct net_device *dev)
 		sbus_writew(LE_C0_INEA | LE_C0_TDMD, lp->lregs + RDP);
 	}
 
-	if (!status)
-		MOD_INC_USE_COUNT;
-
 	return status;
 }
 
@@ -979,7 +978,6 @@ static int lance_close(struct net_device *dev)
 	STOP_LANCE(lp);
 
 	free_irq(dev->irq, (void *) dev);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -1309,7 +1307,7 @@ static int __init sparc_lance_init(struct net_device *dev,
 				   struct sbus_dma *ledma,
 				   struct sbus_dev *lebuffer)
 {
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 	struct lance_private *lp = NULL;
 	int    i;
 
@@ -1465,6 +1463,7 @@ no_link_test:
 	}
 
 	lp->dev = dev;
+	SET_MODULE_OWNER(dev);
 	dev->open = &lance_open;
 	dev->stop = &lance_close;
 	dev->hard_start_xmit = &lance_start_xmit;
@@ -1519,7 +1518,7 @@ static inline struct sbus_dma *find_ledma(struct sbus_dev *sdev)
 static int __init sparc_lance_probe(void)
 {
 	static struct sbus_dev sdev;
-	static int called = 0;
+	static int called;
 
 	root_lance_dev = NULL;
 
@@ -1546,7 +1545,7 @@ static int __init sparc_lance_probe(void)
 	struct sbus_dev *sdev = 0;
 	struct net_device *dev = NULL;
 	struct sbus_dma *ledma = 0;
-	static int called = 0;
+	static int called;
 	int cards = 0, v;
 
 	root_lance_dev = NULL;
@@ -1604,3 +1603,4 @@ static void __exit sparc_lance_cleanup(void)
 
 module_init(sparc_lance_probe);
 module_exit(sparc_lance_cleanup);
+MODULE_LICENSE("GPL");

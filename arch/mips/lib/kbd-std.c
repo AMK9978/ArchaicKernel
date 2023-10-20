@@ -19,7 +19,11 @@
 
 static void std_kbd_request_region(void)
 {
+#ifdef CONFIG_MIPS_ITE8172
+	request_region(0x14000060, 16, "keyboard");
+#else
 	request_region(0x60, 16, "keyboard");
+#endif
 }
 
 static int std_kbd_request_irq(void (*handler)(int, void *, struct pt_regs *))

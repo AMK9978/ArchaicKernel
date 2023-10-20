@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.page.h 1.8 08/19/01 20:06:47 paulus
+ */
 #ifndef _PPC_PAGE_H
 #define _PPC_PAGE_H
 
@@ -9,6 +12,7 @@
 #ifdef __KERNEL__
 #include <linux/config.h>
 
+/* Be sure to change arch/ppc/Makefile to match */
 #define PAGE_OFFSET	0xc0000000
 #define KERNELBASE	PAGE_OFFSET
 

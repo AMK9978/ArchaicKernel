@@ -642,10 +642,11 @@ static void yenta_config_init(pci_socket_t *socket)
 	/* MAGIC NUMBERS! Fixme */
 	config_writeb(socket, PCI_CACHE_LINE_SIZE, L1_CACHE_BYTES / 4);
 	config_writeb(socket, PCI_LATENCY_TIMER, 168);
-	config_writeb(socket, PCI_SEC_LATENCY_TIMER, 176);
-	config_writeb(socket, PCI_PRIMARY_BUS, dev->bus->number);
-	config_writeb(socket, PCI_SECONDARY_BUS, dev->subordinate->number);
-	config_writeb(socket, PCI_SUBORDINATE_BUS, dev->subordinate->number);
+	config_writel(socket, PCI_PRIMARY_BUS,
+		(176 << 24) |			   /* sec. latency timer */
+		(dev->subordinate->subordinate << 16) | /* subordinate bus */
+		(dev->subordinate->secondary << 8) |  /* secondary bus */
+		dev->subordinate->primary);		   /* primary bus */
 
 	/*
 	 * Set up the bridging state:
@@ -672,12 +673,18 @@ static int yenta_init(pci_socket_t *socket)
 {
 	yenta_config_init(socket);
 	yenta_clear_maps(socket);
+
+	/* Re-enable interrupts */
+	cb_writel(socket, CB_SOCKET_MASK, CB_CDMASK);
 	return 0;
 }
 
 static int yenta_suspend(pci_socket_t *socket)
 {
 	yenta_set_socket(socket, &dead_socket);
+
+	/* Disable interrupts */
+	cb_writel(socket, CB_SOCKET_MASK, 0x0);
 
 	/*
 	 * This does not work currently. The controller
@@ -701,6 +708,12 @@ static void yenta_allocate_res(pci_socket_t *socket, int nr, unsigned type)
 	u32 start, end;
 	u32 align, size, min, max;
 	unsigned offset;
+	unsigned mask;
+
+	/* The granularity of the memory limit is 4kB, on IO it's 4 bytes */
+	mask = ~0xfff;
+	if (type & IORESOURCE_IO)
+		mask = ~3;
 
 	offset = 0x1c + 8*nr;
 	bus = socket->dev->subordinate;
@@ -714,8 +727,8 @@ static void yenta_allocate_res(pci_socket_t *socket, int nr, unsigned type)
 	if (!root)
 		return;
 
-	start = config_readl(socket, offset);
-	end = config_readl(socket, offset+4) | 0xfff;
+	start = config_readl(socket, offset) & mask;
+	end = config_readl(socket, offset+4) | ~mask;
 	if (start && end > start) {
 		res->start = start;
 		res->end = end;
@@ -728,7 +741,7 @@ static void yenta_allocate_res(pci_socket_t *socket, int nr, unsigned type)
 	if (type & IORESOURCE_IO) {
 		align = 1024;
 		size = 256;
-		min = PCIBIOS_MIN_IO;
+		min = 0x4000;
 		max = 0xffff;
 	}
 		
@@ -755,6 +768,10 @@ static void yenta_allocate_resources(pci_socket_t *socket)
  */
 static void yenta_close(pci_socket_t *sock)
 {
+	/* Disable all events so we don't die in an IRQ storm */
+	cb_writel(sock, CB_SOCKET_MASK, 0x0);
+	exca_writeb(sock, I365_CSCINT, 0);
+
 	if (sock->cb_irq)
 		free_irq(sock->cb_irq, sock);
 	else
@@ -789,7 +806,10 @@ static struct cardbus_override_struct {
 	{ PD(TI,1251A),	&ti_ops },
 	{ PD(TI,1211),	&ti_ops },
 	{ PD(TI,1251B),	&ti_ops },
+	{ PD(TI,1410),	&ti_ops },
 	{ PD(TI,1420),	&ti_ops },
+	{ PD(TI,4410),	&ti_ops },
+	{ PD(TI,4451),	&ti_ops },
 
 	{ PD(RICOH,RL5C465), &ricoh_ops },
 	{ PD(RICOH,RL5C466), &ricoh_ops },
@@ -882,3 +902,4 @@ struct pci_socket_ops yenta_operations = {
 	yenta_proc_setup
 };
 EXPORT_SYMBOL(yenta_operations);
+MODULE_LICENSE("GPL");

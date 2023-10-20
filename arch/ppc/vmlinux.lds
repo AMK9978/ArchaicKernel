@@ -39,6 +39,7 @@ SECTIONS
   .rodata    :
   {
     *(.rodata)
+    *(.rodata.*)
     *(.rodata1)
   }
   .kstrtab   : { *(.kstrtab) }
@@ -68,6 +69,10 @@ SECTIONS
   __start___ksymtab = .;	/* Kernel symbol table */
   __ksymtab : { *(__ksymtab) }
   __stop___ksymtab = .;
+
+  __start___ftr_fixup = .;
+  __ftr_fixup : { *(__ftr_fixup) }
+  __stop___ftr_fixup = .;
 
   . = ALIGN(32);
   .data.cacheline_aligned : { *(.data.cacheline_aligned) }
@@ -114,20 +119,6 @@ SECTIONS
   .data.chrp : { *(.data.chrp) }
   . = ALIGN(4096);
   __chrp_end = .;
-
-  . = ALIGN(4096);
-  __apus_begin = .;
-  .text.apus : { *(.text.apus) }
-  .data.apus : { *(.data.apus) }
-  . = ALIGN(4096);
-  __apus_end = .;
-
-  . = ALIGN(4096);
-  __apus_begin = .;
-  .text.apus : { *(.text.apus) }
-  .data.apus : { *(.data.apus) }
-  . = ALIGN(4096);
-  __apus_end = .;
 
   . = ALIGN(4096);
   __openfirmware_begin = .;

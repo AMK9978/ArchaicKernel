@@ -12,7 +12,7 @@
 #include <linux/interrupt.h>
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -63,7 +63,7 @@ static void hplance_writerdp(struct hplance_private *lp, unsigned short value);
 static unsigned short hplance_readrdp(struct hplance_private *lp);
 
 #ifdef MODULE
-static struct hplance_private *root_hplance_dev = NULL;
+static struct hplance_private *root_hplance_dev;
 #endif
 
 /* Find all the HP Lance boards and initialise them... */
@@ -226,6 +226,7 @@ static int hplance_close(struct net_device *dev)
 }
 
 #ifdef MODULE
+MODULE_LICENSE("GPL");
 int init_module(void)
 {
         root_lance_dev = NULL;

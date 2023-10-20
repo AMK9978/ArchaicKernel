@@ -1,8 +1,12 @@
+/*
+ * BK Id: SCCS/s.io.h 1.14 10/16/01 15:58:42 trini
+ */
 #ifdef __KERNEL__
 #ifndef _PPC_IO_H
 #define _PPC_IO_H
 
 #include <linux/config.h>
+#include <linux/types.h>
 #include <asm/page.h>
 #include <asm/byteorder.h>
 
@@ -21,25 +25,23 @@
 #define PREP_PCI_DRAM_OFFSET 	0x80000000
 
 #if defined(CONFIG_4xx)
-#include <asm/board.h>
+#include <asm/ppc4xx.h>
 #elif defined(CONFIG_8xx)
 #include <asm/mpc8xx.h>
 #elif defined(CONFIG_8260)
 #include <asm/mpc8260.h>
-#else /* 4xx/8xx/8260 */
-#ifdef CONFIG_APUS
+#elif defined(CONFIG_APUS)
 #define _IO_BASE 0
 #define _ISA_MEM_BASE 0
 #define PCI_DRAM_OFFSET 0
-#else /* CONFIG_APUS */
+#else /* Everyone else */
 extern unsigned long isa_io_base;
 extern unsigned long isa_mem_base;
 extern unsigned long pci_dram_offset;
 #define _IO_BASE	isa_io_base
 #define _ISA_MEM_BASE	isa_mem_base
 #define PCI_DRAM_OFFSET	pci_dram_offset
-#endif /* CONFIG_APUS */
-#endif
+#endif /* Platform-dependant I/O */
 
 #define readb(addr) in_8((volatile u8 *)(addr))
 #define writeb(b,addr) out_8((volatile u8 *)(addr), (b))
@@ -86,16 +88,20 @@ extern __inline__ unsigned int name(unsigned int port)	\
 {							\
 	unsigned int x;					\
 	__asm__ __volatile__(				\
-		op " %0,0,%1\n"				\
-		"1:	sync\n"				\
-		"2:\n"					\
+			op "	%0,0,%1\n"		\
+		"1:	twi	0,%0,0\n"		\
+		"2:	isync\n"			\
+		"3:	nop\n"				\
+		"4:\n"					\
 		".section .fixup,\"ax\"\n"		\
-		"3:	li	%0,-1\n"		\
-		"	b	2b\n"			\
+		"5:	li	%0,-1\n"		\
+		"	b	4b\n"			\
 		".previous\n"				\
 		".section __ex_table,\"a\"\n"		\
 		"	.align	2\n"			\
-		"	.long	1b,3b\n"		\
+		"	.long	1b,5b\n"		\
+		"	.long	2b,5b\n"		\
+		"	.long	3b,5b\n"		\
 		".previous"				\
 		: "=&r" (x)				\
 		: "r" (port + _IO_BASE));		\
@@ -182,15 +188,13 @@ extern void _outsl_ns(volatile u32 *port, const void *buf, int nl);
  */
 extern void *__ioremap(unsigned long address, unsigned long size,
 		       unsigned long flags);
-extern void *__ioremap_at(unsigned long phys, unsigned long size,
-			  unsigned long flags);
 extern void *ioremap(unsigned long address, unsigned long size);
 #define ioremap_nocache(addr, size)	ioremap((addr), (size))
 extern void iounmap(void *addr);
 extern unsigned long iopa(unsigned long addr);
-#ifdef CONFIG_APUS
 extern unsigned long mm_ptov(unsigned long addr) __attribute__ ((const));
-#endif
+extern void io_block_mapping(unsigned long virt, unsigned long phys,
+			     unsigned int size, int flags);
 
 /*
  * The PCI bus is inherently Little-Endian.  The PowerPC is being
@@ -222,20 +226,6 @@ extern inline void * bus_to_virt(unsigned long address)
 }
 
 /*
- * The PCI bus bridge can translate addresses issued by the processor(s)
- * into a different address on the PCI bus.  On 32-bit cpus, we assume
- * this mapping is 1-1, but on 64-bit systems it often isn't.
- */
-#ifndef CONFIG_PPC64BRIDGE
-#define phys_to_bus(x)	(x)
-#define bus_to_phys(x)	(x)
-
-#else
-extern unsigned long phys_to_bus(unsigned long pa);
-extern unsigned long bus_to_phys(unsigned int ba, int busnr);
-#endif /* CONFIG_PPC64BRIDGE */
-
-/*
  * Change virtual addresses to physical addresses and vv, for
  * addresses in the area where the kernel has the RAM mapped.
  */
@@ -256,6 +246,12 @@ extern inline void * phys_to_virt(unsigned long address)
 	return (void*) mm_ptov (address);
 #endif
 }
+
+/*
+ * Change "struct page" to physical address.
+ */
+#define page_to_phys(page)	((page - mem_map) << PAGE_SHIFT)
+#define page_to_bus(page)	(page_to_phys(page) + PCI_DRAM_OFFSET)
 
 #endif /* __KERNEL__ */
 
@@ -362,6 +358,13 @@ static inline int check_signature(unsigned long io_addr,
 	retval = 1;
 out:
 	return retval;
+}
+
+/* Make some pcmcia drivers happy */
+static inline int isa_check_signature(unsigned long io_addr,
+	const unsigned char *signature, int length)
+{
+	return 0;
 }
 
 /* Nothing to do */

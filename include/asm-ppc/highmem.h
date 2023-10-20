@@ -1,10 +1,13 @@
 /*
+ * BK Id: SCCS/s.highmem.h 1.10 06/28/01 15:50:17 paulus
+ */
+/*
  * highmem.h: virtual kernel memory mappings for high memory
  *
  * PowerPC version, stolen from the i386 version.
  *
  * Used in CONFIG_HIGHMEM systems for memory pages which
- * are not addressable by direct kernel virtual adresses.
+ * are not addressable by direct kernel virtual addresses.
  *
  * Copyright (C) 1999 Gerhard Wichert, Siemens AG
  *		      Gerhard.Wichert@pdb.siemens.de
@@ -91,7 +94,7 @@ static inline void *kmap_atomic(struct page *page, enum km_type type)
 		BUG();
 #endif
 	set_pte(kmap_pte+idx, mk_pte(page, kmap_prot));
-	flush_hash_page(0, vaddr);
+	flush_tlb_page(0, vaddr);
 
 	return (void*) vaddr;
 }
@@ -113,7 +116,7 @@ static inline void kunmap_atomic(void *kvaddr, enum km_type type)
 	 * this pte without first remap it
 	 */
 	pte_clear(kmap_pte+idx);
-	flush_hash_page(0, vaddr);
+	flush_tlb_page(0, vaddr);
 #endif
 }
 

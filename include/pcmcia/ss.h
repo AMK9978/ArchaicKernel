@@ -16,7 +16,7 @@
  * are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
  *
  * Alternatively, the contents of this file may be used under the
- * terms of the GNU Public License version 2 (the "GPL"), in which
+ * terms of the GNU General Public License version 2 (the "GPL"), in which
  * case the provisions of the GPL are applicable instead of the
  * above.  If you wish to allow the use of your version of this file
  * only under the terms of the GPL and not to allow others to use
@@ -29,6 +29,8 @@
 
 #ifndef _LINUX_SS_H
 #define _LINUX_SS_H
+
+#include <pcmcia/cs_types.h>
 
 /* Definitions for card status flags for GetStatus */
 #define SS_WRPROT	0x0001
@@ -52,6 +54,7 @@ typedef struct socket_cap_t {
     u_int	features;
     u_int	irq_mask;
     u_int	map_size;
+    ioaddr_t	io_offset;
     u_char	pci_irq;
     struct pci_dev *cb_dev;
     struct bus_operations *bus;
@@ -101,7 +104,7 @@ typedef struct pccard_io_map {
     u_char	map;
     u_char	flags;
     u_short	speed;
-    u_short	start, stop;
+    ioaddr_t	start, stop;
 } pccard_io_map;
 
 typedef struct pccard_mem_map {

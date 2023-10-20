@@ -4,12 +4,14 @@
 
     Copyright 1993 United States Government as represented by the
     Director, National Security Agency.  This software may be used and
-    distributed according to the terms of the GNU Public License,
+    distributed according to the terms of the GNU General Public License,
     incorporated herein by reference.
 
-    The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-    Center of Excellence in Space Data and Information Sciences
-       Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+    The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
+
 
     This driver should work with the 3c503 and 3c503/16.  It should be used
     in shared memory mode for best performance, although it may also work
@@ -30,7 +32,7 @@
 
 */
 
-static const char *version =
+static const char version[] =
     "3c503.c:v1.10 9/23/93  Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 #include <linux/module.h>
@@ -53,8 +55,8 @@ static const char *version =
 #define WRD_COUNT 4
 
 int el2_probe(struct net_device *dev);
-int el2_pio_probe(struct net_device *dev);
-int el2_probe1(struct net_device *dev, int ioaddr);
+static int el2_pio_probe(struct net_device *dev);
+static int el2_probe1(struct net_device *dev, int ioaddr);
 
 /* A zero-terminated list of I/O addresses to be probed in PIO mode. */
 static unsigned int netcard_portlist[] __initdata =
@@ -115,7 +117,7 @@ el2_probe(struct net_device *dev)
 
 /*  Try all of the locations that aren't obviously empty.  This touches
     a lot of locations, and is much riskier than the code above. */
-int __init 
+static int __init 
 el2_pio_probe(struct net_device *dev)
 {
     int i;
@@ -136,13 +138,14 @@ el2_pio_probe(struct net_device *dev)
 /* Probe for the Etherlink II card at I/O port base IOADDR,
    returning non-zero on success.  If found, set the station
    address and memory parameters in DEVICE. */
-int __init 
+static int __init 
 el2_probe1(struct net_device *dev, int ioaddr)
 {
     int i, iobase_reg, membase_reg, saved_406, wordlength, retval;
     static unsigned version_printed;
     unsigned long vendor_id;
 
+    /* FIXME: code reads ioaddr + 0x400, we request ioaddr + 16 */
     if (!request_region(ioaddr, EL2_IO_EXTENT, dev->name))
 	return -EBUSY;
 
@@ -250,7 +253,8 @@ el2_probe1(struct net_device *dev, int ioaddr)
 	}
 #endif  /* EL2MEMTEST */
 
-	dev->mem_end = dev->rmem_end = dev->mem_start + EL2_MEMSIZE;
+	if (dev->mem_start)
+		dev->mem_end = dev->rmem_end = dev->mem_start + EL2_MEMSIZE;
 
 	if (wordlength) {	/* No Tx pages to skip over to get to Rx */
 		dev->rmem_start = dev->mem_start;
@@ -613,6 +617,9 @@ static int xcvr[MAX_EL2_CARDS];	/* choose int. or ext. xcvr */
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
 MODULE_PARM(xcvr, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
+MODULE_PARM_DESC(io, "EtherLink II I/O base address(es)");
+MODULE_PARM_DESC(irq, "EtherLink II IRQ number(s) (assigned)");
+MODULE_PARM_DESC(xcvr, "EtherLink II tranceiver(s) (0=internal, 1=external)");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
@@ -660,6 +667,8 @@ cleanup_module(void)
 	}
 }
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
+
 
 /*
  * Local variables:

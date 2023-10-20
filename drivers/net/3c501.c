@@ -4,16 +4,18 @@
 
     Copyright 1993 United States Government as represented by the
     Director, National Security Agency.  This software may be used and
-    distributed according to the terms of the GNU Public License,
+    distributed according to the terms of the GNU General Public License,
     incorporated herein by reference.
 
     This is a device driver for the 3Com Etherlink 3c501.
     Do not purchase this card, even as a joke.  It's performance is horrible,
     and it breaks in many ways.
 
-    The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-    Center of Excellence in Space Data and Information Sciences
-       Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+    The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
+
 
     Fixed (again!) the missing interrupt locking on TX/RX shifting.
     		Alan Cox <Alan.Cox@linux.org>
@@ -85,7 +87,7 @@
  *
  */
 
-static const char *version =
+static const char version[] =
     "3c501.c: 2000/02/08 Alan Cox (alan@redhat.com).\n";
 
 /*
@@ -101,7 +103,7 @@ static const char *version =
 #include <linux/fcntl.h>
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/config.h>	/* for CONFIG_IP_MULTICAST */
@@ -251,7 +253,7 @@ int __init el1_probe(struct net_device *dev)
 }
 
 /**
- *	el1_probe: 
+ *	el1_probe1: 
  *	@dev: The device structure to use
  *	@ioaddr: An I/O address to probe at.
  *
@@ -796,6 +798,7 @@ static void el_receive(struct net_device *dev)
 		insb(DATAPORT, skb_put(skb,pkt_len), pkt_len);
 		skb->protocol=eth_type_trans(skb,dev);
 		netif_rx(skb);
+		dev->last_rx = jiffies;
 		lp->stats.rx_packets++;
 		lp->stats.rx_bytes+=pkt_len;
 	}
@@ -924,6 +927,8 @@ static int io=0x280;
 static int irq=5;
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
+MODULE_PARM_DESC(io, "EtherLink I/O base address");
+MODULE_PARM_DESC(irq, "EtherLink IRQ number");
 
 /**
  * init_module:
@@ -975,6 +980,8 @@ void cleanup_module(void)
 }
 
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
+
 
 /*
  * Local variables:

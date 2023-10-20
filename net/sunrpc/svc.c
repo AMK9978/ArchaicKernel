@@ -31,7 +31,6 @@ svc_create(struct svc_program *prog, unsigned int bufsize, unsigned int xdrsize)
 {
 	struct svc_serv	*serv;
 
-	xdr_init();
 #ifdef RPC_DEBUG
 	rpc_register_sysctl();
 #endif
@@ -368,7 +367,9 @@ err_bad_auth:
 
 err_bad_prog:
 #ifdef RPC_PARANOIA
-	printk("svc: unknown program %d (me %d)\n", prog, progp->pg_prog);
+	if (prog != 100227 || progp->pg_prog != 100003)
+		printk("svc: unknown program %d (me %d)\n", prog, progp->pg_prog);
+	/* else it is just a Solaris client seeing if ACLs are supported */
 #endif
 	serv->sv_stats->rpcbadfmt++;
 	svc_putlong(resp, rpc_prog_unavail);

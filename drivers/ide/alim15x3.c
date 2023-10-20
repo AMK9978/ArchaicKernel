@@ -233,8 +233,8 @@ static int ali_get_info (char *buffer, char **addr, off_t offset, int count)
 }
 #endif  /* defined(DISPLAY_ALI_TIMINGS) && defined(CONFIG_PROC_FS) */
 
-static byte m5229_revision	= 0;
-static byte chip_is_1543c_e	= 0;
+static byte m5229_revision;
+static byte chip_is_1543c_e;
 
 byte ali_proc = 0;
 static struct pci_dev *isa_dev;
@@ -640,6 +640,7 @@ unsigned int __init ata66_ali15x3 (ide_hwif_t *hwif)
 
 void __init ide_init_ali15x3 (ide_hwif_t *hwif)
 {
+#ifndef CONFIG_SPARC64
 	byte ideic, inmir;
 	byte irq_routing_table[] = { -1,  9, 3, 10, 4,  5, 7,  6,
 				      1, 11, 0, 12, 0, 14, 0, 15 };
@@ -672,16 +673,14 @@ void __init ide_init_ali15x3 (ide_hwif_t *hwif)
 			hwif->irq = irq_routing_table[inmir];
 		}
 	}
+#endif /* CONFIG_SPARC64 */
 
 	hwif->tuneproc = &ali15x3_tune_drive;
 	hwif->drives[0].autotune = 1;
 	hwif->drives[1].autotune = 1;
 	hwif->speedproc = &ali15x3_tune_chipset;
-#ifndef CONFIG_BLK_DEV_IDEDMA
-	hwif->autodma = 0;
-	return;
-#endif /* CONFIG_BLK_DEV_IDEDMA */
 
+#ifdef CONFIG_BLK_DEV_IDEDMA
 	if ((hwif->dma_base) && (m5229_revision >= 0x20)) {
 		/*
 		 * M1543C or newer for DMAing
@@ -689,6 +688,12 @@ void __init ide_init_ali15x3 (ide_hwif_t *hwif)
 		hwif->dmaproc = &ali15x3_dmaproc;
 		hwif->autodma = 1;
 	}
+
+	if (noautodma)
+		hwif->autodma = 0;
+#else
+	hwif->autodma = 0;
+#endif /* CONFIG_BLK_DEV_IDEDMA */
 }
 
 void __init ide_dmacapable_ali15x3 (ide_hwif_t *hwif, unsigned long dmabase)

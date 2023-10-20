@@ -12,7 +12,9 @@
 
 #include <asm/proc-fns.h>
 
-extern __inline__ unsigned long __xchg(unsigned long x, volatile void *ptr, int size)
+#define vectors_base()	(0)
+
+static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size)
 {
 	extern void __bad_xchg(volatile void *, int);
 

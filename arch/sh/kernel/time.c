@@ -1,4 +1,4 @@
-/* $Id: time.c,v 1.20 2000/02/28 12:42:51 gniibe Exp $
+/* $Id: time.c,v 1.30 2001/09/01 14:34:31 mrbrown Exp $
  *
  *  linux/arch/sh/kernel/time.c
  *
@@ -57,7 +57,18 @@
 #define TMU0_TCR	0xffd80010	/* Word access */
 
 #define FRQCR		0xffc00000
-#endif
+
+/* Core Processor Version Register */
+#define CCN_PVR		0xff000030
+#define CCN_PVR_CHIP_SHIFT 24
+#define CCN_PVR_CHIP_MASK  0xff
+#define CCN_PVR_CHIP_ST40STB1 0x4
+
+#ifdef CONFIG_CPU_SUBTYPE_ST40STB1
+#define CLOCKGEN_MEMCLKCR 0xbb040038
+#define MEMCLKCR_RATIO_MASK 0x7
+#endif /* CONFIG_CPU_SUBTYPE_ST40STB1 */
+#endif /* __sh3__ or __SH4__ */
 
 extern rwlock_t xtime_lock;
 extern unsigned long wall_jiffies;
@@ -172,10 +183,9 @@ static long last_rtc_update;
 static inline void do_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	do_timer(regs);
-#if 0
+
 	if (!user_mode(regs))
 		sh_do_profile(regs->pc);
-#endif
 
 #ifdef CONFIG_HEARTBEAT
 	if (sh_mv.mv_heartbeat != NULL) 
@@ -278,6 +288,9 @@ static struct irqaction irq0  = { timer_interrupt, SA_INTERRUPT, 0, "timer", NUL
 void __init time_init(void)
 {
 	unsigned int cpu_clock, master_clock, bus_clock, module_clock;
+#ifdef CONFIG_CPU_SUBTYPE_ST40STB1
+	unsigned int memory_clock;
+#endif
 	unsigned int timer_freq;
 	unsigned short frqcr, ifc, pfc, bfc;
 	unsigned long interval;
@@ -289,6 +302,61 @@ void __init time_init(void)
 	static int ifc_table[] = { 1, 2, 3, 4, 6, 8, 1, 1 };
 #define bfc_table ifc_table	/* Same */
 	static int pfc_table[] = { 2, 3, 4, 6, 8, 2, 2, 2 };
+
+#ifdef CONFIG_CPU_SUBTYPE_ST40STB1
+	struct frqcr_data {
+		unsigned short frqcr;
+		struct {
+			unsigned char multiplier;
+			unsigned char divisor;
+		} factor[3];
+	};
+
+	static struct frqcr_data st40_frqcr_table[] = {		
+		{ 0x000, {{1,1}, {1,1}, {1,2}}},
+		{ 0x002, {{1,1}, {1,1}, {1,4}}},
+		{ 0x004, {{1,1}, {1,1}, {1,8}}},
+		{ 0x008, {{1,1}, {1,2}, {1,2}}},
+		{ 0x00A, {{1,1}, {1,2}, {1,4}}},
+		{ 0x00C, {{1,1}, {1,2}, {1,8}}},
+		{ 0x011, {{1,1}, {2,3}, {1,6}}},
+		{ 0x013, {{1,1}, {2,3}, {1,3}}},
+		{ 0x01A, {{1,1}, {1,2}, {1,4}}},
+		{ 0x01C, {{1,1}, {1,2}, {1,8}}},
+		{ 0x023, {{1,1}, {2,3}, {1,3}}},
+		{ 0x02C, {{1,1}, {1,2}, {1,8}}},
+		{ 0x048, {{1,2}, {1,2}, {1,4}}},
+		{ 0x04A, {{1,2}, {1,2}, {1,6}}},
+		{ 0x04C, {{1,2}, {1,2}, {1,8}}},
+		{ 0x05A, {{1,2}, {1,3}, {1,6}}},
+		{ 0x05C, {{1,2}, {1,3}, {1,6}}},
+		{ 0x063, {{1,2}, {1,4}, {1,4}}},
+		{ 0x06C, {{1,2}, {1,4}, {1,8}}},
+		{ 0x091, {{1,3}, {1,3}, {1,6}}},
+		{ 0x093, {{1,3}, {1,3}, {1,6}}},
+		{ 0x0A3, {{1,3}, {1,6}, {1,6}}},
+		{ 0x0DA, {{1,4}, {1,4}, {1,8}}},
+		{ 0x0DC, {{1,4}, {1,4}, {1,8}}},
+		{ 0x0EC, {{1,4}, {1,8}, {1,8}}},
+		{ 0x123, {{1,4}, {1,4}, {1,8}}},
+		{ 0x16C, {{1,4}, {1,8}, {1,8}}},
+	};
+
+	struct memclk_data {
+		unsigned char multiplier;
+		unsigned char divisor;
+	};
+	static struct memclk_data st40_memclk_table[8] = {
+		{1,1},	// 000
+		{1,2},	// 001
+		{1,3},	// 010
+		{2,3},	// 011
+		{1,4},	// 100
+		{1,6},	// 101
+		{1,8},	// 110
+		{1,8}	// 111
+	};
+#endif
 #endif
 
 	rtc_gettimeofday(&xtime);
@@ -316,19 +384,71 @@ void __init time_init(void)
 	}
 #elif defined(__SH4__)
 	{
-		frqcr = ctrl_inw(FRQCR);
-		ifc  = ifc_table[(frqcr>> 6) & 0x0007];
-		bfc  = bfc_table[(frqcr>> 3) & 0x0007];
-		pfc = pfc_table[frqcr & 0x0007];
+#ifdef CONFIG_CPU_SUBTYPE_ST40STB1
+		unsigned long pvr;
+
+		/* This should probably be moved into the SH3 probing code, and then use the processor
+		 * structure to determine which CPU we are running on.
+		 */
+		pvr = ctrl_inl(CCN_PVR);
+		printk("PVR %08x\n", pvr);
+
+		if (((pvr >>CCN_PVR_CHIP_SHIFT) & CCN_PVR_CHIP_MASK) == CCN_PVR_CHIP_ST40STB1) {
+			/* Unfortunatly the STB1 FRQCR values are different from the 7750 ones */
+			struct frqcr_data *d;
+			int a;
+			unsigned long memclkcr;
+			struct memclk_data *e;
+
+			for (a=0; a<ARRAY_SIZE(st40_frqcr_table); a++) {
+				d = &st40_frqcr_table[a];
+				if (d->frqcr == (frqcr & 0x1ff))
+					break;
+			}
+			if (a == ARRAY_SIZE(st40_frqcr_table)) {
+				d = st40_frqcr_table;
+				printk("ERROR: Unrecognised FRQCR value, using default multipliers\n");
+			}
+
+			memclkcr = ctrl_inl(CLOCKGEN_MEMCLKCR);
+			e = &st40_memclk_table[memclkcr & MEMCLKCR_RATIO_MASK];
+
+			printk("Clock multipliers: CPU: %d/%d Bus: %d/%d Mem: %d/%d Periph: %d/%d\n",
+			       d->factor[0].multiplier, d->factor[0].divisor,
+			       d->factor[1].multiplier, d->factor[1].divisor,
+			       e->multiplier,           e->divisor,
+			       d->factor[2].multiplier, d->factor[2].divisor);
+			
+			master_clock = module_clock * d->factor[2].divisor    / d->factor[2].multiplier;
+			bus_clock    = master_clock * d->factor[1].multiplier / d->factor[1].divisor;
+			memory_clock = master_clock * e->multiplier           / e->divisor;
+			cpu_clock    = master_clock * d->factor[0].multiplier / d->factor[0].divisor;
+			goto skip_calc;
+		} else
+#endif
+		{
+			frqcr = ctrl_inw(FRQCR);
+
+			ifc  = ifc_table[(frqcr>> 6) & 0x0007];
+			bfc  = bfc_table[(frqcr>> 3) & 0x0007];
+			pfc = pfc_table[frqcr & 0x0007];
+		}
 	}
 #endif
 	master_clock = module_clock * pfc;
 	bus_clock = master_clock / bfc;
 	cpu_clock = master_clock / ifc;
+#ifdef CONFIG_CPU_SUBTYPE_ST40STB1
+ skip_calc:
+#endif
 	printk("CPU clock: %d.%02dMHz\n",
 	       (cpu_clock / 1000000), (cpu_clock % 1000000)/10000);
 	printk("Bus clock: %d.%02dMHz\n",
 	       (bus_clock/1000000), (bus_clock % 1000000)/10000);
+#ifdef CONFIG_CPU_SUBTYPE_ST40STB1
+	printk("Memory clock: %d.%02dMHz\n",
+	       (memory_clock/1000000), (memory_clock % 1000000)/10000);
+#endif
 	printk("Module clock: %d.%02dMHz\n",
 	       (module_clock/1000000), (module_clock % 1000000)/10000);
 	interval = (module_clock/4 + HZ/2) / HZ;
@@ -338,6 +458,9 @@ void __init time_init(void)
 	current_cpu_data.cpu_clock    = cpu_clock;
 	current_cpu_data.master_clock = master_clock;
 	current_cpu_data.bus_clock    = bus_clock;
+#ifdef CONFIG_CPU_SUBTYPE_ST40STB1
+	current_cpu_data.memory_clock = memory_clock;
+#endif
 	current_cpu_data.module_clock = module_clock;
 
 	/* Start TMU0 */

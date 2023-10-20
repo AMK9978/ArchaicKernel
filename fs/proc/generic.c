@@ -190,15 +190,24 @@ static int xlate_proc_name(const char *name,
 	return 0;
 }
 
-static unsigned char proc_alloc_map[PROC_NDYNAMIC / 8];
+static unsigned long proc_alloc_map[(PROC_NDYNAMIC + BITS_PER_LONG - 1) / BITS_PER_LONG];
+
+spinlock_t proc_alloc_map_lock = SPIN_LOCK_UNLOCKED;
 
 static int make_inode_number(void)
 {
-	int i = find_first_zero_bit((void *) proc_alloc_map, PROC_NDYNAMIC);
-	if (i<0 || i>=PROC_NDYNAMIC) 
-		return -1;
-	set_bit(i, (void *) proc_alloc_map);
-	return PROC_DYNAMIC_FIRST + i;
+	int i;
+	spin_lock(&proc_alloc_map_lock);
+	i = find_first_zero_bit(proc_alloc_map, PROC_NDYNAMIC);
+	if (i < 0 || i >= PROC_NDYNAMIC) {
+		i = -1;
+		goto out;
+	}
+	set_bit(i, proc_alloc_map);
+	i += PROC_DYNAMIC_FIRST;
+out:
+	spin_unlock(&proc_alloc_map_lock);
+	return i;
 }
 
 static int proc_readlink(struct dentry *dentry, char *buffer, int buflen)
@@ -388,149 +397,126 @@ static void proc_kill_inodes(struct proc_dir_entry *de)
 	file_list_lock();
 	for (p = sb->s_files.next; p != &sb->s_files; p = p->next) {
 		struct file * filp = list_entry(p, struct file, f_list);
-		struct dentry * dentry;
+		struct dentry * dentry = filp->f_dentry;
 		struct inode * inode;
+		struct file_operations *fops;
 
-		dentry = filp->f_dentry;
-		if (!dentry)
-			continue;
 		if (dentry->d_op != &proc_dentry_operations)
 			continue;
 		inode = dentry->d_inode;
 		if (inode->u.generic_ip != de)
 			continue;
-		fops_put(filp->f_op);
+		fops = filp->f_op;
 		filp->f_op = NULL;
+		fops_put(fops);
 	}
 	file_list_unlock();
 }
 
-struct proc_dir_entry *proc_symlink(const char *name,
-		struct proc_dir_entry *parent, const char *dest)
+static struct proc_dir_entry *proc_create(struct proc_dir_entry **parent,
+					  const char *name,
+					  mode_t mode,
+					  nlink_t nlink)
 {
 	struct proc_dir_entry *ent = NULL;
 	const char *fn = name;
 	int len;
 
-	if (!parent && xlate_proc_name(name, &parent, &fn) != 0)
+	/* make sure name is valid */
+	if (!name || !strlen(name)) goto out;
+
+	if (!(*parent) && xlate_proc_name(name, parent, &fn) != 0)
 		goto out;
 	len = strlen(fn);
 
 	ent = kmalloc(sizeof(struct proc_dir_entry) + len + 1, GFP_KERNEL);
-	if (!ent)
-		goto out;
+	if (!ent) goto out;
+
 	memset(ent, 0, sizeof(struct proc_dir_entry));
-	memcpy(((char *) ent) + sizeof(*ent), fn, len + 1);
+	memcpy(((char *) ent) + sizeof(struct proc_dir_entry), fn, len + 1);
 	ent->name = ((char *) ent) + sizeof(*ent);
 	ent->namelen = len;
-	ent->nlink = 1;
-	ent->mode = S_IFLNK|S_IRUGO|S_IWUGO|S_IXUGO;
-	ent->data = kmalloc((ent->size=strlen(dest))+1, GFP_KERNEL);
-	if (!ent->data) {
-		kfree(ent);
-		goto out;
-	}
-	strcpy((char*)ent->data,dest);
+	ent->mode = mode;
+	ent->nlink = nlink;
+ out:
+	return ent;
+}
 
-	proc_register(parent, ent);
-	
-out:
+struct proc_dir_entry *proc_symlink(const char *name,
+		struct proc_dir_entry *parent, const char *dest)
+{
+	struct proc_dir_entry *ent;
+
+	ent = proc_create(&parent,name,
+			  (S_IFLNK | S_IRUGO | S_IWUGO | S_IXUGO),1);
+
+	if (ent) {
+		ent->data = kmalloc((ent->size=strlen(dest))+1, GFP_KERNEL);
+		if (ent->data) {
+			strcpy((char*)ent->data,dest);
+			proc_register(parent, ent);
+		} else {
+			kfree(ent);
+			ent = NULL;
+		}
+	}
 	return ent;
 }
 
 struct proc_dir_entry *proc_mknod(const char *name, mode_t mode,
 		struct proc_dir_entry *parent, kdev_t rdev)
 {
-	struct proc_dir_entry *ent = NULL;
-	const char *fn = name;
-	int len;
+	struct proc_dir_entry *ent;
 
-	if (!parent && xlate_proc_name(name, &parent, &fn) != 0)
-		goto out;
-	len = strlen(fn);
-
-	ent = kmalloc(sizeof(struct proc_dir_entry) + len + 1, GFP_KERNEL);
-	if (!ent)
-		goto out;
-	memset(ent, 0, sizeof(struct proc_dir_entry));
-	memcpy(((char *) ent) + sizeof(*ent), fn, len + 1);
-	ent->name = ((char *) ent) + sizeof(*ent);
-	ent->namelen = len;
-	ent->nlink = 1;
-	ent->mode = mode;
-	ent->rdev = rdev;
-
-	proc_register(parent, ent);
-	
-out:
+	ent = proc_create(&parent,name,mode,1);
+	if (ent) {
+		ent->rdev = rdev;
+		proc_register(parent, ent);
+	}
 	return ent;
 }
 
 struct proc_dir_entry *proc_mkdir(const char *name, struct proc_dir_entry *parent)
 {
-	struct proc_dir_entry *ent = NULL;
-	const char *fn = name;
-	int len;
+	struct proc_dir_entry *ent;
 
-	if (!parent && xlate_proc_name(name, &parent, &fn) != 0)
-		goto out;
-	len = strlen(fn);
+	ent = proc_create(&parent,name,
+			  (S_IFDIR | S_IRUGO | S_IXUGO),2);
+	if (ent) {
+		ent->proc_fops = &proc_dir_operations;
+		ent->proc_iops = &proc_dir_inode_operations;
 
-	ent = kmalloc(sizeof(struct proc_dir_entry) + len + 1, GFP_KERNEL);
-	if (!ent)
-		goto out;
-	memset(ent, 0, sizeof(struct proc_dir_entry));
-	memcpy(((char *) ent) + sizeof(*ent), fn, len + 1);
-	ent->name = ((char *) ent) + sizeof(*ent);
-	ent->namelen = len;
-	ent->proc_fops = &proc_dir_operations;
-	ent->proc_iops = &proc_dir_inode_operations;
-	ent->nlink = 2;
-	ent->mode = S_IFDIR | S_IRUGO | S_IXUGO;
-
-	proc_register(parent, ent);
-	
-out:
+		proc_register(parent, ent);
+	}
 	return ent;
 }
 
 struct proc_dir_entry *create_proc_entry(const char *name, mode_t mode,
 					 struct proc_dir_entry *parent)
 {
-	struct proc_dir_entry *ent = NULL;
-	const char *fn = name;
-	int len;
-
-	if (!parent && xlate_proc_name(name, &parent, &fn) != 0)
-		goto out;
-	len = strlen(fn);
-
-	ent = kmalloc(sizeof(struct proc_dir_entry) + len + 1, GFP_KERNEL);
-	if (!ent)
-		goto out;
-	memset(ent, 0, sizeof(struct proc_dir_entry));
-	memcpy(((char *) ent) + sizeof(*ent), fn, len + 1);
-	ent->name = ((char *) ent) + sizeof(*ent);
-	ent->namelen = len;
+	struct proc_dir_entry *ent;
+	nlink_t nlink;
 
 	if (S_ISDIR(mode)) {
 		if ((mode & S_IALLUGO) == 0)
-		mode |= S_IRUGO | S_IXUGO;
-		ent->proc_fops = &proc_dir_operations;
-		ent->proc_iops = &proc_dir_inode_operations;
-		ent->nlink = 2;
+			mode |= S_IRUGO | S_IXUGO;
+		nlink = 2;
 	} else {
 		if ((mode & S_IFMT) == 0)
 			mode |= S_IFREG;
 		if ((mode & S_IALLUGO) == 0)
 			mode |= S_IRUGO;
-		ent->nlink = 1;
+		nlink = 1;
 	}
-	ent->mode = mode;
 
-	proc_register(parent, ent);
-	
-out:
+	ent = proc_create(&parent,name,mode,nlink);
+	if (ent) {
+		if (S_ISDIR(mode)) {
+			ent->proc_fops = &proc_dir_operations;
+			ent->proc_iops = &proc_dir_inode_operations;
+		}
+		proc_register(parent, ent);
+	}
 	return ent;
 }
 
@@ -568,8 +554,8 @@ void remove_proc_entry(const char *name, struct proc_dir_entry *parent)
 		de->next = NULL;
 		if (S_ISDIR(de->mode))
 			parent->nlink--;
-		clear_bit(de->low_ino-PROC_DYNAMIC_FIRST,
-				(void *) proc_alloc_map);
+		clear_bit(de->low_ino - PROC_DYNAMIC_FIRST,
+			  proc_alloc_map);
 		proc_kill_inodes(de);
 		de->nlink = 0;
 		if (!atomic_read(&de->count))

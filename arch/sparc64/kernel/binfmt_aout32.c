@@ -23,7 +23,7 @@
 #include <linux/fcntl.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/binfmts.h>
 #include <linux/personality.h>
 #include <linux/init.h>
@@ -77,7 +77,7 @@ if (file->f_op->llseek) { \
  * Currently only a stub-function.
  *
  * Note that setuid/setgid files won't make a core-dump if the uid/gid
- * changed due to the set[u|g]id. It's enforced by the "current->dumpable"
+ * changed due to the set[u|g]id. It's enforced by the "current->mm->dumpable"
  * field, which also makes sure the core-dumps won't be recursive if the
  * dumping of the process results in another error..
  */
@@ -277,24 +277,24 @@ static int load_aout32_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 			goto beyond_if;
 		}
 
-	        down(&current->mm->mmap_sem);
+	        down_write(&current->mm->mmap_sem);
 		error = do_mmap(bprm->file, N_TXTADDR(ex), ex.a_text,
 			PROT_READ | PROT_EXEC,
 			MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
 			fd_offset);
-	        up(&current->mm->mmap_sem);
+	        up_write(&current->mm->mmap_sem);
 
 		if (error != N_TXTADDR(ex)) {
 			send_sig(SIGKILL, current, 0);
 			return error;
 		}
 
-	        down(&current->mm->mmap_sem);
+	        down_write(&current->mm->mmap_sem);
  		error = do_mmap(bprm->file, N_DATADDR(ex), ex.a_data,
 				PROT_READ | PROT_WRITE | PROT_EXEC,
 				MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
 				fd_offset + ex.a_text);
-	        up(&current->mm->mmap_sem);
+	        up_write(&current->mm->mmap_sem);
 		if (error != N_DATADDR(ex)) {
 			send_sig(SIGKILL, current, 0);
 			return error;
@@ -318,7 +318,8 @@ beyond_if:
 		unsigned long pgd_cache;
 
 		pgd_cache = ((unsigned long)current->mm->pgd[0])<<11UL;
-		__asm__ __volatile__("stxa\t%0, [%1] %2"
+		__asm__ __volatile__("stxa\t%0, [%1] %2\n\t"
+				     "membar #Sync"
 				     : /* no outputs */
 				     : "r" (pgd_cache),
 				       "r" (TSB_REG), "i" (ASI_DMMU));
@@ -368,12 +369,12 @@ static int load_aout32_library(struct file *file)
 	start_addr =  ex.a_entry & 0xfffff000;
 
 	/* Now use mmap to map the library into memory. */
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	error = do_mmap(file, start_addr, ex.a_text + ex.a_data,
 			PROT_READ | PROT_WRITE | PROT_EXEC,
 			MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE,
 			N_TXTOFF(ex));
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 	retval = error;
 	if (error != start_addr)
 		goto out;

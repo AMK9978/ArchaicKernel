@@ -11,7 +11,7 @@
     <surname>Russell</surname>
     <affiliation>
      <address>
-      <email>rusty@linuxcare.com</email>
+      <email>rusty@rustcorp.com.au</email>
      </address>
     </affiliation>
    </author>
@@ -386,7 +386,7 @@
        <function>spin_lock()</function> and
        <function>spin_unlock()</function> calls.  
        <function>spin_lock_bh()</function> is
-       unnecessary here, as you are already in a a tasklet, and
+       unnecessary here, as you are already in a tasklet, and
        none will be run on the same CPU.
      </para>
     </sect2>
@@ -720,7 +720,8 @@
       halves without a lock.  Depending on their exact timing, they
       would either see the new element in the list with a valid 
       <structfield>next</structfield> pointer, or it would not be in the 
-      list yet.
+      list yet.  A lock is still required against other CPUs inserting
+      or deleting from the list, of course.
     </para>
 
     <para>
@@ -759,8 +760,11 @@
     </para>
 
     <para>
-      Any atomic operation is defined to act as a memory barrier
-      (ie. as per the <function>mb()</function> macro).  Also,
+      Some atomic operations are defined to act as a memory barrier
+      (ie. as per the <function>mb()</function> macro, but if in
+      doubt, be explicit.
+      <!-- Rusty Russell 2 May 2001, 2.4.4 -->
+      Also,
       spinlock operations act as partial barriers: operations after
       gaining a spinlock will never be moved to precede the
       <function>spin_lock()</function> call, and operations before

@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.start.c 1.16 08/20/01 22:17:58 paulus
+ */
+/*
  * Copyright (C) 1996 Paul Mackerras.
  */
 #include <linux/config.h>
@@ -14,18 +17,21 @@
 #include <asm/bootx.h>
 #include <asm/feature.h>
 #include <asm/processor.h>
+#include <asm/delay.h>
+#include <asm/btext.h>
+#ifdef CONFIG_SMP
+#include <asm/bitops.h>
+#endif
 
 static volatile unsigned char *sccc, *sccd;
 unsigned long TXRDY, RXRDY;
 extern void xmon_printf(const char *fmt, ...);
-extern void prom_drawchar(char);
-extern void prom_drawstring(const char *str);
 static int xmon_expect(const char *str, unsigned int timeout);
 
-static int console = 0;
-static int use_screen = 1; /* default */
-static int via_modem = 0;
-static int xmon_use_sccb = 0;
+static int console;
+static int use_screen;
+static int via_modem;
+static int xmon_use_sccb;
 static struct device_node *macio_node;
 
 #define TB_SPEED	25000000
@@ -49,32 +55,67 @@ extern int adb_init(void);
 void
 xmon_map_scc(void)
 {
+#ifdef CONFIG_ALL_PPC
 	volatile unsigned char *base;
 
 	use_screen = 0;
 	
-	if ( _machine == _MACH_Pmac )
-	{
+	if (_machine == _MACH_Pmac) {
 		struct device_node *np;
 		unsigned long addr;
 #ifdef CONFIG_BOOTX_TEXT
-		extern boot_infos_t *disp_bi;
+		if (!machine_is_compatible("iMac")) {
+			extern boot_infos_t *disp_bi;
 
-		/* needs to be hacked if xmon_printk is to be used
- 		   from within find_via_pmu() */
+			/* see if there is a keyboard in the device tree
+			   with a parent of type "adb" */
+			for (np = find_devices("keyboard"); np; np = np->next)
+				if (np->parent && np->parent->type
+				    && strcmp(np->parent->type, "adb") == 0)
+					break;
+
+			/* needs to be hacked if xmon_printk is to be used
+			   from within find_via_pmu() */
 #ifdef CONFIG_ADB_PMU
-		if (!via_modem && disp_bi && find_via_pmu()) {
-			prom_drawstring("xmon uses screen and keyboard\n");
-			use_screen = 1;
-		}
+			if (np != NULL && disp_bi && find_via_pmu())
+				use_screen = 1;
 #endif
 #ifdef CONFIG_ADB_CUDA
-		if (!via_modem && disp_bi ) {
-			prom_drawstring("xmon uses screen and keyboard\n");
-			use_screen = 1;
+			if (np != NULL && disp_bi && find_via_cuda())
+				use_screen = 1;
+#endif
 		}
-#endif
-#endif
+		if (!use_screen && (np = find_devices("escc")) != NULL) {
+			/*
+			 * look for the device node for the serial port
+			 * we're using and see if it says it has a modem
+			 */
+			char *name = xmon_use_sccb? "ch-b": "ch-a";
+			char *slots;
+			int l;
+
+			np = np->child;
+			while (np != NULL && strcmp(np->name, name) != 0)
+				np = np->sibling;
+			if (np != NULL) {
+				/* XXX should parse this properly */
+				slots = get_property(np, "slot-names", &l);
+				if (slots != NULL && l >= 10
+				    && strcmp(slots+4, "Modem") == 0)
+					via_modem = 1;
+			}
+		}
+		btext_drawstring("xmon uses ");
+		if (use_screen)
+			btext_drawstring("screen and keyboard\n");
+		else {
+			if (via_modem)
+				btext_drawstring("modem on ");
+			btext_drawstring(xmon_use_sccb? "printer": "modem");
+			btext_drawstring(" port\n");
+		}
+
+#endif /* CONFIG_BOOTX_TEXT */
 
 #ifdef CHRP_ESCC
 		addr = 0xc1013020;
@@ -93,15 +134,6 @@ xmon_map_scc(void)
 		sccc = base + (addr & ~PAGE_MASK);
 		sccd = sccc + 0x10;
 	}
-	else if ( _machine & _MACH_gemini )
-	{
-		/* should already be mapped by the kernel boot */
-		sccc = (volatile unsigned char *) 0xffeffb0d;
-		sccd = (volatile unsigned char *) 0xffeffb08;
-		TXRDY = 0x20;
-		RXRDY = 1;
-		console = 1;
-	}
 	else
 	{
 		/* should already be mapped by the kernel boot */
@@ -114,6 +146,14 @@ xmon_map_scc(void)
 		TXRDY = 0x20;
 		RXRDY = 1;
 	}
+#elif defined(CONFIG_GEMINI)
+	/* should already be mapped by the kernel boot */
+	sccc = (volatile unsigned char *) 0xffeffb0d;
+	sccd = (volatile unsigned char *) 0xffeffb08;
+	TXRDY = 0x20;
+	RXRDY = 1;
+	console = 1;
+#endif /* platform */
 }
 
 static int scc_initialized = 0;
@@ -140,12 +180,22 @@ xmon_write(void *handle, void *ptr, int nb)
 	char *p = ptr;
 	int i, c, ct;
 
+#ifdef CONFIG_SMP
+	static unsigned long xmon_write_lock;
+	int lock_wait = 1000000;
+	int locked;
+
+	while ((locked = test_and_set_bit(0, &xmon_write_lock)) != 0)
+		if (--lock_wait == 0)
+			break;
+#endif
+
 #ifdef CONFIG_BOOTX_TEXT
 	if (use_screen) {
 		/* write it on the screen */
 		for (i = 0; i < nb; ++i)
-			prom_drawchar(*p++);
-		return nb;
+			btext_drawchar(*p++);
+		goto out;
 	}
 #endif
 	if (!scc_initialized)
@@ -166,8 +216,15 @@ xmon_write(void *handle, void *ptr, int nb)
 		}
 		buf_access();
 		*sccd = c;
+		eieio();
 	}
-	return i;
+
+ out:
+#ifdef CONFIG_SMP
+	if (!locked)
+		clear_bit(0, &xmon_write_lock);
+#endif
+	return nb;
 }
 
 int xmon_wants_key;
@@ -178,7 +235,7 @@ static int xmon_adb_shiftstate;
 
 static unsigned char xmon_keytab[128] =
 	"asdfhgzxcv\000bqwer"				/* 0x00 - 0x0f */
-	"yt123465=97-80o]"				/* 0x10 - 0x1f */
+	"yt123465=97-80]o"				/* 0x10 - 0x1f */
 	"u[ip\rlj'k;\\,/nm."				/* 0x20 - 0x2f */
 	"\t `\177\0\033\0\0\0\0\0\0\0\0\0\0"		/* 0x30 - 0x3f */
 	"\0.\0*\0+\0\0\0\0\0/\r\0-\0"			/* 0x40 - 0x4f */
@@ -186,7 +243,7 @@ static unsigned char xmon_keytab[128] =
 
 static unsigned char xmon_shift_keytab[128] =
 	"ASDFHGZXCV\000BQWER"				/* 0x00 - 0x0f */
-	"YT!@#$^%+(&=*)}O"				/* 0x10 - 0x1f */
+	"YT!@#$^%+(&_*)}O"				/* 0x10 - 0x1f */
 	"U{IP\rLJ\"K:|<?NM>"				/* 0x20 - 0x2f */
 	"\t ~\177\0\033\0\0\0\0\0\0\0\0\0\0"		/* 0x30 - 0x3f */
 	"\0.\0*\0+\0\0\0\0\0/\r\0-\0"			/* 0x40 - 0x4f */
@@ -205,15 +262,15 @@ xmon_get_adb_key(void)
 		do {
 			if (--t < 0) {
 				on = 1 - on;
-				prom_drawchar(on? 0xdb: 0x20);
-				prom_drawchar('\b');
+				btext_drawchar(on? 0xdb: 0x20);
+				btext_drawchar('\b');
 				t = 200000;
 			}
 			do_poll_adb();
 		} while (xmon_adb_keycode == -1);
 		k = xmon_adb_keycode;
 		if (on)
-			prom_drawstring(" \b");
+			btext_drawstring(" \b");
 
 		/* test for shift keys */
 		if ((k & 0x7f) == 0x38 || (k & 0x7f) == 0x7b) {
@@ -506,7 +563,9 @@ void
 xmon_enter(void)
 {
 #ifdef CONFIG_ADB_PMU
-	pmu_suspend();
+	if (_machine == _MACH_Pmac) {
+		pmu_suspend();
+	}
 #endif
 }
 
@@ -514,6 +573,8 @@ void
 xmon_leave(void)
 {
 #ifdef CONFIG_ADB_PMU
-	pmu_resume();
+	if (_machine == _MACH_Pmac) {
+		pmu_resume();
+	}
 #endif
 }

@@ -66,7 +66,7 @@
 	N(t+delta) = min{B/R, N(t) + delta}
 
 	If the first packet in queue has length S, it may be
-	transmited only at the time t_* when S/R <= N(t_*),
+	transmitted only at the time t_* when S/R <= N(t_*),
 	and in this case N(t) jumps:
 
 	N(t_* + 0) = N(t_* - 0) - S/R.
@@ -227,7 +227,7 @@ tbf_dequeue(struct Qdisc* sch)
 		}
 
 		if (!netif_queue_stopped(sch->dev)) {
-			long delay = PSCHED_US2JIFFIE(max(-toks, -ptoks));
+			long delay = PSCHED_US2JIFFIE(max_t(long, -toks, -ptoks));
 
 			if (delay == 0)
 				delay = 1;
@@ -276,7 +276,7 @@ static int tbf_change(struct Qdisc* sch, struct rtattr *opt)
 	struct tc_tbf_qopt *qopt;
 	struct qdisc_rate_table *rtab = NULL;
 	struct qdisc_rate_table *ptab = NULL;
-	int max_size;
+	int max_size,n;
 
 	if (rtattr_parse(tb, TCA_TBF_PTAB, RTA_DATA(opt), RTA_PAYLOAD(opt)) ||
 	    tb[TCA_TBF_PARMS-1] == NULL ||
@@ -295,15 +295,18 @@ static int tbf_change(struct Qdisc* sch, struct rtattr *opt)
 			goto done;
 	}
 
-	max_size = psched_mtu(sch->dev);
+	for (n = 0; n < 256; n++)
+		if (rtab->data[n] > qopt->buffer) break;
+	max_size = (n << qopt->rate.cell_log)-1;
 	if (ptab) {
-		int n = max_size>>qopt->peakrate.cell_log;
-		while (n>0 && ptab->data[n-1] > qopt->mtu) {
-			max_size -= (1<<qopt->peakrate.cell_log);
-			n--;
-		}
+		int size;
+
+		for (n = 0; n < 256; n++)
+			if (ptab->data[n] > qopt->mtu) break;
+		size = (n << qopt->peakrate.cell_log)-1;
+		if (size < max_size) max_size = size;
 	}
-	if (rtab->data[max_size>>qopt->rate.cell_log] > qopt->buffer)
+	if (max_size < 0)
 		goto done;
 
 	sch_tree_lock(sch);
@@ -424,3 +427,4 @@ void cleanup_module(void)
 	unregister_qdisc(&tbf_qdisc_ops);
 }
 #endif
+MODULE_LICENSE("GPL");

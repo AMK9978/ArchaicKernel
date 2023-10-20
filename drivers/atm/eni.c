@@ -32,7 +32,7 @@
 #include "suni.h"
 #include "eni.h"
 
-#ifndef __i386__
+#if !defined(__i386__) && !defined(__x86_64__)
 #ifndef ioremap_nocache
 #define ioremap_nocache(X,Y) ioremap(X,Y)
 #endif 
@@ -1796,6 +1796,7 @@ static int __devinit eni_start(struct atm_dev *dev)
 		return -EAGAIN;
 	}
 	/* @@@ should release IRQ on error */
+	pci_set_master(eni_dev->pci_dev);
 	if ((error = pci_write_config_word(eni_dev->pci_dev,PCI_COMMAND,
 	    PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER |
 	    (eni_dev->asic ? PCI_COMMAND_PARITY | PCI_COMMAND_SERR : 0)))) {
@@ -2265,7 +2266,7 @@ static int __devinit eni_init_one(struct pci_dev *pci_dev,
 	}
 	dev = atm_dev_register(DEV_LABEL,&ops,-1,NULL);
 	if (!dev) goto out2;
-	pci_dev->driver_data = dev;
+	pci_set_drvdata(pci_dev, dev);
 	eni_dev->pci_dev = pci_dev;
 	ENI_DEV(dev) = eni_dev;
 	eni_dev->asic = ent->driver_data;
@@ -2339,3 +2340,6 @@ static void __exit eni_cleanup(void)
 
 module_init(eni_init);
 module_exit(eni_cleanup);
+
+EXPORT_NO_SYMBOLS;
+MODULE_LICENSE("GPL");

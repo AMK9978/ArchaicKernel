@@ -74,7 +74,7 @@
 #include <linux/types.h>
 #include <linux/delay.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 
 #include <asm/setup.h>
@@ -1600,7 +1600,7 @@ static int fd_ioctl(struct inode *inode, struct file *filp,
 				dtp = UDT;
 		}
 		if (cmd == BLKGETSIZE)
-			return put_user(dtp->blocks, (long *)param);
+			return put_user(dtp->blocks, (unsigned long *)param);
 
 		memset((void *)&getprm, 0, sizeof(getprm));
 		getprm.size = dtp->blocks;
@@ -1910,8 +1910,6 @@ static int floppy_open( struct inode *inode, struct file *filp )
 	if (fd_ref[drive] == -1 || (fd_ref[drive] && filp->f_flags & O_EXCL))
 		return -EBUSY;
 
-	MOD_INC_USE_COUNT;
-
 	if (filp->f_flags & O_EXCL)
 		fd_ref[drive] = -1;
 	else
@@ -1950,11 +1948,11 @@ static int floppy_release( struct inode * inode, struct file * filp )
 		fd_ref[drive] = 0;
 	}
 
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
 static struct block_device_operations floppy_fops = {
+	owner:			THIS_MODULE,
 	open:			floppy_open,
 	release:		floppy_release,
 	ioctl:			fd_ioctl,
@@ -2056,6 +2054,9 @@ void __init atari_floppy_setup( char *str, int *ints )
 }
 
 #ifdef MODULE
+
+MODULE_LICENSE("GPL");
+
 int init_module (void)
 {
 	if (!MACH_IS_ATARI)

@@ -21,6 +21,7 @@
 /*
  * USB types
  */
+#define USB_TYPE_MASK			(0x03 << 5)
 #define USB_TYPE_STANDARD		(0x00 << 5)
 #define USB_TYPE_CLASS			(0x01 << 5)
 #define USB_TYPE_VENDOR			(0x02 << 5)
@@ -424,6 +425,7 @@ struct usb_driver {
 #define USB_ASYNC_UNLINK        0x0008
 #define USB_QUEUE_BULK          0x0010
 #define USB_NO_FSBR		0x0020
+#define USB_ZERO_PACKET         0x0040  // Finish bulk OUTs always with zero length packet
 #define USB_TIMEOUT_KILLED	0x1000	// only set by HCD!
 
 typedef struct
@@ -537,13 +539,12 @@ int usb_bulk_msg(struct usb_device *usb_dev, unsigned int pipe, void *data, int 
  *                         SYNCHRONOUS CALL SUPPORT                  *
  *-------------------------------------------------------------------*/
 
-typedef struct
+struct usb_api_data
 {
-  wait_queue_head_t *wakeup;
-
-  void* stuff;
-  /* more to follow */
-} api_wrapper_data;
+	wait_queue_head_t wqh;
+	int done;
+	/* void* stuff;	*/	/* Possible extension later. */
+};
 
 /* -------------------------------------------------------------------------- */
 
@@ -555,11 +556,17 @@ struct usb_operations {
 	int (*unlink_urb) (struct urb* purb);
 };
 
+#define DEVNUM_ROUND_ROBIN	/***** OPTION *****/
+
 /*
  * Allocated per bus we have
  */
 struct usb_bus {
 	int busnum;			/* Bus number (in order of reg) */
+
+#ifdef DEVNUM_ROUND_ROBIN
+	int devnum_next;                /* Next open device number in round-robin allocation */
+#endif /* DEVNUM_ROUND_ROBIN */
 
 	struct usb_devmap devmap;       /* Device map */
 	struct usb_operations *op;      /* Operations (specific to the HC) */
@@ -577,15 +584,30 @@ struct usb_bus {
 
 	/* usbdevfs inode list */
 	struct list_head inodes;
+
+	atomic_t refcnt;
 };
 
-#define USB_MAXCHILDREN		(16)	/* This is arbitrary */
+/* This is arbitrary.
+ * From USB 2.0 spec Table 11-13, offset 7, a hub can
+ * have up to 255 ports. The most yet reported is 10.
+ */
+#define USB_MAXCHILDREN		(16)
 
 struct usb_device {
 	int devnum;			/* Device number on USB bus */
-	int slow;			/* Slow device? */
+
+	enum {
+		USB_SPEED_UNKNOWN = 0,			/* enumerating */
+		USB_SPEED_LOW, USB_SPEED_FULL,		/* usb 1.1 */
+		USB_SPEED_HIGH				/* usb 2.0 */
+	} speed;
+
+	struct usb_device *tt;		/* usb1.1 device on usb2.0 bus */
+	int ttport;			/* device/hub port on that tt */
 
 	atomic_t refcnt;		/* Reference count */
+	struct semaphore serialize;
 
 	unsigned int toggle[2];		/* one bit for each endpoint ([0] = IN, [1] = OUT) */
 	unsigned int halted[2];		/* endpoint halts; one bit per endpoint # & direction; */
@@ -693,6 +715,9 @@ int usb_get_current_frame_number (struct usb_device *usb_dev);
  * up to us. This one happens to share a lot of bit positions with the UHCI
  * specification, so that much of the uhci driver can just mask the bits
  * appropriately.
+ *
+ * NOTE:  there's no encoding (yet?) for a "high speed" endpoint; treat them
+ * like full speed devices.
  */
 
 #define PIPE_ISOCHRONOUS		0
@@ -733,12 +758,13 @@ int usb_get_current_frame_number (struct usb_device *usb_dev);
 
 static inline unsigned int __create_pipe(struct usb_device *dev, unsigned int endpoint)
 {
-	return (dev->devnum << 8) | (endpoint << 15) | (dev->slow << 26);
+	return (dev->devnum << 8) | (endpoint << 15) |
+		((dev->speed == USB_SPEED_LOW) << 26);
 }
 
 static inline unsigned int __default_pipe(struct usb_device *dev)
 {
-	return (dev->slow << 26);
+	return ((dev->speed == USB_SPEED_LOW) << 26);
 }
 
 /* Create various pipes... */
@@ -829,6 +855,7 @@ void usb_show_string(struct usb_device *dev, char *id, int index);
 
 extern struct list_head usb_driver_list;
 extern struct list_head usb_bus_list;
+extern struct semaphore usb_bus_list_lock;
 
 /*
  * USB device fs stuff

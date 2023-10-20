@@ -175,6 +175,7 @@ static struct async *alloc_async(unsigned int numisoframes)
                 return NULL;
         memset(as, 0, assize);
         as->urb.number_of_packets = numisoframes;
+        spin_lock_init(&as->urb.lock);
         return as;
 }
 
@@ -250,10 +251,6 @@ static void async_completed(purb_t urb)
         struct dev_state *ps = as->ps;
 	struct siginfo sinfo;
 
-#if 1
-	printk(KERN_DEBUG "usbdevfs: async_completed: status %d errcount %d actlen %d pipe 0x%x\n", 
-	       urb->status, urb->error_count, urb->actual_length, urb->pipe);
-#endif
         spin_lock(&ps->lock);
         list_del(&as->asynclist);
         list_add_tail(&as->asynclist, &ps->async_completed);
@@ -432,11 +429,14 @@ static int finddriver(struct usb_driver **driver, char *name)
 }
 #endif
 
-static int check_ctrlrecip(struct dev_state *ps, unsigned int recip, unsigned int index)
+static int check_ctrlrecip(struct dev_state *ps, unsigned int requesttype, unsigned int index)
 {
 	int ret;
 
-	switch (recip & USB_RECIP_MASK) {
+	if (USB_TYPE_VENDOR == (USB_TYPE_MASK & requesttype))
+		return 0;
+
+	switch (requesttype & USB_RECIP_MASK) {
 	case USB_RECIP_ENDPOINT:
 		if ((ret = findintfep(ps->dev, index & 0xff)) < 0)
 			return ret;
@@ -684,7 +684,7 @@ static int proc_connectinfo(struct dev_state *ps, void *arg)
 	struct usbdevfs_connectinfo ci;
 
 	ci.devnum = ps->dev->devnum;
-	ci.slow = ps->dev->slow;
+	ci.slow = ps->dev->speed == USB_SPEED_LOW;
 	if (copy_to_user(arg, &ci, sizeof(ci)))
 		return -EFAULT;
 	return 0;
@@ -763,7 +763,8 @@ static int proc_submiturb(struct dev_state *ps, void *arg)
 
 	if (copy_from_user(&uurb, arg, sizeof(uurb)))
 		return -EFAULT;
-	if (uurb.flags & ~(USBDEVFS_URB_ISO_ASAP|USBDEVFS_URB_DISABLE_SPD|USBDEVFS_URB_QUEUE_BULK))
+	if (uurb.flags & ~(USBDEVFS_URB_ISO_ASAP|USBDEVFS_URB_DISABLE_SPD|USBDEVFS_URB_QUEUE_BULK|
+			   USB_NO_FSBR|USB_ZERO_PACKET))
 		return -EINVAL;
 	if (!uurb.buffer)
 		return -EINVAL;
@@ -838,9 +839,17 @@ static int proc_submiturb(struct dev_state *ps, void *arg)
 		}
 		if (totlen > 32768) {
 			kfree(isopkt);
-			return -ENOMEM;
+			return -EINVAL;
 		}
 		uurb.buffer_length = totlen;
+		break;
+
+	case USBDEVFS_URB_TYPE_INTERRUPT:
+		uurb.number_of_packets = 0;
+		if (uurb.buffer_length > 16384)
+			return -EINVAL;
+		if (!access_ok((uurb.endpoint & USB_DIR_IN) ? VERIFY_WRITE : VERIFY_READ, uurb.buffer, uurb.buffer_length))
+			return -EFAULT;   
 		break;
 
 	default:
@@ -1081,7 +1090,7 @@ static int proc_ioctl (struct dev_state *ps, void *arg)
 		if (retval == 0)
 			/* ifno might usefully be passed ... */
 			retval = ifp->driver->ioctl (ps->dev, ctrl.ioctl_code, buf);
-			/* size = min (size, retval)? */
+			/* size = min_t(int, size, retval)? */
 	}
 
 	/* cleanup and return */

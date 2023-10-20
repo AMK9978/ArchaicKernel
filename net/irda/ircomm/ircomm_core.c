@@ -220,7 +220,7 @@ int ircomm_connect_request(struct ircomm_cb *self, __u8 dlsap_sel,
 /*
  * Function ircomm_connect_indication (self, qos, skb)
  *
- *    Notify user layer about the incomming connection
+ *    Notify user layer about the incoming connection
  *
  */
 void ircomm_connect_indication(struct ircomm_cb *self, struct sk_buff *skb,
@@ -514,6 +514,7 @@ int ircomm_proc_read(char *buf, char **start, off_t offset, int len)
 #ifdef MODULE
 MODULE_AUTHOR("Dag Brattli <dag@brattli.net>");
 MODULE_DESCRIPTION("IrCOMM protocol");
+MODULE_LICENSE("GPL");
 
 int init_module(void) 
 {

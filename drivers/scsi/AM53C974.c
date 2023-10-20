@@ -676,6 +676,11 @@ static int __init  AM53C974_init(Scsi_Host_Template * tpnt, struct pci_dev *pdev
 #endif
 
 	instance = scsi_register(tpnt, sizeof(struct AM53C974_hostdata));
+	if (!instance) {
+		printk(KERN_WARNING "AM53C974: Unable to register host, aborting.\n");
+		return 0;
+	}
+	scsi_set_pci_device(instance, pdev);
 	hostdata = (struct AM53C974_hostdata *) instance->hostdata;
 	instance->base = 0;
 	instance->io_port = pci_resource_start(pdev, 0);
@@ -2444,6 +2449,8 @@ static int AM53C974_release(struct Scsi_Host *shp)
 /* You can specify overrides=a,b,c,d in the same format at AM53C974=a,b,c,d
    on boot up */
 MODULE_PARM(overrides, "1-32i");
+MODULE_LICENSE("GPL");
+
 
 static Scsi_Host_Template driver_template = AM53C974;
 #include "scsi_module.c"

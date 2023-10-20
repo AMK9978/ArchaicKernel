@@ -43,6 +43,13 @@
 #include "dabusb.h"
 #include "dabfirmware.h"
 
+/*
+ * Version Information
+ */
+#define DRIVER_VERSION "v1.54"
+#define DRIVER_AUTHOR "Deti Fliegl, deti@fliegl.de"
+#define DRIVER_DESC "DAB-USB Interface Driver for Linux (c)1999"
+
 /* --------------------------------------------------------------------- */
 
 #define NRDABUSB 4
@@ -415,11 +422,6 @@ static int dabusb_fpga_download (pdabusb_t s, const char *fname)
 	return ret;
 }
 
-static loff_t dabusb_llseek (struct file *file, loff_t offset, int origin)
-{
-	return -ESPIPE;
-}
-
 static int dabusb_stop (pdabusb_t s)
 {
 	dbg("dabusb_stop");
@@ -698,7 +700,7 @@ static int dabusb_ioctl (struct inode *inode, struct file *file, unsigned int cm
 static struct file_operations dabusb_fops =
 {
 	owner:		THIS_MODULE,
-	llseek:		dabusb_llseek,
+	llseek:		no_llseek,
 	read:		dabusb_read,
 	ioctl:		dabusb_ioctl,
 	open:		dabusb_open,
@@ -829,6 +831,9 @@ static int __init dabusb_init (void)
 		return -1;
 
 	dbg("dabusb_init: driver registered");
+
+	info(DRIVER_VERSION ":" DRIVER_DESC);
+
 	return 0;
 }
 
@@ -841,8 +846,10 @@ static void __exit dabusb_cleanup (void)
 
 /* --------------------------------------------------------------------- */
 
-MODULE_AUTHOR ("Deti Fliegl, deti@fliegl.de");
-MODULE_DESCRIPTION ("DAB-USB Interface Driver for Linux (c)1999");
+MODULE_AUTHOR( DRIVER_AUTHOR );
+MODULE_DESCRIPTION( DRIVER_DESC );
+MODULE_LICENSE("GPL");
+
 MODULE_PARM (buffers, "i");
 MODULE_PARM_DESC (buffers, "Number of buffers (default=256)");
 

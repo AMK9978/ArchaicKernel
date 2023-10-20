@@ -78,6 +78,7 @@ extern int			ipv6_dev_mc_dec(struct net_device *dev,
 						struct in6_addr *addr);
 extern void			ipv6_mc_up(struct inet6_dev *idev);
 extern void			ipv6_mc_down(struct inet6_dev *idev);
+extern void			ipv6_mc_init_dev(struct inet6_dev *idev);
 extern void			ipv6_mc_destroy_dev(struct inet6_dev *idev);
 extern void			addrconf_dad_failure(struct inet6_ifaddr *ifp);
 
@@ -86,6 +87,10 @@ extern int			ipv6_chk_mcast_addr(struct net_device *dev,
 
 extern void			addrconf_prefix_rcv(struct net_device *dev,
 						    u8 *opt, int len);
+
+/* Device notifier */
+extern int register_inet6addr_notifier(struct notifier_block *nb);
+extern int unregister_inet6addr_notifier(struct notifier_block *nb);
 
 static inline struct inet6_dev *
 __in6_dev_get(struct net_device *dev)
@@ -157,16 +162,8 @@ static __inline__ u8 ipv6_addr_hash(struct in6_addr *addr)
  *	compute link-local solicited-node multicast address
  */
 
-static inline void addrconf_addr_solict_mult_old(struct in6_addr *addr,
-						     struct in6_addr *solicited)
-{
-	ipv6_addr_set(solicited,
-		      __constant_htonl(0xFF020000), 0,
-		      __constant_htonl(0x1), addr->s6_addr32[3]);
-}
-
-static inline void addrconf_addr_solict_mult_new(struct in6_addr *addr,
-						     struct in6_addr *solicited)
+static inline void addrconf_addr_solict_mult(struct in6_addr *addr,
+					     struct in6_addr *solicited)
 {
 	ipv6_addr_set(solicited,
 		      __constant_htonl(0xFF020000), 0,

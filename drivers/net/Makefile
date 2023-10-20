@@ -8,15 +8,18 @@ obj-m           :=
 obj-n           :=
 obj-            :=
 
-mod-subdirs     := appletalk arcnet fc irda tokenring pcmcia wan
+mod-subdirs     := appletalk arcnet fc irda tokenring pcmcia wireless wan
 
 O_TARGET := net.o
 
 # All of the (potential) objects that export symbols.
 # This list comes from 'grep -l EXPORT_SYMBOL *.[hc]'.
 
-export-objs     :=	8390.o arlan.o aironet4500_core.o aironet4500_card.o ppp_async.o \
-			ppp_generic.o slhc.o pppox.o auto_irq.o
+export-objs     :=	8390.o arlan.o aironet4500_core.o aironet4500_card.o \
+			ppp_async.o ppp_generic.o slhc.o pppox.o auto_irq.o \
+			net_init.o
+list-multi	:=	rcpci.o
+rcpci-objs	:=	rcpci45.o rclanmtl.o
 
 ifeq ($(CONFIG_TULIP),y)
   obj-y += tulip/tulip.o
@@ -26,7 +29,8 @@ ifeq ($(CONFIG_ISDN_PPP),y)
   obj-$(CONFIG_ISDN) += slhc.o
 endif
 
-subdir-$(CONFIG_PCMCIA) += pcmcia
+subdir-$(CONFIG_NET_PCMCIA) += pcmcia
+subdir-$(CONFIG_NET_WIRELESS) += wireless
 subdir-$(CONFIG_TULIP) += tulip
 subdir-$(CONFIG_IRDA) += irda
 subdir-$(CONFIG_TR) += tokenring
@@ -49,11 +53,11 @@ obj-$(CONFIG_SUNLANCE) += sunlance.o
 obj-$(CONFIG_SUNQE) += sunqe.o
 obj-$(CONFIG_SUNBMAC) += sunbmac.o
 obj-$(CONFIG_MYRI_SBUS) += myri_sbus.o
+obj-$(CONFIG_SUNGEM) += sungem.o
 
 obj-$(CONFIG_MACE) += mace.o
 obj-$(CONFIG_BMAC) += bmac.o
 obj-$(CONFIG_GMAC) += gmac.o
-obj-$(CONFIG_NCR885E) += ncr885e.o
 
 obj-$(CONFIG_OAKNET) += oaknet.o 8390.o
 
@@ -69,8 +73,11 @@ obj-$(CONFIG_SIS900) += sis900.o
 obj-$(CONFIG_DM9102) += dmfe.o
 obj-$(CONFIG_YELLOWFIN) += yellowfin.o
 obj-$(CONFIG_ACENIC) += acenic.o
+obj-$(CONFIG_VETH) += veth.o
 obj-$(CONFIG_NATSEMI) += natsemi.o
+obj-$(CONFIG_NS83820) += ns83820.o
 obj-$(CONFIG_STNIC) += stnic.o 8390.o
+obj-$(CONFIG_FEALNX) += fealnx.o
 
 ifeq ($(CONFIG_SK98LIN),y)
 obj-y += sk98lin/sk98lin.o
@@ -131,17 +138,11 @@ obj-$(CONFIG_PPP_BSDCOMP) += bsd_comp.o
 obj-$(CONFIG_PPPOE) += pppox.o pppoe.o
 
 obj-$(CONFIG_SLIP) += slip.o
-ifeq ($(CONFIG_SLIP),y)
-  obj-$(CONFIG_SLIP_COMPRESSED) += slhc.o
-else
-  ifeq ($(CONFIG_SLIP),m)
-    obj-$(CONFIG_SLIP_COMPRESSED) += slhc.o
-  endif
+ifeq ($(CONFIG_SLIP_COMPRESSED),y)
+  obj-$(CONFIG_SLIP) += slhc.o
 endif
 
 obj-$(CONFIG_STRIP) += strip.o
-obj-$(CONFIG_DE650) += de650.o 8390.o
-obj-$(CONFIG_3C589) += 3c589.o
 obj-$(CONFIG_DUMMY) += dummy.o
 obj-$(CONFIG_BONDING) += bonding.o
 obj-$(CONFIG_DE600) += de600.o
@@ -163,11 +164,12 @@ obj-$(CONFIG_EL3) += 3c509.o
 obj-$(CONFIG_3C515) += 3c515.o
 obj-$(CONFIG_EEXPRESS) += eexpress.o
 obj-$(CONFIG_EEXPRESS_PRO) += eepro.o
-obj-$(CONFIG_RTL8129) += rtl8129.o
+obj-$(CONFIG_8139CP) += 8139cp.o
 obj-$(CONFIG_8139TOO) += 8139too.o
 obj-$(CONFIG_WAVELAN) += wavelan.o
 obj-$(CONFIG_ARLAN) += arlan.o arlan-proc.o
 obj-$(CONFIG_ZNET) += znet.o
+obj-$(CONFIG_LAN_SAA9730) += saa9730.o
 obj-$(CONFIG_DEPCA) += depca.o
 obj-$(CONFIG_EWRK3) += ewrk3.o
 obj-$(CONFIG_ATP) += atp.o
@@ -178,14 +180,21 @@ obj-$(CONFIG_NI65) += ni65.o
 obj-$(CONFIG_ELPLUS) += 3c505.o
 obj-$(CONFIG_AC3200) += ac3200.o 8390.o
 obj-$(CONFIG_APRICOT) += 82596.o
+obj-$(CONFIG_LASI_82596) += lasi_82596.o
 obj-$(CONFIG_MVME16x_NET) += 82596.o
 obj-$(CONFIG_BVME6000_NET) += 82596.o
+
+# This is also a 82596 and should probably be merged
+obj-$(CONFIG_LP486E) += lp486e.o
+
 obj-$(CONFIG_ETH16I) += eth16i.o
 obj-$(CONFIG_ARIADNE2) += ariadne2.o 8390.o
 obj-$(CONFIG_HPLANCE) += hplance.o 7990.o
 obj-$(CONFIG_MVME147_NET) += mvme147.o 7990.o
 obj-$(CONFIG_EQUALIZER) += eql.o
 obj-$(CONFIG_MIPS_JAZZ_SONIC) += jazzsonic.o
+obj-$(CONFIG_MIPS_GT96100ETH) += gt96100eth.o
+obj-$(CONFIG_MIPS_AU1000_ENET) += au1000_eth.o
 obj-$(CONFIG_SGI_IOC3_ETH) += ioc3-eth.o
 obj-$(CONFIG_BAGETLANCE) += bagetlance.o
 obj-$(CONFIG_DECLANCE) += declance.o
@@ -200,12 +209,22 @@ obj-$(CONFIG_MACSONIC) += macsonic.o
 obj-$(CONFIG_MACMACE) += macmace.o
 obj-$(CONFIG_MAC89x0) += mac89x0.o
 obj-$(CONFIG_TUN) += tun.o
+obj-$(CONFIG_DL2K) += dl2k.o
+
+ifeq ($(CONFIG_ARCH_ACORN),y)
+mod-subdirs	+= ../acorn/net
+subdir-y	+= ../acorn/net
+obj-y		+= ../acorn/net/acorn-net.o
+endif
+
 #
 # HIPPI adapters
 #
 
 ifneq ($(ARCH),s390)
+ifneq ($(ARCH),s390x)
 obj-y += auto_irq.o
+endif
 endif
 
 include $(TOPDIR)/Rules.make
@@ -213,6 +232,6 @@ include $(TOPDIR)/Rules.make
 clean:
 	rm -f core *.o *.a *.s
 
-rcpci.o: rcpci45.o rclanmtl.o
-	$(LD) -r -o rcpci.o rcpci45.o rclanmtl.o
+rcpci.o: $(rcpci-objs)
+	$(LD) -r -o $@ $(rcpci-objs)
 

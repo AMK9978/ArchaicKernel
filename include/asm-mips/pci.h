@@ -1,5 +1,4 @@
-/* $Id: pci.h,v 1.10 2000/03/23 02:26:00 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -7,13 +6,19 @@
 #ifndef _ASM_PCI_H
 #define _ASM_PCI_H
 
+#include <linux/config.h>
+
 #ifdef __KERNEL__
 
 /* Can be used to override the logic in pci_scan_bus for skipping
    already-configured bus numbers - to be used for buggy BIOSes
    or architectures with incomplete PCI setup by the loader */
 
+#ifdef CONFIG_PCI
+extern unsigned int pcibios_assign_all_busses(void);
+#else
 #define pcibios_assign_all_busses()	0
+#endif
 
 #define PCIBIOS_MIN_IO		0x1000
 #define PCIBIOS_MIN_MEM		0x10000000
@@ -40,7 +45,7 @@ extern inline void pcibios_penalize_isa_irq(int irq)
 #include <linux/string.h>
 #include <asm/io.h>
 
-#ifdef CONFIG_DDB5074
+#if (defined(CONFIG_DDB5074) || defined(CONFIG_DDB5476))
 #undef PCIBIOS_MIN_IO
 #undef PCIBIOS_MIN_MEM
 #define PCIBIOS_MIN_IO		0x0100000
@@ -85,7 +90,9 @@ extern inline dma_addr_t pci_map_single(struct pci_dev *hwdev, void *ptr,
 	if (direction == PCI_DMA_NONE)
 		BUG();
 
+#ifndef CONFIG_COHERENT_IO
 	dma_cache_wback_inv((unsigned long)ptr, size);
+#endif
 
 	return virt_to_bus(ptr);
 }
@@ -173,7 +180,9 @@ extern inline void pci_dma_sync_single(struct pci_dev *hwdev,
 	if (direction == PCI_DMA_NONE)
 		BUG();
 
+#ifndef CONFIG_COHERENT_IO
 	dma_cache_wback_inv((unsigned long)bus_to_virt(dma_handle), size);
+#endif
 }
 
 /*
@@ -200,6 +209,28 @@ extern inline void pci_dma_sync_sg(struct pci_dev *hwdev,
 		dma_cache_wback_inv((unsigned long)sg->address, sg->length);
 #endif
 }
+
+/* Return whether the given PCI device DMA address mask can
+ * be supported properly.  For example, if your device can
+ * only drive the low 24-bits during PCI bus mastering, then
+ * you would pass 0x00ffffff as the mask to this function.
+ */
+extern inline int pci_dma_supported(struct pci_dev *hwdev, u64 mask)
+{
+	/*
+	 * we fall back to GFP_DMA when the mask isn't all 1s,
+	 * so we can't guarantee allocations that must be
+	 * within a tighter range than GFP_DMA..
+	 */
+	if (mask < 0x1fffffff)
+		return 0;
+
+	return 1;
+}
+
+
+/* Return the index of the PCI controller for device. */
+#define pci_controller_num(pdev)	(0)
 
 /*
  * These macros should be used after a pci_map_sg call has been done

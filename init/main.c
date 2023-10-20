@@ -21,15 +21,20 @@
 #include <linux/utsname.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
-#include <linux/raid/md.h>
 #include <linux/smp_lock.h>
 #include <linux/blk.h>
 #include <linux/hdreg.h>
 #include <linux/iobuf.h>
 #include <linux/bootmem.h>
+#include <linux/tty.h>
 
 #include <asm/io.h>
 #include <asm/bugs.h>
+
+#if defined(CONFIG_ARCH_S390)
+#include <asm/s390mach.h>
+#include <asm/ccwcache.h>
+#endif
 
 #ifdef CONFIG_PCI
 #include <linux/pci.h>
@@ -47,10 +52,6 @@
 #  include <asm/mtrr.h>
 #endif
 
-#ifdef CONFIG_3215_CONSOLE
-extern int con3215_activate(void);
-#endif
-
 #ifdef CONFIG_NUBUS
 #include <linux/nubus.h>
 #endif
@@ -60,10 +61,11 @@ extern int con3215_activate(void);
 #endif
 
 #ifdef CONFIG_IRDA
-#include <net/irda/irda_device.h>
+extern int irda_proto_init(void);
+extern int irda_device_init(void);
 #endif
 
-#ifdef CONFIG_X86_IO_APIC
+#ifdef CONFIG_X86_LOCAL_APIC
 #include <asm/smp.h>
 #endif
 
@@ -91,12 +93,9 @@ extern void sbus_init(void);
 extern void ppc_init(void);
 extern void sysctl_init(void);
 extern void signals_init(void);
-extern void bdev_init(void);
 extern int init_pcmcia_ds(void);
-extern void net_notifier_init(void);
 
 extern void free_initmem(void);
-extern void filesystem_setup(void);
 
 #ifdef CONFIG_TC
 extern void tc_init(void);
@@ -106,9 +105,6 @@ extern void ecard_init(void);
 
 #if defined(CONFIG_SYSVIPC)
 extern void ipc_init(void);
-#endif
-#if defined(CONFIG_QUOTA)
-extern void dquot_init_hash(void);
 #endif
 
 /*
@@ -123,7 +119,7 @@ extern void softirq_init(void);
 int rows, cols;
 
 #ifdef CONFIG_BLK_DEV_INITRD
-kdev_t real_root_dev;
+unsigned int real_root_dev;	/* do_proc_dointvec cannot handle kdev_t */
 #endif
 
 int root_mountflags = MS_RDONLY;
@@ -151,6 +147,7 @@ static struct dev_name_struct {
 	{ "nfs",     0x00ff },
 	{ "hda",     0x0300 },
 	{ "hdb",     0x0340 },
+	{ "loop",    0x0700 },
 	{ "hdc",     0x1600 },
 	{ "hdd",     0x1640 },
 	{ "hde",     0x2100 },
@@ -214,17 +211,7 @@ static struct dev_name_struct {
 	{ "apblock", APBLOCK_MAJOR << 8},
 	{ "ddv", DDV_MAJOR << 8},
 	{ "jsfd",    JSFD_MAJOR << 8},
-#ifdef CONFIG_MDISK
-        { "mnda", (MDISK_MAJOR << MINORBITS)},
-        { "mndb", (MDISK_MAJOR << MINORBITS) + 1},
-        { "mndc", (MDISK_MAJOR << MINORBITS) + 2},
-        { "mndd", (MDISK_MAJOR << MINORBITS) + 3},
-        { "mnde", (MDISK_MAJOR << MINORBITS) + 4},
-        { "mndf", (MDISK_MAJOR << MINORBITS) + 5},
-        { "mndg", (MDISK_MAJOR << MINORBITS) + 6},
-        { "mndh", (MDISK_MAJOR << MINORBITS) + 7},
-#endif
-#ifdef CONFIG_DASD
+#if defined(CONFIG_ARCH_S390)
 	{ "dasda", (DASD_MAJOR << MINORBITS) },
 	{ "dasdb", (DASD_MAJOR << MINORBITS) + (1 << 2) },
 	{ "dasdc", (DASD_MAJOR << MINORBITS) + (2 << 2) },
@@ -270,9 +257,15 @@ static struct dev_name_struct {
 	{ "cciss/c0d14p",0x68E0 },
 	{ "cciss/c0d15p",0x68F0 },
 #endif
-#ifdef CONFIG_NFTL
 	{ "nftla", 0x5d00 },
-#endif
+	{ "nftlb", 0x5d10 },
+	{ "nftlc", 0x5d20 },
+	{ "nftld", 0x5d30 },
+	{ "ftla", 0x2c00 },
+	{ "ftlb", 0x2c08 },
+	{ "ftlc", 0x2c10 },
+	{ "ftld", 0x2c18 },
+	{ "mtdblock", 0x1f00 },
 	{ NULL, 0 }
 };
 
@@ -489,12 +482,14 @@ static void __init parse_options(char *line)
 extern void setup_arch(char **);
 extern void cpu_idle(void);
 
+unsigned long wait_init_idle;
+
 #ifndef CONFIG_SMP
 
-#ifdef CONFIG_X86_IO_APIC
+#ifdef CONFIG_X86_LOCAL_APIC
 static void __init smp_init(void)
 {
-	IO_APIC_init_uniprocessor();
+	APIC_init_uniprocessor();
 }
 #else
 #define smp_init()	do { } while (0)
@@ -502,21 +497,48 @@ static void __init smp_init(void)
 
 #else
 
+
 /* Called by boot processor to activate the rest. */
 static void __init smp_init(void)
 {
 	/* Get other processors into their bootup holding patterns. */
 	smp_boot_cpus();
+	wait_init_idle = cpu_online_map;
+	clear_bit(current->processor, &wait_init_idle); /* Don't wait on me! */
+
 	smp_threads_ready=1;
 	smp_commence();
-}		
+
+	/* Wait for the other cpus to set up their idle processes */
+	printk("Waiting on wait_init_idle (map = 0x%lx)\n", wait_init_idle);
+	while (wait_init_idle) {
+		cpu_relax();
+		barrier();
+	}
+	printk("All processors have done init_idle\n");
+}
 
 #endif
 
 /*
+ * We need to finalize in a non-__init function or else race conditions
+ * between the root thread and the init thread may cause start_kernel to
+ * be reaped by free_initmem before the root thread has proceeded to
+ * cpu_idle.
+ */
+
+static void rest_init(void)
+{
+	kernel_thread(init, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGNAL);
+	unlock_kernel();
+	current->need_resched = 1;
+ 	cpu_idle();
+} 
+
+/*
  *	Activate the first processor.
  */
- 
+
 asmlinkage void __init start_kernel(void)
 {
 	char * command_line;
@@ -534,8 +556,8 @@ asmlinkage void __init start_kernel(void)
 	trap_init();
 	init_IRQ();
 	sched_init();
-	time_init();
 	softirq_init();
+	time_init();
 
 	/*
 	 * HACK ALERT! This is early. We're enabling the console before
@@ -569,12 +591,6 @@ asmlinkage void __init start_kernel(void)
 #endif
 	mem_init();
 	kmem_cache_sizes_init();
-#ifdef CONFIG_3215_CONSOLE
-        con3215_activate();
-#endif
-#ifdef CONFIG_PROC_FS
-	proc_root_init();
-#endif
 	mempages = num_physpages;
 
 	fork_init(mempages);
@@ -582,15 +598,15 @@ asmlinkage void __init start_kernel(void)
 	vfs_caches_init(mempages);
 	buffer_init(mempages);
 	page_cache_init(mempages);
-	kiobuf_setup();
+#if defined(CONFIG_ARCH_S390)
+	ccwcache_init();
+#endif
 	signals_init();
-	bdev_init();
-	inode_init(mempages);
+#ifdef CONFIG_PROC_FS
+	proc_root_init();
+#endif
 #if defined(CONFIG_SYSVIPC)
 	ipc_init();
-#endif
-#if defined(CONFIG_QUOTA)
-	dquot_init_hash();
 #endif
 	check_bugs();
 	printk("POSIX conformance testing by UNIFIX\n");
@@ -601,10 +617,7 @@ asmlinkage void __init start_kernel(void)
 	 *	make syscalls (and thus be locked).
 	 */
 	smp_init();
-	kernel_thread(init, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGNAL);
-	unlock_kernel();
-	current->need_resched = 1;
- 	cpu_idle();
+	rest_init();
 }
 
 #ifdef CONFIG_BLK_DEV_INITRD
@@ -647,9 +660,6 @@ static void __init do_initcalls(void)
  */
 static void __init do_basic_setup(void)
 {
-#ifdef CONFIG_BLK_DEV_INITRD
-	int real_root_mountflags;
-#endif
 
 	/*
 	 * Tell the world that we're going to be the grim
@@ -678,6 +688,10 @@ static void __init do_basic_setup(void)
 	 * Ok, at this point all CPU's should be initialized, so
 	 * we can start looking into devices..
 	 */
+#if defined(CONFIG_ARCH_S390)
+	s390_init_machine_check();
+#endif
+
 #ifdef CONFIG_PCI
 	pci_init();
 #endif
@@ -712,24 +726,42 @@ static void __init do_basic_setup(void)
 	/* Networking initialization needs a process context */ 
 	sock_init();
 
-#ifdef CONFIG_BLK_DEV_INITRD
-	real_root_dev = ROOT_DEV;
-	real_root_mountflags = root_mountflags;
-	if (initrd_start && mount_initrd) root_mountflags &= ~MS_RDONLY;
-	else mount_initrd =0;
-#endif
-
 	start_context_thread();
 	do_initcalls();
 
-	/* .. filesystems .. */
-	filesystem_setup();
-
 #ifdef CONFIG_IRDA
+	irda_proto_init();
 	irda_device_init(); /* Must be done after protocol initialization */
 #endif
 #ifdef CONFIG_PCMCIA
 	init_pcmcia_ds();		/* Do this last */
+#endif
+}
+
+extern void rd_load(void);
+extern void initrd_load(void);
+
+/*
+ * Prepare the namespace - decide what/where to mount, load ramdisks, etc.
+ */
+static void prepare_namespace(void)
+{
+#ifdef CONFIG_BLK_DEV_INITRD
+	int real_root_mountflags = root_mountflags;
+	if (!initrd_start)
+		mount_initrd = 0;
+	if (mount_initrd)
+		root_mountflags &= ~MS_RDONLY;
+	real_root_dev = ROOT_DEV;
+#endif
+
+#ifdef CONFIG_BLK_DEV_RAM
+#ifdef CONFIG_BLK_DEV_INITRD
+	if (mount_initrd)
+		initrd_load();
+	else
+#endif
+	rd_load();
 #endif
 
 	/* Mount the root filesystem.. */
@@ -745,8 +777,12 @@ static void __init do_basic_setup(void)
 		int i, pid;
 
 		pid = kernel_thread(do_linuxrc, "/linuxrc", SIGCHLD);
-		if (pid>0)
-			while (pid != wait(&i));
+		if (pid > 0) {
+			while (pid != wait(&i)) {
+				current->policy |= SCHED_YIELD;
+				schedule();
+			}
+		}
 		if (MAJOR(real_root_dev) != RAMDISK_MAJOR
 		     || MINOR(real_root_dev) != 0) {
 			error = change_root(real_root_dev,"/initrd");
@@ -762,6 +798,8 @@ static int init(void * unused)
 {
 	lock_kernel();
 	do_basic_setup();
+
+	prepare_namespace();
 
 	/*
 	 * Ok, we have completed the initial bootup, and

@@ -1,12 +1,12 @@
 /******************************************************************************
  *
  * Name: actbl.h - Table data structures defined in ACPI specification
- *       $Revision: 43 $
+ *       $Revision: 46 $
  *
  *****************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -64,9 +64,9 @@
  * constant if the underlying tables are changed
  */
 #define RSDT_DESCRIPTOR         RSDT_DESCRIPTOR_REV2
-#define XSDT_DESCRIPTOR         XSDT_DESCRIPTOR_REV2
-#define FACS_DESCRIPTOR         FACS_DESCRIPTOR_REV2
-#define FADT_DESCRIPTOR         FADT_DESCRIPTOR_REV2
+#define xsdt_descriptor         XSDT_DESCRIPTOR_REV2
+#define FACS_DESCRIPTOR         facs_descriptor_rev2
+#define FADT_DESCRIPTOR         fadt_descriptor_rev2
 
 
 #pragma pack(1)
@@ -84,7 +84,7 @@ typedef struct  /* Root System Descriptor Pointer */
 	u8                      revision;               /* Must be 0 for 1.0, 2 for 2.0 */
 	u32                     rsdt_physical_address;  /* 32-bit physical address of RSDT */
 	u32                     length;                 /* XSDT Length in bytes including hdr */
-	UINT64                  xsdt_physical_address;  /* 64-bit physical address of XSDT */
+	u64                     xsdt_physical_address;  /* 64-bit physical address of XSDT */
 	u8                      extended_checksum;      /* Checksum of entire table */
 	NATIVE_CHAR             reserved [3];           /* reserved field must be 0 */
 
@@ -104,21 +104,21 @@ typedef struct  /* ACPI common table header */
 	NATIVE_CHAR             asl_compiler_id [4];    /* ASL compiler vendor ID */
 	u32                     asl_compiler_revision;  /* ASL compiler revision number */
 
-} ACPI_TABLE_HEADER;
+} acpi_table_header;
 
 
 typedef struct  /* Common FACS for internal use */
 {
 	u32                     *global_lock;
-	UINT64                  *firmware_waking_vector;
+	u64                     *firmware_waking_vector;
 	u8                      vector_width;
 
-} ACPI_COMMON_FACS;
+} acpi_common_facs;
 
 
 typedef struct  /* APIC Table */
 {
-	ACPI_TABLE_HEADER       header;                 /* table header */
+	acpi_table_header       header;                 /* table header */
 	u32                     local_apic_address;     /* Physical address for accessing local APICs */
 	u32                     PCATcompat      : 1;    /* a one indicates system also has dual 8259s */
 	u32                     reserved1       : 31;
@@ -140,7 +140,7 @@ typedef struct  /* Processor APIC */
 	u8                      processor_apic_id;      /* ACPI processor id */
 	u8                      local_apic_id;          /* processor's local APIC id */
 	u32                     processor_enabled: 1;   /* Processor is usable if set */
-	u32                     reserved1       : 32;
+	u32                     reserved1       : 31;
 
 } PROCESSOR_APIC;
 
@@ -166,7 +166,7 @@ typedef struct  /* IO APIC */
 */
 typedef struct  /* Smart Battery Description Table */
 {
-	ACPI_TABLE_HEADER       header;
+	acpi_table_header       header;
 	u32                     warning_level;
 	u32                     low_level;
 	u32                     critical_level;

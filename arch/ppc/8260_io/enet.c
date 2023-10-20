@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.enet.c 1.9 09/14/01 18:01:16 trini
+ */
+/*
  * Ethernet driver for Motorola MPC8260.
  * Copyright (c) 1999 Dan Malek (dmalek@jlc.net)
  * Copyright (c) 2000 MontaVista Software Inc. (source@mvista.com)
@@ -10,7 +13,7 @@
  * This version of the driver is somewhat selectable for the different
  * processor/board combinations.  It works for the boards I know about
  * now, and should be easily modified to include others.  Some of the
- * configuration information is contained in "commproc.h" and the
+ * configuration information is contained in <asm/commproc.h> and the
  * remainder is here.
  *
  * Buffer descriptors are kept in the CPM dual port RAM, and the frame
@@ -30,7 +33,7 @@
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/init.h>
@@ -633,6 +636,9 @@ int __init scc_enet_init(void)
 	/* Allocate some private information.
 	*/
 	cep = (struct scc_enet_private *)kmalloc(sizeof(*cep), GFP_KERNEL);
+	if (cep == NULL)
+		return -ENOMEM;
+
 	__clear_user(cep,sizeof(*cep));
 	spin_lock_init(&cep->lock);
 

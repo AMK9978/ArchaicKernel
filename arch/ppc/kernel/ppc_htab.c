@@ -1,6 +1,7 @@
 /*
- * $Id: ppc_htab.c,v 1.29 1999/09/10 05:05:50 paulus Exp $
- *
+ * BK Id: SCCS/s.ppc_htab.c 1.19 10/16/01 15:58:42 trini
+ */
+/*
  * PowerPC hash table management proc entry.  Will show information
  * about the current hash table and will allow changes to it.
  *
@@ -19,6 +20,7 @@
 #include <linux/stat.h>
 #include <linux/sysctl.h>
 #include <linux/ctype.h>
+#include <linux/threads.h>
 
 #include <asm/uaccess.h>
 #include <asm/bitops.h>
@@ -27,6 +29,8 @@
 #include <asm/residual.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
+#include <asm/cputable.h>
+#include <asm/system.h>
 
 static ssize_t ppc_htab_read(struct file * file, char * buf,
 			     size_t count, loff_t *ppos);
@@ -40,9 +44,12 @@ extern PTE *Hash, *Hash_end;
 extern unsigned long Hash_size, Hash_mask;
 extern unsigned long _SDR1;
 extern unsigned long htab_reloads;
+extern unsigned long htab_preloads;
 extern unsigned long htab_evicts;
 extern unsigned long pte_misses;
 extern unsigned long pte_errors;
+extern unsigned int primary_pteg_full;
+extern unsigned int htab_hash_searches;
 
 /* these will go into processor.h when I'm done debugging -- Cort */
 #define MMCR0 952
@@ -63,7 +70,7 @@ struct file_operations ppc_htab_operations = {
         write:          ppc_htab_write,
 };
 
-char *pmc1_lookup(unsigned long mmcr0)
+static char *pmc1_lookup(unsigned long mmcr0)
 {
 	switch ( mmcr0 & (0x7f<<7) )
 	{
@@ -80,7 +87,7 @@ char *pmc1_lookup(unsigned long mmcr0)
 	}
 }	
 
-char *pmc2_lookup(unsigned long mmcr0)
+static char *pmc2_lookup(unsigned long mmcr0)
 {
 	switch ( mmcr0 & 0x3f )
 	{
@@ -108,20 +115,19 @@ static ssize_t ppc_htab_read(struct file * file, char * buf,
 			     size_t count, loff_t *ppos)
 {
 	unsigned long mmcr0 = 0, pmc1 = 0, pmc2 = 0;
-	int n = 0, valid;
-	unsigned int kptes = 0, overflow = 0, uptes = 0, zombie_ptes = 0;
+	int n = 0;
+#ifdef CONFIG_PPC_STD_MMU
+	int valid;
+	unsigned int kptes = 0, uptes = 0, zombie_ptes = 0;
 	PTE *ptr;
 	struct task_struct *p;
+#endif /* CONFIG_PPC_STD_MMU */
 	char buffer[512];
 
 	if (count < 0)
 		return -EINVAL;
 
-	switch ( _get_PVR()>>16 )
-	{
-	case 4:  /* 604 */
-	case 9:  /* 604e */
-	case 10: /* 604ev5 */
+	if (cur_cpu_spec[0]->cpu_features & CPU_FTR_604_PERF_MON) {
 		asm volatile ("mfspr %0,952 \n\t"
 		    "mfspr %1,953 \n\t"
 		    "mfspr %2,954 \n\t"
@@ -137,53 +143,42 @@ static ssize_t ppc_htab_read(struct file * file, char * buf,
 			      "PMC2\t\t: %08lx (%s)\n",
 			      pmc1, pmc1_lookup(mmcr0),
 			      pmc2, pmc2_lookup(mmcr0));
-		break;
-	default:
-		break;
 	}
 
-	
+#ifdef CONFIG_PPC_STD_MMU
 	/* if we don't have a htab */
 	if ( Hash_size == 0 )
 	{
 		n += sprintf( buffer + n, "No Hash Table used\n");
 		goto return_string;
 	}
-	
-	/*
-	 * compute user/kernel pte's table this info can be
-	 * misleading since there can be valid (v bit set) entries
-	 * in the table but their vsid is used by no process (mm->context)
-	 * due to the way tlb invalidation is handled on the ppc
-	 * -- Cort
-	 */
+
 	for ( ptr = Hash ; ptr < Hash_end ; ptr++)
 	{
-		if (ptr->v)
-		{
-			/* make sure someone is using this context/vsid */
-			valid = 0;
-			for_each_task(p)
-			{
-				if (p->mm && (ptr->vsid >> 4) == p->mm->context)
-				{
-					valid = 1;
-					break;
-				}
-			}
-			if ( !valid )
-			{
-				zombie_ptes++;
-				continue;
-			}
-			/* user not allowed read or write */
-			if (ptr->pp == PP_RWXX)
-				kptes++;
-			else
-				uptes++;
-			if (ptr->h == 1)
-				overflow++;
+		unsigned int ctx, mctx, vsid;
+
+		if (!ptr->v)
+			continue;
+		/* make sure someone is using this context/vsid */
+		/* first undo the esid skew */
+		vsid = ptr->vsid;
+		mctx = ((vsid - (vsid & 0xf) * 0x111) >> 4) & 0xfffff;
+		if (mctx == 0) {
+			kptes++;
+			continue;
 		}
+		/* now undo the context skew; 801921 * 897 == 1 mod 2^20 */
+		ctx = (mctx * 801921) & 0xfffff;
+		valid = 0;
+		for_each_task(p) {
+			if (p->mm != NULL && ctx == p->mm->context) {
+				valid = 1;
+				uptes++;
+				break;
+			}
+		}
+		if (!valid)
+			zombie_ptes++;
 	}
 	
 	n += sprintf( buffer + n,
@@ -194,29 +189,32 @@ static ssize_t ppc_htab_read(struct file * file, char * buf,
 		      "Entries\t\t: %lu\n"
 		      "User ptes\t: %u\n"
 		      "Kernel ptes\t: %u\n"
-		      "Overflows\t: %u\n"
 		      "Zombies\t\t: %u\n"
-		      "Percent full\t: %%%lu\n",
+		      "Percent full\t: %lu%%\n",
                       (unsigned long)(Hash_size>>10),
 		      (Hash_size/(sizeof(PTE)*8)),
 		      (unsigned long)Hash,
 		      Hash_size/sizeof(PTE),
                       uptes,
 		      kptes,
-		      overflow,
 		      zombie_ptes,
 		      ((kptes+uptes)*100) / (Hash_size/sizeof(PTE))
 		);
 
 	n += sprintf( buffer + n,
-		      "Reloads\t\t: %08lx\n"
-		      "Evicts\t\t: %08lx\n",
-		      htab_reloads, htab_evicts);
-	
+		      "Reloads\t\t: %lu\n"
+		      "Preloads\t: %lu\n"
+		      "Searches\t: %u\n"
+		      "Overflows\t: %u\n"
+		      "Evicts\t\t: %lu\n",
+		      htab_reloads, htab_preloads, htab_hash_searches,
+		      primary_pteg_full, htab_evicts);
 return_string:
+#endif /* CONFIG_PPC_STD_MMU */
+	
 	n += sprintf( buffer + n,
-		      "Non-error misses: %08lx\n"
-		      "Error misses\t: %08lx\n",
+		      "Non-error misses: %lu\n"
+		      "Error misses\t: %lu\n",
 		      pte_misses, pte_errors);
 	if (*ppos >= strlen(buffer))
 		return 0;
@@ -235,7 +233,7 @@ return_string:
 static ssize_t ppc_htab_write(struct file * file, const char * buffer,
 			      size_t count, loff_t *ppos)
 {
-#ifndef CONFIG_8xx
+#ifdef CONFIG_PPC_STD_MMU
 	unsigned long tmp;
 	if ( current->uid != 0 )
 		return -EACCES;
@@ -246,37 +244,22 @@ static ssize_t ppc_htab_write(struct file * file, const char * buffer,
 	/* turn off performance monitoring */
 	if ( !strncmp( buffer, "off", 3) )
 	{
-		switch ( _get_PVR()>>16 )
-		{
-		case 4:  /* 604 */
-		case 9:  /* 604e */
-		case 10: /* 604ev5 */
+		if (cur_cpu_spec[0]->cpu_features & CPU_FTR_604_PERF_MON) {
 			asm volatile ("mtspr %0, %3 \n\t"
 			    "mtspr %1, %3 \n\t"
 			    "mtspr %2, %3 \n\t"			    
 			    :: "i" (MMCR0), "i" (PMC1), "i" (PMC2), "r" (0));
-			break;
-		default:
-			break;
 		}
-			
 	}
 
 	if ( !strncmp( buffer, "reset", 5) )
 	{
-		switch ( _get_PVR()>>16 )
-		{
-		case 4:  /* 604 */
-		case 9:  /* 604e */
-		case 10: /* 604ev5 */
+		if (cur_cpu_spec[0]->cpu_features & CPU_FTR_604_PERF_MON) {
 			/* reset PMC1 and PMC2 */
 			asm volatile (
 				"mtspr 953, %0 \n\t"
 				"mtspr 954, %0 \n\t"
 				:: "r" (0));
-			break;
-		default:
-			break;
 		}
 		htab_reloads = 0;
 		htab_evicts = 0;
@@ -286,11 +269,7 @@ static ssize_t ppc_htab_write(struct file * file, const char * buffer,
 
 	if ( !strncmp( buffer, "user", 4) )
 	{
-		switch ( _get_PVR()>>16 )
-		{
-		case 4:  /* 604 */
-		case 9:  /* 604e */
-		case 10: /* 604ev5 */
+		if (cur_cpu_spec[0]->cpu_features & CPU_FTR_604_PERF_MON) {
 			/* setup mmcr0 and clear the correct pmc */
 			asm("mfspr %0,%1\n\t"  : "=r" (tmp) : "i" (MMCR0));
 			tmp &= ~(0x60000000);
@@ -301,19 +280,12 @@ static ssize_t ppc_htab_write(struct file * file, const char * buffer,
 				"mtspr %5,%4 \n\t"    /* reset the pmc2 */
 				:: "r" (tmp), "i" (MMCR0), "i" (0),
 				"i" (PMC1),  "r" (0), "i"(PMC2) );
-			break;
-		default:
-			break;
 		}
 	}
 
 	if ( !strncmp( buffer, "kernel", 6) )
 	{
-		switch ( _get_PVR()>>16 )
-		{
-		case 4:  /* 604 */
-		case 9:  /* 604e */
-		case 10: /* 604ev5 */
+		if (cur_cpu_spec[0]->cpu_features & CPU_FTR_604_PERF_MON) {
 			/* setup mmcr0 and clear the correct pmc */
 			asm("mfspr %0,%1\n\t"  : "=r" (tmp) : "i" (MMCR0));
 			tmp &= ~(0x60000000);
@@ -324,20 +296,13 @@ static ssize_t ppc_htab_write(struct file * file, const char * buffer,
 				"mtspr %5,%4 \n\t"    /* reset the pmc2 */
 				:: "r" (tmp), "i" (MMCR0), "i" (0),
 				"i" (PMC1),  "r" (0), "i"(PMC2) );
-			break;
-		default:
-			break;
 		}
 	}
 	
 	/* PMC1 values */
 	if ( !strncmp( buffer, "dtlb", 4) )
 	{
-		switch ( _get_PVR()>>16 )
-		{
-		case 4:  /* 604 */
-		case 9:  /* 604e */
-		case 10: /* 604ev5 */
+		if (cur_cpu_spec[0]->cpu_features & CPU_FTR_604_PERF_MON) {
 			/* setup mmcr0 and clear the correct pmc */
 			asm("mfspr %0,%1\n\t"  : "=r" (tmp) : "i" (MMCR0));
 			tmp &= ~(0x7f<<7);
@@ -352,11 +317,7 @@ static ssize_t ppc_htab_write(struct file * file, const char * buffer,
 
 	if ( !strncmp( buffer, "ic miss", 7) )
 	{
-		switch ( _get_PVR()>>16 )
-		{
-		case 4:  /* 604 */
-		case 9:  /* 604e */
-		case 10: /* 604ev5 */
+		if (cur_cpu_spec[0]->cpu_features & CPU_FTR_604_PERF_MON) {
 			/* setup mmcr0 and clear the correct pmc */
 			asm("mfspr %0,%1\n\t"  : "=r" (tmp) : "i" (MMCR0));
 			tmp &= ~(0x7f<<7);
@@ -372,11 +333,7 @@ static ssize_t ppc_htab_write(struct file * file, const char * buffer,
 	/* PMC2 values */
 	if ( !strncmp( buffer, "load miss time", 14) )
 	{
-		switch ( _get_PVR()>>16 )
-		{
-		case 4:  /* 604 */
-		case 9:  /* 604e */
-		case 10: /* 604ev5 */
+		if (cur_cpu_spec[0]->cpu_features & CPU_FTR_604_PERF_MON) {
 			/* setup mmcr0 and clear the correct pmc */
 		       asm volatile(
 			       "mfspr %0,%1\n\t"     /* get current mccr0 */
@@ -392,11 +349,7 @@ static ssize_t ppc_htab_write(struct file * file, const char * buffer,
 	
 	if ( !strncmp( buffer, "itlb", 4) )
 	{
-		switch ( _get_PVR()>>16 )
-		{
-		case 4:  /* 604 */
-		case 9:  /* 604e */
-		case 10: /* 604ev5 */
+		if (cur_cpu_spec[0]->cpu_features & CPU_FTR_604_PERF_MON) {
 			/* setup mmcr0 and clear the correct pmc */
 		       asm volatile(
 			       "mfspr %0,%1\n\t"     /* get current mccr0 */
@@ -412,11 +365,7 @@ static ssize_t ppc_htab_write(struct file * file, const char * buffer,
 
 	if ( !strncmp( buffer, "dc miss", 7) )
 	{
-		switch ( _get_PVR()>>16 )
-		{
-		case 4:  /* 604 */
-		case 9:  /* 604e */
-		case 10: /* 604ev5 */
+		if (cur_cpu_spec[0]->cpu_features & CPU_FTR_604_PERF_MON) {
 			/* setup mmcr0 and clear the correct pmc */
 		       asm volatile(
 			       "mfspr %0,%1\n\t"     /* get current mccr0 */
@@ -472,9 +421,9 @@ static ssize_t ppc_htab_write(struct file * file, const char * buffer,
 	reset_SDR1();
 #endif	
 	return count;
-#else /* CONFIG_8xx */
+#else /* CONFIG_PPC_STD_MMU */
 	return 0;
-#endif /* CONFIG_8xx */
+#endif /* CONFIG_PPC_STD_MMU */
 }
 
 
@@ -516,7 +465,7 @@ int proc_dol2crvec(ctl_table *table, int write, struct file *filp,
 		"0.5", "1.0", "(reserved2)", "(reserved3)"
 	};
 
-	if ( ((_get_PVR() >> 16) != 8) && ((_get_PVR() >> 16) != 12))
+	if (!(cur_cpu_spec[0]->cpu_features & CPU_FTR_L2CR))
 		return -EFAULT;
 	
 	if ( /*!table->maxlen ||*/ (filp->f_pos && !write)) {
@@ -526,7 +475,7 @@ int proc_dol2crvec(ctl_table *table, int write, struct file *filp,
 	
 	vleft = table->maxlen / sizeof(int);
 	left = *lenp;
-	
+
 	for (; left /*&& vleft--*/; first=0) {
 		if (write) {
 			while (left) {
@@ -555,11 +504,7 @@ int proc_dol2crvec(ctl_table *table, int write, struct file *filp,
 				break;
 			buffer += len;
 			left -= len;
-			_set_L2CR(0);
 			_set_L2CR(val);
-			while ( _get_L2CR() & 0x1 )
-				/* wait for invalidate to finish */;
-			  
 		} else {
 			p = buf;
 			if (!first)

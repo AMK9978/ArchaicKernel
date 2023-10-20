@@ -64,7 +64,7 @@ static int proc_exe_link(struct inode *inode, struct dentry **dentry, struct vfs
 	task_unlock(task);
 	if (!mm)
 		goto out;
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 	vma = mm->mmap;
 	while (vma) {
 		if ((vma->vm_flags & VM_EXECUTABLE) && 
@@ -76,7 +76,7 @@ static int proc_exe_link(struct inode *inode, struct dentry **dentry, struct vfs
 		}
 		vma = vma->vm_next;
 	}
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	mmput(mm);
 out:
 	return result;
@@ -184,29 +184,6 @@ static int proc_pid_cmdline(struct task_struct *task, char * buffer)
 
 /* permission checks */
 
-static int standard_permission(struct inode *inode, int mask)
-{
-	int mode = inode->i_mode;
-
-	if ((mask & S_IWOTH) && IS_RDONLY(inode) &&
-	    (S_ISREG(mode) || S_ISDIR(mode) || S_ISLNK(mode)))
-		return -EROFS; /* Nobody gets write access to a read-only fs */
-	else if ((mask & S_IWOTH) && IS_IMMUTABLE(inode))
-		return -EACCES; /* Nobody gets write access to an immutable file */
-	else if (current->fsuid == inode->i_uid)
-		mode >>= 6;
-	else if (in_group_p(inode->i_gid))
-		mode >>= 3;
-	if (((mode & mask & S_IRWXO) == mask) || capable(CAP_DAC_OVERRIDE))
-		return 0;
-	/* read and search access */
-	if ((mask == S_IROTH) ||
-	    (S_ISDIR(mode)  && !(mask & ~(S_IROTH | S_IXOTH))))
-		if (capable(CAP_DAC_READ_SEARCH))
-			return 0;
-	return -EACCES;
-}
-
 static int proc_check_root(struct inode *inode)
 {
 	struct dentry *de, *base, *root;
@@ -249,7 +226,7 @@ out:
 
 static int proc_permission(struct inode *inode, int mask)
 {
-	if (standard_permission(inode, mask) != 0)
+	if (vfs_permission(inode, mask) != 0)
 		return -EACCES;
 	return proc_check_root(inode);
 }
@@ -312,6 +289,13 @@ static struct file_operations proc_info_file_operations = {
 #define MAY_PTRACE(p) \
 (p==current||(p->p_pptr==current&&(p->ptrace & PT_PTRACED)&&p->state==TASK_STOPPED))
 
+
+static int mem_open(struct inode* inode, struct file* file)
+{
+	file->private_data = (void*)((long)current->self_exec_id);
+	return 0;
+}
+
 static ssize_t mem_read(struct file * file, char * buf,
 			size_t count, loff_t *ppos)
 {
@@ -319,6 +303,8 @@ static ssize_t mem_read(struct file * file, char * buf,
 	char *page;
 	unsigned long src = *ppos;
 	int copied = 0;
+	struct mm_struct *mm;
+
 
 	if (!MAY_PTRACE(task))
 		return -ESRCH;
@@ -326,6 +312,20 @@ static ssize_t mem_read(struct file * file, char * buf,
 	page = (char *)__get_free_page(GFP_USER);
 	if (!page)
 		return -ENOMEM;
+
+	task_lock(task);
+	mm = task->mm;
+	if (mm)
+		atomic_inc(&mm->mm_users);
+	task_unlock(task);
+	if (!mm)
+		return 0;
+
+	if (file->private_data != (void*)((long)current->self_exec_id) ) {
+		mmput(mm);
+		return -EIO;
+	}
+		
 
 	while (count > 0) {
 		int this_len, retval;
@@ -347,6 +347,7 @@ static ssize_t mem_read(struct file * file, char * buf,
 		count -= retval;
 	}
 	*ppos = src;
+	mmput(mm);
 	free_page((unsigned long) page);
 	return copied;
 }
@@ -398,6 +399,7 @@ static ssize_t mem_write(struct file * file, const char * buf,
 static struct file_operations proc_mem_operations = {
 	read:		mem_read,
 	write:		mem_write,
+	open:		mem_open,
 };
 
 static struct inode_operations proc_mem_inode_operations = {
@@ -586,7 +588,7 @@ static int proc_base_readdir(struct file * filp,
 	struct pid_entry *p;
 
 	pid = inode->u.proc_i.task->pid;
-	if (!inode->u.proc_i.task->p_pptr)
+	if (!pid)
 		return -ENOENT;
 	i = filp->f_pos;
 	switch (i) {
@@ -620,6 +622,20 @@ static int proc_base_readdir(struct file * filp,
 
 /* building an inode */
 
+static int task_dumpable(struct task_struct *task)
+{
+	int dumpable = 0;
+	struct mm_struct *mm;
+
+	task_lock(task);
+	mm = task->mm;
+	if (mm)
+		dumpable = mm->dumpable;
+	task_unlock(task);
+	return dumpable;
+}
+
+
 static struct inode *proc_pid_make_inode(struct super_block * sb, struct task_struct *task, int ino)
 {
 	struct inode * inode;
@@ -635,18 +651,17 @@ static struct inode *proc_pid_make_inode(struct super_block * sb, struct task_st
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
 	inode->i_ino = fake_ino(task->pid, ino);
 
-	inode->u.proc_i.file = NULL;
+	if (!task->pid)
+		goto out_unlock;
+
 	/*
 	 * grab the reference to task.
 	 */
-	inode->u.proc_i.task = task;
 	get_task_struct(task);
-	if (!task->p_pptr)
-		goto out_unlock;
-
+	inode->u.proc_i.task = task;
 	inode->i_uid = 0;
 	inode->i_gid = 0;
-	if (ino == PROC_PID_INO || task->dumpable) {
+	if (ino == PROC_PID_INO || task_dumpable(task)) {
 		inode->i_uid = task->euid;
 		inode->i_gid = task->egid;
 	}
@@ -673,7 +688,7 @@ static int pid_fd_revalidate(struct dentry * dentry, int flags)
  */
 static int pid_base_revalidate(struct dentry * dentry, int flags)
 {
-	if (dentry->d_inode->u.proc_i.task->p_pptr)
+	if (dentry->d_inode->u.proc_i.task->pid)
 		return 1;
 	d_drop(dentry);
 	return 0;

@@ -30,7 +30,7 @@
 #endif
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/types.h>
 #include <linux/delay.h>
@@ -392,6 +392,8 @@ EXPORT_SYMBOL(msnd_disable_irq);
 #ifdef MODULE
 MODULE_AUTHOR				("Andrew Veliath <andrewtv@usa.net>");
 MODULE_DESCRIPTION			("Turtle Beach MultiSound Driver Base");
+MODULE_LICENSE("GPL");
+
 
 int init_module(void)
 {

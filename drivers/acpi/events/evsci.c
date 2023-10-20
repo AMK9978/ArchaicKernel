@@ -2,12 +2,12 @@
  *
  * Module Name: evsci - System Control Interrupt configuration and
  *                      legacy to ACPI mode state transition functions
- *              $Revision: 67 $
+ *              $Revision: 74 $
  *
  ******************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -30,7 +30,7 @@
 #include "acevents.h"
 
 
-#define _COMPONENT          EVENT_HANDLING
+#define _COMPONENT          ACPI_EVENTS
 	 MODULE_NAME         ("evsci")
 
 
@@ -64,6 +64,9 @@ acpi_ev_sci_handler (void *context)
 	u32                     interrupt_handled = INTERRUPT_NOT_HANDLED;
 
 
+	FUNCTION_TRACE("Ev_sci_handler");
+
+
 	/*
 	 * Make sure that ACPI is enabled by checking SCI_EN.  Note that we are
 	 * required to treat the SCI interrupt as sharable, level, active low.
@@ -71,7 +74,7 @@ acpi_ev_sci_handler (void *context)
 	if (!acpi_hw_register_bit_access (ACPI_READ, ACPI_MTX_DO_NOT_LOCK, SCI_EN)) {
 		/* ACPI is not enabled;  this interrupt cannot be for us */
 
-		return (INTERRUPT_NOT_HANDLED);
+		return_VALUE (INTERRUPT_NOT_HANDLED);
 	}
 
 	/*
@@ -88,7 +91,7 @@ acpi_ev_sci_handler (void *context)
 	 */
 	interrupt_handled |= acpi_ev_gpe_detect ();
 
-	return (interrupt_handled);
+	return_VALUE (interrupt_handled);
 }
 
 
@@ -107,14 +110,15 @@ acpi_ev_sci_handler (void *context)
 u32
 acpi_ev_install_sci_handler (void)
 {
-	u32                     except = AE_OK;
+	u32                     status = AE_OK;
 
 
-	except = acpi_os_install_interrupt_handler ((u32) acpi_gbl_FADT->sci_int,
-			  acpi_ev_sci_handler,
-			  NULL);
+	FUNCTION_TRACE ("Ev_install_sci_handler");
 
-	return (except);
+
+	status = acpi_os_install_interrupt_handler ((u32) acpi_gbl_FADT->sci_int,
+			   acpi_ev_sci_handler, NULL);
+	return_ACPI_STATUS (status);
 }
 
 
@@ -133,9 +137,12 @@ acpi_ev_install_sci_handler (void)
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_ev_remove_sci_handler (void)
 {
+	FUNCTION_TRACE ("Ev_remove_sci_handler");
+
+
 #if 0
 	/* TBD:[Investigate] Figure this out!!  Disable all events first ???  */
 
@@ -166,23 +173,8 @@ acpi_ev_remove_sci_handler (void)
 	acpi_os_remove_interrupt_handler ((u32) acpi_gbl_FADT->sci_int,
 			   acpi_ev_sci_handler);
 
-	return (AE_OK);
+	return_ACPI_STATUS (AE_OK);
 }
-
-
-/*******************************************************************************
- *
- * FUNCTION:    Acpi_ev_sci_count
- *
- * PARAMETERS:  Event       Event that generated an SCI.
- *
- * RETURN:      Number of SCI's for requested event since last time
- *              Sci_occured() was called for this event.
- *
- * DESCRIPTION: Checks to see if SCI has been generated from requested source
- *              since the last time this function was called.
- *
- ******************************************************************************/
 
 
 /*******************************************************************************
@@ -203,14 +195,16 @@ acpi_ev_restore_acpi_state (void)
 	u32                     index;
 
 
+	FUNCTION_TRACE ("Ev_restore_acpi_state");
+
+
 	/* Restore the state of the chipset enable bits. */
 
 	if (acpi_gbl_restore_acpi_chipset == TRUE) {
 		/* Restore the fixed events */
 
 		if (acpi_hw_register_read (ACPI_MTX_LOCK, PM1_EN) !=
-				acpi_gbl_pm1_enable_register_save)
-		{
+				acpi_gbl_pm1_enable_register_save) {
 			acpi_hw_register_write (ACPI_MTX_LOCK, PM1_EN,
 				acpi_gbl_pm1_enable_register_save);
 		}
@@ -225,8 +219,7 @@ acpi_ev_restore_acpi_state (void)
 
 		for (index = 0; index < DIV_2 (acpi_gbl_FADT->gpe0blk_len); index++) {
 			if (acpi_hw_register_read (ACPI_MTX_LOCK, GPE0_EN_BLOCK | index) !=
-					acpi_gbl_gpe0enable_register_save[index])
-			{
+					acpi_gbl_gpe0enable_register_save[index]) {
 				acpi_hw_register_write (ACPI_MTX_LOCK, GPE0_EN_BLOCK | index,
 					acpi_gbl_gpe0enable_register_save[index]);
 			}
@@ -237,8 +230,7 @@ acpi_ev_restore_acpi_state (void)
 		if (acpi_gbl_FADT->gpe1_blk_len) {
 			for (index = 0; index < DIV_2 (acpi_gbl_FADT->gpe1_blk_len); index++) {
 				if (acpi_hw_register_read (ACPI_MTX_LOCK, GPE1_EN_BLOCK | index) !=
-					acpi_gbl_gpe1_enable_register_save[index])
-				{
+					acpi_gbl_gpe1_enable_register_save[index]) {
 					acpi_hw_register_write (ACPI_MTX_LOCK, GPE1_EN_BLOCK | index,
 						acpi_gbl_gpe1_enable_register_save[index]);
 				}
@@ -250,7 +242,7 @@ acpi_ev_restore_acpi_state (void)
 		}
 	}
 
-	return;
+	return_VOID;
 }
 
 
@@ -270,20 +262,21 @@ void
 acpi_ev_terminate (void)
 {
 
+	FUNCTION_TRACE ("Ev_terminate");
+
 
 	/*
 	 * Free global tables, etc.
 	 */
-
 	if (acpi_gbl_gpe_registers) {
-		acpi_cm_free (acpi_gbl_gpe_registers);
+		ACPI_MEM_FREE (acpi_gbl_gpe_registers);
 	}
 
 	if (acpi_gbl_gpe_info) {
-		acpi_cm_free (acpi_gbl_gpe_info);
+		ACPI_MEM_FREE (acpi_gbl_gpe_info);
 	}
 
-	return;
+	return_VOID;
 }
 
 

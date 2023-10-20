@@ -34,15 +34,13 @@
 #define X86_HARD_MATH	CPU_PARAMS+6
 #define X86_CPUID	CPU_PARAMS+8
 #define X86_CAPABILITY	CPU_PARAMS+12
-#define X86_VENDOR_ID	CPU_PARAMS+16
+#define X86_VENDOR_ID	CPU_PARAMS+28
 
 /*
  * swapper_pg_dir is the main page directory, address 0x00101000
  *
  * On entry, %esi points to the real-mode code as a 32-bit pointer.
  */
-ENTRY(stext)
-ENTRY(_stext)
 startup_32:
 /*
  * Set segments to known values
@@ -169,9 +167,7 @@ startup_32:
 	rep
 	movsl
 1:
-#ifdef CONFIG_SMP
 checkCPUtype:
-#endif
 
 	movl $-1,X86_CPUID		#  -1 for no CPUID initially
 
@@ -244,9 +240,7 @@ is386:	pushl %ecx		# restore original EFLAGS
 	orl $2,%eax		# set MP
 2:	movl %eax,%cr0
 	call check_x87
-#ifdef CONFIG_SMP
 	incb ready
-#endif
 	lgdt gdt_descr
 	lidt idt_descr
 	ljmp $(__KERNEL_CS),$1f
@@ -278,9 +272,7 @@ L6:
 	jmp L6			# main should never return here, but
 				# just in case, we know what happens.
 
-#ifdef CONFIG_SMP
 ready:	.byte 0
-#endif
 
 /*
  * We depend on ET to be correct. This checks for 287/387.
@@ -415,23 +407,12 @@ ENTRY(pg1)
 ENTRY(empty_zero_page)
 
 .org 0x5000
-ENTRY(empty_bad_page)
 
-.org 0x6000
-ENTRY(empty_bad_pte_table)
-
-#if CONFIG_X86_PAE
-
- .org 0x7000
- ENTRY(empty_bad_pmd_table)
-
- .org 0x8000
-
-#else
-
- .org 0x7000
-
-#endif
+/*
+ * Real beginning of normal "text" segment
+ */
+ENTRY(stext)
+ENTRY(_stext)
 
 /*
  * This starts the data section. Note that the above is all

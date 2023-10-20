@@ -1,4 +1,4 @@
-/* $Id: bitops.h,v 1.31 2000/09/23 02:09:21 davem Exp $
+/* $Id: bitops.h,v 1.36 2001/06/14 12:34:49 davem Exp $
  * bitops.h: Bit string operations on the V9.
  *
  * Copyright 1996, 1997 David S. Miller (davem@caip.rutgers.edu)
@@ -9,16 +9,57 @@
 
 #include <asm/byteorder.h>
 
-extern long __test_and_set_bit(unsigned long nr, volatile void *addr);
-extern long __test_and_clear_bit(unsigned long nr, volatile void *addr);
-extern long __test_and_change_bit(unsigned long nr, volatile void *addr);
+extern long ___test_and_set_bit(unsigned long nr, volatile void *addr);
+extern long ___test_and_clear_bit(unsigned long nr, volatile void *addr);
+extern long ___test_and_change_bit(unsigned long nr, volatile void *addr);
 
-#define test_and_set_bit(nr,addr)	(__test_and_set_bit(nr,addr)!=0)
-#define test_and_clear_bit(nr,addr)	(__test_and_clear_bit(nr,addr)!=0)
-#define test_and_change_bit(nr,addr)	(__test_and_change_bit(nr,addr)!=0)
-#define set_bit(nr,addr)		((void)__test_and_set_bit(nr,addr))
-#define clear_bit(nr,addr)		((void)__test_and_clear_bit(nr,addr))
-#define change_bit(nr,addr)		((void)__test_and_change_bit(nr,addr))
+#define test_and_set_bit(nr,addr)	(___test_and_set_bit(nr,addr)!=0)
+#define test_and_clear_bit(nr,addr)	(___test_and_clear_bit(nr,addr)!=0)
+#define test_and_change_bit(nr,addr)	(___test_and_change_bit(nr,addr)!=0)
+#define set_bit(nr,addr)		((void)___test_and_set_bit(nr,addr))
+#define clear_bit(nr,addr)		((void)___test_and_clear_bit(nr,addr))
+#define change_bit(nr,addr)		((void)___test_and_change_bit(nr,addr))
+
+/* "non-atomic" versions... */
+#define __set_bit(X,Y)					\
+do {	unsigned long __nr = (X);			\
+	long *__m = ((long *) (Y)) + (__nr >> 6);	\
+	*__m |= (1UL << (__nr & 63));			\
+} while (0)
+#define __clear_bit(X,Y)				\
+do {	unsigned long __nr = (X);			\
+	long *__m = ((long *) (Y)) + (__nr >> 6);	\
+	*__m &= ~(1UL << (__nr & 63));			\
+} while (0)
+#define __change_bit(X,Y)				\
+do {	unsigned long __nr = (X);			\
+	long *__m = ((long *) (Y)) + (__nr >> 6);	\
+	*__m ^= (1UL << (__nr & 63));			\
+} while (0)
+#define __test_and_set_bit(X,Y)				\
+({	unsigned long __nr = (X);			\
+	long *__m = ((long *) (Y)) + (__nr >> 6);	\
+	long __old = *__m;				\
+	long __mask = (1UL << (__nr & 63));		\
+	*__m = (__old | __mask);			\
+	((__old & __mask) != 0);			\
+})
+#define __test_and_clear_bit(X,Y)			\
+({	unsigned long __nr = (X);			\
+	long *__m = ((long *) (Y)) + (__nr >> 6);	\
+	long __old = *__m;				\
+	long __mask = (1UL << (__nr & 63));		\
+	*__m = (__old & ~__mask);			\
+	((__old & __mask) != 0);			\
+})
+#define __test_and_change_bit(X,Y)			\
+({	unsigned long __nr = (X);			\
+	long *__m = ((long *) (Y)) + (__nr >> 6);	\
+	long __old = *__m;				\
+	long __mask = (1UL << (__nr & 63));		\
+	*__m = (__old ^ __mask);			\
+	((__old & __mask) != 0);			\
+})
 
 #define smp_mb__before_clear_bit()	do { } while(0)
 #define smp_mb__after_clear_bit()	do { } while(0)
@@ -34,12 +75,12 @@ extern __inline__ unsigned long ffz(unsigned long word)
 	unsigned long result;
 
 #ifdef ULTRA_HAS_POPULATION_COUNT	/* Thanks for nothing Sun... */
-	__asm__ __volatile__("
-	brz,pn	%0, 1f
-	 neg	%0, %%g1
-	xnor	%0, %%g1, %%g2
-	popc	%%g2, %0
-1:	" : "=&r" (result)
+	__asm__ __volatile__(
+"	brz,pn	%0, 1f\n"
+"	 neg	%0, %%g1\n"
+"	xnor	%0, %%g1, %%g2\n"
+"	popc	%%g2, %0\n"
+"1:	" : "=&r" (result)
 	  : "0" (word)
 	  : "g1", "g2");
 #else
@@ -170,13 +211,13 @@ found_middle:
 #define find_first_zero_bit(addr, size) \
         find_next_zero_bit((addr), (size), 0)
 
-extern long __test_and_set_le_bit(int nr, volatile void *addr);
-extern long __test_and_clear_le_bit(int nr, volatile void *addr);
+extern long ___test_and_set_le_bit(int nr, volatile void *addr);
+extern long ___test_and_clear_le_bit(int nr, volatile void *addr);
 
-#define test_and_set_le_bit(nr,addr)	(__test_and_set_le_bit(nr,addr)!=0)
-#define test_and_clear_le_bit(nr,addr)	(__test_and_clear_le_bit(nr,addr)!=0)
-#define set_le_bit(nr,addr)		((void)__test_and_set_le_bit(nr,addr))
-#define clear_le_bit(nr,addr)		((void)__test_and_clear_le_bit(nr,addr))
+#define test_and_set_le_bit(nr,addr)	(___test_and_set_le_bit(nr,addr)!=0)
+#define test_and_clear_le_bit(nr,addr)	(___test_and_clear_le_bit(nr,addr)!=0)
+#define set_le_bit(nr,addr)		((void)___test_and_set_le_bit(nr,addr))
+#define clear_le_bit(nr,addr)		((void)___test_and_clear_le_bit(nr,addr))
 
 extern __inline__ int test_le_bit(int nr, __const__ void * addr)
 {

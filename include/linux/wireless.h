@@ -1,7 +1,7 @@
 /*
  * This file define a set of standard wireless extensions
  *
- * Version :	9	16.10.99
+ * Version :	12	5.10.01
  *
  * Authors :	Jean Tourrilhes - HPL - <jt@hpl.hp.com>
  */
@@ -63,7 +63,7 @@
  * (there is some stuff that will be added in the future...)
  * I just plan to increment with each new version.
  */
-#define WIRELESS_EXT	10
+#define WIRELESS_EXT	12
 
 /*
  * Changes :
@@ -111,6 +111,18 @@
  *	- Add PM modifier : MAX/MIN/RELATIVE
  *	- Add encoding option : IW_ENCODE_NOKEY
  *	- Add TxPower ioctls (work like TxRate)
+ *
+ * V10 to V11
+ * ----------
+ *	- Add WE version in range (help backward/forward compatibility)
+ *	- Add retry ioctls (work like PM)
+ *
+ * V11 to V12
+ * ----------
+ *	- Add SIOCSIWSTATS to get /proc/net/wireless programatically
+ *	- Add DEV PRIVATE IOCTL to avoid collisions in SIOCDEVPRIVATE space
+ *	- Add new statistics (frag, retry, beacon)
+ *	- Add average quality (for user space calibration)
  */
 
 /* -------------------------- IOCTL LIST -------------------------- */
@@ -132,6 +144,8 @@
 #define SIOCGIWRANGE	0x8B0B		/* Get range of parameters */
 #define SIOCSIWPRIV	0x8B0C		/* Unused */
 #define SIOCGIWPRIV	0x8B0D		/* get private ioctl interface info */
+#define SIOCSIWSTATS	0x8B0E		/* Unused */
+#define SIOCGIWSTATS	0x8B0F		/* Get /proc/net/wireless stats */
 
 /* Mobile IP support */
 #define SIOCSIWSPY	0x8B10		/* set spy addresses */
@@ -153,7 +167,7 @@
  * The "flags" member indicate if the ESSID is active or not (promiscuous).
  */
 
-/* Other parameters usefull in 802.11 and some other devices */
+/* Other parameters useful in 802.11 and some other devices */
 #define SIOCSIWRATE	0x8B20		/* set default bit rate (bps) */
 #define SIOCGIWRATE	0x8B21		/* get default bit rate (bps) */
 #define SIOCSIWRTS	0x8B22		/* set RTS/CTS threshold (bytes) */
@@ -162,6 +176,8 @@
 #define SIOCGIWFRAG	0x8B25		/* get fragmentation thr (bytes) */
 #define SIOCSIWTXPOW	0x8B26		/* set transmit power (dBm) */
 #define SIOCGIWTXPOW	0x8B27		/* get transmit power (dBm) */
+#define SIOCSIWRETRY	0x8B28		/* set retry limits and lifetime */
+#define SIOCGIWRETRY	0x8B29		/* get retry limits and lifetime */
 
 /* Encoding stuff (scrambling, hardware security, WEP...) */
 #define SIOCSIWENCODE	0x8B2A		/* set encoding token & mode */
@@ -170,11 +186,33 @@
 #define SIOCSIWPOWER	0x8B2C		/* set Power Management settings */
 #define SIOCGIWPOWER	0x8B2D		/* get Power Management settings */
 
+/* -------------------- DEV PRIVATE IOCTL LIST -------------------- */
+
+/* These 16 ioctl are wireless device private.
+ * Each driver is free to use them for whatever purpose it chooses,
+ * however the driver *must* export the description of those ioctls
+ * with SIOCGIWPRIV and *must* use arguments as defined below.
+ * If you don't follow those rules, DaveM is going to hate you (reason :
+ * it make mixed 32/64bit operation impossible).
+ */
+#define SIOCIWFIRSTPRIV	0x8BE0
+#define SIOCIWLASTPRIV	0x8BFF
+/* Previously, we were using SIOCDEVPRIVATE, but we now have our
+ * separate range because of collisions with other tools such as
+ * 'mii-tool'.
+ * We now have 32 commands, so a bit more space ;-).
+ * Also, all 'odd' commands are only usable by root and don't return the
+ * content of ifr/iwr to user (but you are not obliged to use the set/get
+ * convention, just use every other two command).
+ * And I repeat : you are not obliged to use them with iwspy, but you
+ * must be compliant with it.
+ */
+
 /* ------------------------- IOCTL STUFF ------------------------- */
 
 /* The first and the last (range) */
 #define SIOCIWFIRST	0x8B00
-#define SIOCIWLAST	0x8B30
+#define SIOCIWLAST	SIOCIWLASTPRIV		/* 0x8BFF */
 
 /* Even : get (world access), odd : set (root access) */
 #define IW_IS_SET(cmd)	(!((cmd) & 0x1))
@@ -184,7 +222,7 @@
 /*
  * The following is used with SIOCGIWPRIV. It allow a driver to define
  * the interface (name, type of data) for its private ioctl.
- * Privates ioctl are SIOCDEVPRIVATE -> SIOCDEVPRIVATE + 0xF
+ * Privates ioctl are SIOCIWFIRSTPRIV -> SIOCIWLASTPRIV
  */
 
 #define IW_PRIV_TYPE_MASK	0x7000	/* Type of arguments */
@@ -272,6 +310,16 @@
 #define IW_TXPOW_DBM		0x0000	/* Value is in dBm */
 #define IW_TXPOW_MWATT		0x0001	/* Value is in mW */
 
+/* Retry limits and lifetime flags available */
+#define IW_RETRY_ON		0x0000	/* No details... */
+#define IW_RETRY_TYPE		0xF000	/* Type of parameter */
+#define IW_RETRY_LIMIT		0x1000	/* Maximum number of retries*/
+#define IW_RETRY_LIFETIME	0x2000	/* Maximum duration of retries in us */
+#define IW_RETRY_MODIFIER	0x000F	/* Modify a parameter */
+#define IW_RETRY_MIN		0x0001	/* Value is a minimum  */
+#define IW_RETRY_MAX		0x0002	/* Value is a maximum */
+#define IW_RETRY_RELATIVE	0x0004	/* Value is not in seconds/ms/us */
+
 /****************************** TYPES ******************************/
 
 /* --------------------------- SUBTYPES --------------------------- */
@@ -288,7 +336,7 @@ struct	iw_param
 
 /*
  *	For all data larger than 16 octets, we need to use a
- *	pointer to memory alocated in user space.
+ *	pointer to memory allocated in user space.
  */
 struct	iw_point
 {
@@ -317,21 +365,36 @@ struct	iw_freq
  */
 struct	iw_quality
 {
-	__u8		qual;		/* link quality (%retries, SNR or better...) */
-	__u8		level;		/* signal level */
-	__u8		noise;		/* noise level */
+	__u8		qual;		/* link quality (%retries, SNR,
+					   %missed beacons or better...) */
+	__u8		level;		/* signal level (dBm) */
+	__u8		noise;		/* noise level (dBm) */
 	__u8		updated;	/* Flags to know if updated */
 };
 
 /*
  *	Packet discarded in the wireless adapter due to
  *	"wireless" specific problems...
+ *	Note : the list of counter and statistics in net_device_stats
+ *	is already pretty exhaustive, and you should use that first.
+ *	This is only additional stats...
  */
 struct	iw_discarded
 {
-	__u32		nwid;		/* Wrong nwid */
-	__u32		code;		/* Unable to code/decode */
+	__u32		nwid;		/* Rx : Wrong nwid/essid */
+	__u32		code;		/* Rx : Unable to code/decode (WEP) */
+	__u32		fragment;	/* Rx : Can't perform MAC reassembly */
+	__u32		retries;	/* Tx : Max MAC retries num reached */
 	__u32		misc;		/* Others cases */
+};
+
+/*
+ *	Packet/Time period missed in the wireless adapter due to
+ *	"wireless" specific problems...
+ */
+struct	iw_missed
+{
+	__u32		beacon;		/* Missed beacons/superframe */
 };
 
 /* ------------------------ WIRELESS STATS ------------------------ */
@@ -346,6 +409,7 @@ struct	iw_statistics
 	struct iw_quality	qual;		/* Quality of the link
 						 * (instant/mean/max) */
 	struct iw_discarded	discard;	/* Packet discarded counts */
+	struct iw_missed	miss;		/* Packet missed counts */
 };
 
 /* ------------------------ IOCTL REQUEST ------------------------ */
@@ -385,6 +449,7 @@ struct	iwreq
 		struct iw_param	rts;		/* RTS threshold threshold */
 		struct iw_param	frag;		/* Fragmentation threshold */
 		__u32		mode;		/* Operation mode */
+		struct iw_param	retry;		/* Retry limits & lifetime */
 
 		struct iw_point	encoding;	/* Encoding stuff : tokens */
 		struct iw_param	power;		/* PM duration/timeout */
@@ -462,6 +527,32 @@ struct	iw_range
 	__u16		txpower_capa;	/* What options are supported */
 	__u8		num_txpower;	/* Number of entries in the list */
 	__s32		txpower[IW_MAX_TXPOWER];	/* list, in bps */
+
+	/* Wireless Extension version info */
+	__u8		we_version_compiled;	/* Must be WIRELESS_EXT */
+	__u8		we_version_source;	/* Last update of source */
+
+	/* Retry limits and lifetime */
+	__u16		retry_capa;	/* What retry options are supported */
+	__u16		retry_flags;	/* How to decode max/min retry limit */
+	__u16		r_time_flags;	/* How to decode max/min retry life */
+	__s32		min_retry;	/* Minimal number of retries */
+	__s32		max_retry;	/* Maximal number of retries */
+	__s32		min_r_time;	/* Minimal retry lifetime */
+	__s32		max_r_time;	/* Maximal retry lifetime */
+
+	/* Average quality of link & SNR */
+	struct iw_quality	avg_qual;	/* Quality of the link */
+	/* This should contain the average/typical values of the quality
+	 * indicator. This should be the threshold between a "good" and
+	 * a "bad" link (example : monitor going from green to orange).
+	 * Currently, user space apps like quality monitors don't have any
+	 * way to calibrate the measurement. With this, they can split
+	 * the range between 0 and max_qual in different quality level
+	 * (using a geometric subdivision centered on the average).
+	 * I expect that people doing the user space apps will feedback
+	 * us on which value we need to put in each driver...
+	 */
 };
 
 /*

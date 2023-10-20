@@ -55,7 +55,6 @@ nautilus_init_irq(void)
 {
 	if (alpha_using_srm) {
 		alpha_mv.device_interrupt = srm_device_interrupt;
-		alpha_mv.kill_arch = NULL;
 	}
 
 	init_i8259a_irqs();
@@ -77,7 +76,7 @@ nautilus_kill_arch(int mode)
 {
 	switch (mode) {
 	case LINUX_REBOOT_CMD_RESTART:
-		{
+		if (! alpha_using_srm) {
 			u8 t8;
 			pcibios_read_config_byte(0, 0x38, 0x43, &t8);
 			pcibios_write_config_byte(0, 0x38, 0x43, t8 | 0x80);
@@ -518,7 +517,7 @@ struct alpha_machine_vector nautilus_mv __initmv = {
 	machine_check:		nautilus_machine_check,
 	max_dma_address:	ALPHA_NAUTILUS_MAX_DMA_ADDRESS,
 	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	DEFAULT_MEM_BASE,
+	min_mem_address:	IRONGATE_DEFAULT_MEM_BASE,
 
 	nr_irqs:		16,
 	device_interrupt:	isa_device_interrupt,

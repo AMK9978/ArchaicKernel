@@ -43,7 +43,7 @@
 /* select machine configuration */
 #if defined(CONFIG_ATARI)
 #define MACH ATARI
-#elif defined(__i386__) || defined(__arm__) /* and others?? */
+#elif defined(__i386__) || defined(__x86_64__) || defined(__arm__) /* and others?? */
 #define MACH PC
 #else
 #error Cannot build nvram driver for this machine configuration.
@@ -94,7 +94,7 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/fcntl.h>
 #include <linux/mc146818rtc.h>
@@ -113,7 +113,7 @@ static int nvram_open_mode;		/* special open modes */
 #define	NVRAM_EXCL		2		/* opened with O_EXCL */
 
 #define	RTC_FIRST_BYTE		14	/* RTC register number of first NVRAM byte */
-#define	NVRAM_BYTES			50	/* number of NVRAM bytes */
+#define	NVRAM_BYTES			128-RTC_FIRST_BYTE	/* number of NVRAM bytes */
 
 
 static int mach_check_checksum( void );
@@ -481,7 +481,8 @@ static void pc_set_checksum( void )
 #ifdef CONFIG_PROC_FS
 
 static char *floppy_types[] = {
-	"none", "5.25'' 360k", "5.25'' 1.2M", "3.5'' 720k", "3.5'' 1.44M", "3.5'' 2.88M"
+	"none", "5.25'' 360k", "5.25'' 1.2M", "3.5'' 720k", "3.5'' 1.44M",
+	"3.5'' 2.88M", "3.5'' 2.88M"
 };
 
 static char *gfx_types[] = {
@@ -694,9 +695,14 @@ static int atari_proc_infos( unsigned char *nvram, char *buffer, int *len,
 
 #endif /* MACH == ATARI */
 
+MODULE_LICENSE("GPL");
+
+EXPORT_NO_SYMBOLS;
+
 /*
  * Local variables:
  *  c-indent-level: 4
  *  tab-width: 4
  * End:
  */
+

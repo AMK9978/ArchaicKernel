@@ -7,7 +7,7 @@
  *
  *	Based on linux/net/ipv4/ip_sockglue.c
  *
- *	$Id: ipv6_sockglue.c,v 1.34 2000/11/28 13:44:28 davem Exp $
+ *	$Id: ipv6_sockglue.c,v 1.40 2001/09/18 22:29:10 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -252,6 +252,13 @@ int ipv6_setsockopt(struct sock *sk, int level, int optname, char *optval,
 
 		if (optlen == 0)
 			goto update;
+
+		/* 1K is probably excessive
+		 * 1K is surely not enough, 2K per standard header is 16K.
+		 */
+		retv = -EINVAL;
+		if (optlen > 64*1024)
+			break;
 
 		opt = sock_kmalloc(sk, sizeof(*opt) + optlen, GFP_KERNEL);
 		retv = -ENOBUFS;
@@ -528,7 +535,7 @@ int ipv6_getsockopt(struct sock *sk, int level, int optname, char *optval,
 		return -EINVAL;
 #endif
 	}
-	len=min(sizeof(int),len);
+	len = min_t(unsigned int, sizeof(int), len);
 	if(put_user(len, optlen))
 		return -EFAULT;
 	if(copy_to_user(optval,&val,len))

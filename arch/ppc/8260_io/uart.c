@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.uart.c 1.6 05/17/01 18:14:20 cort
+ */
+/*
  *  UART driver for MPC8260 CPM SCC or SMC
  *  Copyright (c) 1999 Dan Malek (dmalek@jlc.net)
  *  Copyright (c) 2000 MontaVista Software, Inc. (source@mvista.com)
@@ -38,7 +41,7 @@
 #include <linux/fcntl.h>
 #include <linux/ptrace.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <asm/uaccess.h>

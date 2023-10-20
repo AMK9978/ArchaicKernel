@@ -6,11 +6,10 @@
     Director, National Security Agency.
 
     This software may be used and distributed according to the terms
-    of the GNU Public License, incorporated herein by reference.
+    of the GNU General Public License, incorporated herein by reference.
 
-    The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-    Center of Excellence in Space Data and Information Sciences
-        Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+    The author may be reached as becker@scyld.com, or C/O
+    Scyld Computing Corporation, 410 Severn Ave., Suite 210, Annapolis MD 21403
 
     This driver should work with many programmed-I/O 8390-based ethernet
     boards.  Currently it supports the NE1000, NE2000, many clones,
@@ -76,12 +75,17 @@ static unsigned int netcard_portlist[] __initdata = {
 };
 #endif
 
-static struct { unsigned short vendor, function; char *name; }
-isapnp_clone_list[] __initdata = {
-	{ISAPNP_VENDOR('E','D','I'), ISAPNP_FUNCTION(0x0216),		"NN NE2000" },
-	{ISAPNP_VENDOR('P','N','P'), ISAPNP_FUNCTION(0x80d6),		"Generic PNP" },
-	{0,}
+static struct isapnp_device_id isapnp_clone_list[] __initdata = {
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('E','D','I'), ISAPNP_FUNCTION(0x0216),
+		(long) "NN NE2000" },
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('P','N','P'), ISAPNP_FUNCTION(0x80d6),
+		(long) "Generic PNP" },
+	{ }	/* terminate list */
 };
+
+MODULE_DEVICE_TABLE(isapnp, isapnp_clone_list);
 
 #ifdef SUPPORT_NE_BAD_CLONES
 /* A list of bad clones that we none-the-less recognize. */
@@ -206,7 +210,7 @@ static int __init ne_probe_isapnp(struct net_device *dev)
 			dev->base_addr = idev->resource[0].start;
 			dev->irq = idev->irq_resource[0].start;
 			printk(KERN_INFO "ne.c: ISAPnP reports %s at i/o %#lx, irq %d.\n",
-				isapnp_clone_list[i].name,
+				(char *) isapnp_clone_list[i].driver_data,
 
 				dev->base_addr, dev->irq);
 			if (ne_probe1(dev, dev->base_addr) != 0) {	/* Shouldn't happen. */
@@ -233,7 +237,7 @@ static int __init ne_probe1(struct net_device *dev, int ioaddr)
 	int start_page, stop_page;
 	int neX000, ctron, copam, bad_card;
 	int reg0, ret;
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 
 	if (!request_region(ioaddr, NE_IO_EXTENT, dev->name))
 		return -EBUSY;
@@ -730,6 +734,9 @@ static int bad[MAX_NE_CARDS];	/* 0xbad = bad sig or no reset ack */
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
 MODULE_PARM(bad, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
+MODULE_PARM_DESC(io, "NEx000 I/O base address(es),required");
+MODULE_PARM_DESC(irq, "NEx000 IRQ number(s)");
+MODULE_PARM_DESC(bad, "NEx000 accept bad clone(s)");
 
 /* This is set up so that no ISA autoprobe takes place. We can't guarantee
 that the ne2k probe is the last 8390 based probe to take place (as it
@@ -781,6 +788,8 @@ void cleanup_module(void)
 	}
 }
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
+
 
 /*
  * Local variables:

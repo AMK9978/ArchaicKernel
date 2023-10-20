@@ -1,4 +1,7 @@
-/* $Id: dma.h,v 1.3 1997/03/16 06:20:39 cort Exp $
+/*
+ * BK Id: SCCS/s.dma.h 1.8 05/17/01 18:14:24 cort
+ */
+/*
  * linux/include/asm/dma.h: Defines for using and allocating dma channels.
  * Written by Hennus Bergman, 1992.
  * High DMA channel support & info by Hannu Savolainen
@@ -102,13 +105,13 @@ extern unsigned long ISA_DMA_THRESHOLD;
 /* used in nasty hack for sound - see prep_setup_arch() -- Cort */
 extern long ppc_cs4232_dma, ppc_cs4232_dma2;
 #if defined(CONFIG_CS4232)
-#if defined(CONFIG_PREP) || defined(CONFIG_ALL_PPC)
+#if defined(CONFIG_ALL_PPC)
 #define SND_DMA1 ppc_cs4232_dma
 #define SND_DMA2 ppc_cs4232_dma2
-#else /* !CONFIG_PREP && !CONFIG_ALL_PPC */
+#else /* !CONFIG_ALL_PPC */
 #define SND_DMA1 -1
 #define SND_DMA2 -1
-#endif /* !CONFIG_PREP */
+#endif /* CONFIG_ALL_PPC */
 #elif defined(CONFIG_MSS)
 #define SND_DMA1 CONFIG_MSS_DMA
 #define SND_DMA2 CONFIG_MSS_DMA2
@@ -201,39 +204,7 @@ static __inline__ void release_dma_lock(unsigned long flags)
 /* enable/disable a specific DMA channel */
 static __inline__ void enable_dma(unsigned int dmanr)
 {
-	/*
-	 * The Radstone PPC2 and PPC2a boards have inverted DREQ
-	 * lines (active low) so each command needs to be logically
-	 * ORed with 0x40
-	 */
 	unsigned char ucDmaCmd=0x00;
-
-#if defined(CONFIG_PREP) || defined(CONFIG_ALL_PPC)
-	if(_prep_type==_PREP_Radstone)
-	{
-		switch(ucSystemType)
-		{
-			case RS_SYS_TYPE_PPC2:
-			case RS_SYS_TYPE_PPC2a:
-			case RS_SYS_TYPE_PPC2ep:
-			{
-				/*
-				 * DREQ lines are active low
-				 */
-				ucDmaCmd=0x40;
-				break;
-			}
-
-			default:
-			{
-				/*
-				 * DREQ lines are active high
-				 */
-				break;
-			}
-		}
-	}
-#endif /* CONFIG_PREP || CONFIG_ALL_PPC */
 
 	if (dmanr != 4)
 	{

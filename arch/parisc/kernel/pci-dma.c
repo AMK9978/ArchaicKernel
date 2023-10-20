@@ -26,7 +26,7 @@
 #include <linux/pci.h>
 #include <linux/init.h>
 
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 
 #include <asm/uaccess.h>
@@ -77,7 +77,7 @@ void dump_resmap(void)
 static inline void dump_resmap(void) {;}
 #endif
 
-static int pa11_dma_supported( struct pci_dev *dev, dma_addr_t mask)
+static int pa11_dma_supported( struct pci_dev *dev, u64 mask)
 {
 	return 1;
 }

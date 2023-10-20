@@ -7,7 +7,7 @@
  * http://www.pap-philips.de
  * -----------------------------------------------------------
  * This software may be used and distributed according to the terms of
- * the GNU Public License, incorporated herein by reference.
+ * the GNU General Public License, incorporated herein by reference.
  *
  * Author:
  * L. Haag
@@ -51,7 +51,7 @@
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/tty.h>
 #include <linux/errno.h>
 #include <linux/string.h>   /* used in new tty drivers */
@@ -65,7 +65,7 @@
 
 //#define DEBUG_QUEUE
 
-/* Log successfull handshake and protocol operations  */
+/* Log successful handshake and protocol operations  */
 //#define DEBUG_PROTO_S
 
 /* Log handshake and protocol errors: */
@@ -132,10 +132,10 @@ static void remove_client_block(struct r3964_info *pInfo,
 
 static int  r3964_open(struct tty_struct *tty);
 static void r3964_close(struct tty_struct *tty);
-static int  r3964_read(struct tty_struct *tty, struct file *file,
-                     unsigned char *buf, unsigned int nr);
-static int  r3964_write(struct tty_struct * tty, struct file * file,
-                      const unsigned char * buf, unsigned int nr);
+static ssize_t r3964_read(struct tty_struct *tty, struct file *file,
+                     unsigned char *buf, size_t nr);
+static ssize_t r3964_write(struct tty_struct * tty, struct file * file,
+                      const unsigned char * buf, size_t nr);
 static int r3964_ioctl(struct tty_struct * tty, struct file * file,
                        unsigned int cmd, unsigned long arg);
 static void r3964_set_termios(struct tty_struct *tty, struct termios * old);
@@ -983,13 +983,14 @@ static void add_msg(struct r3964_client_info *pClient, int msg_id, int arg,
    {
 queue_the_message:
 
-      save_flags(flags);
-      cli();
-
       pMsg = kmalloc(sizeof(struct r3964_message), GFP_KERNEL);
       TRACE_M("add_msg - kmalloc %x",(int)pMsg);
-      if(pMsg==NULL)
+      if(pMsg==NULL) {
          return;
+      }
+
+      save_flags(flags);
+      cli();
 
       pMsg->msg_id = msg_id;
       pMsg->arg    = arg;
@@ -1237,8 +1238,8 @@ static void r3964_close(struct tty_struct *tty)
     MOD_DEC_USE_COUNT;
 }
 
-static int r3964_read(struct tty_struct *tty, struct file *file,
-                     unsigned char *buf, unsigned int nr)
+static ssize_t r3964_read(struct tty_struct *tty, struct file *file,
+			  unsigned char *buf, size_t nr)
 {
    struct r3964_info *pInfo=(struct r3964_info*)tty->disc_data;
    struct r3964_client_info *pClient;
@@ -1298,8 +1299,8 @@ repeat:
    return -EPERM;
 }
 
-static int r3964_write(struct tty_struct * tty, struct file * file,
-                      const unsigned char *data, unsigned int count)
+static ssize_t r3964_write(struct tty_struct * tty, struct file * file,
+			   const unsigned char *data, size_t count)
 {
    struct r3964_info *pInfo=(struct r3964_info*)tty->disc_data;
    struct r3964_block_header *pHeader;
@@ -1420,7 +1421,7 @@ static unsigned int r3964_poll(struct tty_struct * tty, struct file * file,
    int pid=current->pid;
    struct r3964_client_info *pClient;
    struct r3964_message *pMsg=NULL;
-   unsigned int flags;
+   unsigned long flags;
    int result = POLLOUT;
 
    TRACE_L("POLL");
@@ -1472,3 +1473,7 @@ static int r3964_receive_room(struct tty_struct *tty)
    return -1;
 }
 
+
+MODULE_LICENSE("GPL");
+
+EXPORT_NO_SYMBOLS;

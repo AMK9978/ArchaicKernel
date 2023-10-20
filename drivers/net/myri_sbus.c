@@ -3,7 +3,7 @@
  * Copyright (C) 1996, 1999 David S. Miller (davem@redhat.com)
  */
 
-static char *version =
+static char version[] =
         "myri_sbus.c:v1.9 12/Sep/99 David S. Miller (davem@redhat.com)\n";
 
 #include <linux/module.h>
@@ -17,7 +17,7 @@ static char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -89,7 +89,7 @@ static char *version =
 #endif
 
 #ifdef MODULE
-static struct myri_eth *root_myri_dev = NULL;
+static struct myri_eth *root_myri_dev;
 #endif
 
 static void myri_reset_off(unsigned long lp, unsigned long cregs)
@@ -531,7 +531,9 @@ static void myri_rx(struct myri_eth *mp, struct net_device *dev)
 		DRX(("prot[%04x] netif_rx ", skb->protocol));
 		netif_rx(skb);
 
+		dev->last_rx = jiffies;
 		mp->enet_stats.rx_packets++;
+		mp->enet_stats.rx_bytes += len;
 	next:
 		DRX(("NEXT\n"));
 		entry = NEXT_RX(entry);
@@ -592,7 +594,7 @@ static void myri_tx_timeout(struct net_device *dev)
 
 	mp->enet_stats.tx_errors++;
 	myri_init(mp, 0);
-	netif_start_queue(dev);
+	netif_wake_queue(dev);
 }
 
 static int myri_start_xmit(struct sk_buff *skb, struct net_device *dev)
@@ -884,13 +886,16 @@ static void dump_eeprom(struct myri_eth *mp)
 
 static int __init myri_ether_init(struct net_device *dev, struct sbus_dev *sdev, int num)
 {
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 	struct myri_eth *mp;
 	unsigned char prop_buf[32];
 	int i;
 
 	DET(("myri_ether_init(%p,%p,%d):\n", dev, sdev, num));
 	dev = init_etherdev(0, sizeof(struct myri_eth));
+
+	if (!dev)
+		return -ENOMEM;
 
 	if (version_printed++ == 0)
 		printk(version);
@@ -982,7 +987,7 @@ static int __init myri_ether_init(struct net_device *dev, struct sbus_dev *sdev,
 					mp->reg_size, "MyriCOM Regs");
 		if (!mp->regs) {
 			printk("MyriCOM: Cannot map MyriCOM registers.\n");
-			return -ENODEV;
+			goto err;
 		}
 		mp->lanai = (unsigned short *) (mp->regs + (256 * 1024));
 		mp->lanai3 = (unsigned int *) mp->lanai;
@@ -1059,7 +1064,7 @@ static int __init myri_ether_init(struct net_device *dev, struct sbus_dev *sdev,
 	if (request_irq(dev->irq, &myri_interrupt,
 			SA_SHIRQ, "MyriCOM Ethernet", (void *) dev)) {
 		printk("MyriCOM: Cannot register interrupt handler.\n");
-		return -ENODEV;
+		goto err;
 	}
 
 	DET(("ether_setup()\n"));
@@ -1083,6 +1088,9 @@ static int __init myri_ether_init(struct net_device *dev, struct sbus_dev *sdev,
 	root_myri_dev = mp;
 #endif
 	return 0;
+err:	unregister_netdev(dev);
+	kfree(dev);
+	return -ENODEV;
 }
 
 static int __init myri_sbus_match(struct sbus_dev *sdev)
@@ -1101,7 +1109,7 @@ static int __init myri_sbus_probe(void)
 	struct net_device *dev = NULL;
 	struct sbus_bus *bus;
 	struct sbus_dev *sdev = 0;
-	static int called = 0;
+	static int called;
 	int cards = 0, v;
 
 #ifdef MODULE
@@ -1145,3 +1153,4 @@ static void __exit myri_sbus_cleanup(void)
 
 module_init(myri_sbus_probe);
 module_exit(myri_sbus_cleanup);
+MODULE_LICENSE("GPL");

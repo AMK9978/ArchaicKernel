@@ -132,7 +132,7 @@ static int xcvr[NUM_UNITS]; 			/* The data transfer mode. */
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
@@ -151,11 +151,18 @@ static int xcvr[NUM_UNITS]; 			/* The data transfer mode. */
 
 MODULE_AUTHOR("Donald Becker <becker@scyld.com>");
 MODULE_DESCRIPTION("RealTek RTL8002/8012 parallel port Ethernet driver");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(max_interrupt_work, "i");
 MODULE_PARM(debug, "i");
-MODULE_PARM(io, "1-" __MODULE_STRING(MAX_UNITS) "i");
-MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_UNITS) "i");
-MODULE_PARM(xcvr, "1-" __MODULE_STRING(MAX_UNITS) "i");
+MODULE_PARM(io, "1-" __MODULE_STRING(NUM_UNITS) "i");
+MODULE_PARM(irq, "1-" __MODULE_STRING(NUM_UNITS) "i");
+MODULE_PARM(xcvr, "1-" __MODULE_STRING(NUM_UNITS) "i");
+MODULE_PARM_DESC(max_interrupt_work, "ATP maximum events handled per interrupt");
+MODULE_PARM_DESC(debug, "ATP debug level (0-7)");
+MODULE_PARM_DESC(io, "ATP I/O base address(es)");
+MODULE_PARM_DESC(irq, "ATP IRQ number(s)");
+MODULE_PARM_DESC(xcvr, "ATP tranceiver(s) (0=internal, 1=external)");
 
 #define RUN_AT(x) (jiffies + (x))
 
@@ -209,7 +216,7 @@ static void tx_timeout(struct net_device *dev);
 
 
 /* A list of all installed ATP devices, for removing the driver module. */
-static struct net_device *root_atp_dev = NULL;
+static struct net_device *root_atp_dev;
 
 /* Check for a network adapter of this type, and return '0' iff one exists.
    If dev->base_addr == 0, probe all likely locations.
@@ -536,7 +543,6 @@ static void tx_timeout(struct net_device *dev)
 	dev->trans_start = jiffies;
 	netif_wake_queue(dev);
 	np->stats.tx_errors++;
-	return;
 }
 
 static int atp_send_packet(struct sk_buff *skb, struct net_device *dev)
@@ -585,7 +591,7 @@ static void atp_interrupt(int irq, void *dev_instance, struct pt_regs * regs)
 	struct net_device *dev = (struct net_device *)dev_instance;
 	struct net_local *lp;
 	long ioaddr;
-	static int num_tx_since_rx = 0;
+	static int num_tx_since_rx;
 	int boguscount = max_interrupt_work;
 
 	if (dev == NULL) {
@@ -627,7 +633,6 @@ static void atp_interrupt(int irq, void *dev_instance, struct pt_regs * regs)
 					write_reg_high(ioaddr, CMR2, lp->addr_mode);
 				} else if ((read_status & (CMR1_BufEnb << 3)) == 0) {
 					net_rx(dev);
-					dev->last_rx = jiffies;
 					num_tx_since_rx = 0;
 				} else
 					break;
@@ -785,6 +790,7 @@ static void net_rx(struct net_device *dev)
 		read_block(ioaddr, pkt_len, skb_put(skb,pkt_len), dev->if_port);
 		skb->protocol = eth_type_trans(skb, dev);
 		netif_rx(skb);
+		dev->last_rx = jiffies;
 		lp->stats.rx_packets++;
 		lp->stats.rx_bytes += pkt_len;
 	}

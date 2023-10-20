@@ -24,7 +24,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -841,8 +841,7 @@ int __init platinum_setup(char *options)
 	if (!options || !*options)
 		return 0;
 
-	for (this_opt = strtok(options, ","); this_opt;
-	     this_opt = strtok(NULL, ",")) {
+	while ((this_opt = strsep(&options, ",")) != NULL) {
 		if (!strncmp(this_opt, "font:", 5)) {
 			char *p;
 			int i;
@@ -878,3 +877,5 @@ int __init platinum_setup(char *options)
 	}
 	return 0;
 }
+
+MODULE_LICENSE("GPL");

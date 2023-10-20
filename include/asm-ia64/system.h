@@ -7,8 +7,8 @@
  * on information published in the Processor Abstraction Layer
  * and the System Abstraction Layer manual.
  *
- * Copyright (C) 1998-2000 Hewlett-Packard Co
- * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2001 Hewlett-Packard Co
+ * Copyright (C) 1998-2001 David Mosberger-Tang <davidm@hpl.hp.com>
  * Copyright (C) 1999 Asit Mallick <asit.k.mallick@intel.com>
  * Copyright (C) 1999 Don Dugger <don.dugger@intel.com>
  */
@@ -16,26 +16,18 @@
 
 #include <asm/page.h>
 
-#define KERNEL_START		(PAGE_OFFSET + 0x500000)
+#define KERNEL_START		(PAGE_OFFSET + 68*1024*1024)
 
 /*
  * The following #defines must match with vmlinux.lds.S:
  */
+#define IVT_ADDR		(KERNEL_START)
 #define IVT_END_ADDR		(KERNEL_START + 0x8000)
-#define ZERO_PAGE_ADDR		(IVT_END_ADDR + 0*PAGE_SIZE)
-#define SWAPPER_PGD_ADDR	(IVT_END_ADDR + 1*PAGE_SIZE)
+#define ZERO_PAGE_ADDR		PAGE_ALIGN(IVT_END_ADDR)
+#define SWAPPER_PGD_ADDR	(ZERO_PAGE_ADDR + 1*PAGE_SIZE)
 
 #define GATE_ADDR		(0xa000000000000000 + PAGE_SIZE)
-
-#if defined(CONFIG_ITANIUM_ASTEP_SPECIFIC) \
-    || defined(CONFIG_ITANIUM_B0_SPECIFIC) || defined(CONFIG_ITANIUM_B1_SPECIFIC)
-  /* Workaround for Errata 97.  */
-# define IA64_SEMFIX_INSN	mf;
-# define IA64_SEMFIX	"mf;"
-#else
-# define IA64_SEMFIX_INSN
-# define IA64_SEMFIX	""
-#endif
+#define PERCPU_ADDR		(0xa000000000000000 + 2*PAGE_SIZE)
 
 #ifndef __ASSEMBLY__
 
@@ -62,12 +54,10 @@ extern struct ia64_boot_param {
 		__u16 orig_x;	/* cursor's x position */
 		__u16 orig_y;	/* cursor's y position */
 	} console_info;
-	__u16 num_pci_vectors;	/* number of ACPI derived PCI IRQ's*/
-	__u64 pci_vectors;	/* physical address of PCI data (pci_vector_struct)*/
-	__u64 fpswa;		/* physical address of the the fpswa interface */
+	__u64 fpswa;		/* physical address of the fpswa interface */
 	__u64 initrd_start;
 	__u64 initrd_size;
-} ia64_boot_param;
+} *ia64_boot_param;
 
 static inline void
 ia64_insn_group_barrier (void)
@@ -181,49 +171,8 @@ do {									 \
 #define __save_flags(flags)	__asm__ __volatile__ ("mov %0=psr" : "=r" (flags) :: "memory")
 #define __save_and_cli(flags)	local_irq_save(flags)
 #define save_and_cli(flags)	__save_and_cli(flags)
-
-
-#ifdef CONFIG_IA64_SOFTSDV_HACKS
-/*
- * Yech.  SoftSDV has a slight probem with psr.i and itc/itm.  If
- * PSR.i = 0 and ITC == ITM, you don't get the timer tick posted.  So,
- * I'll check if ITC is larger than ITM here and reset if neccessary.
- * I may miss a tick to two.
- * 
- * Don't include asm/delay.h; it causes include loops that are
- * mind-numbingly hard to follow.
- */
-
-#define get_itc(x) __asm__ __volatile__("mov %0=ar.itc" : "=r"((x)) :: "memory")
-#define get_itm(x) __asm__ __volatile__("mov %0=cr.itm" : "=r"((x)) :: "memory")
-#define set_itm(x) __asm__ __volatile__("mov cr.itm=%0" :: "r"((x)) : "memory")
-
-#define __restore_flags(x)			\
-do {						\
-        unsigned long itc, itm;			\
-	local_irq_restore(x);			\
-        get_itc(itc);				\
-        get_itm(itm);				\
-        if (itc > itm)				\
-		set_itm(itc + 10);		\
-} while (0)
-
-#define __sti()					\
-do {						\
-	unsigned long itc, itm;			\
-	local_irq_enable();			\
-	get_itc(itc);				\
-	get_itm(itm);				\
-	if (itc > itm)				\
-		set_itm(itc + 10);		\
-} while (0)
-
-#else /* !CONFIG_IA64_SOFTSDV_HACKS */
-
 #define __sti()			local_irq_enable ()
 #define __restore_flags(flags)	local_irq_restore(flags)
-
-#endif /* !CONFIG_IA64_SOFTSDV_HACKS */
 
 #ifdef CONFIG_SMP
   extern void __global_cli (void);
@@ -252,12 +201,12 @@ extern unsigned long __bad_increment_for_ia64_fetch_and_add (void);
 ({										\
 	switch (sz) {								\
 	      case 4:								\
-		__asm__ __volatile__ (IA64_SEMFIX"fetchadd4.rel %0=[%1],%2"	\
+		__asm__ __volatile__ ("fetchadd4.rel %0=[%1],%2"		\
 				      : "=r"(tmp) : "r"(v), "i"(n) : "memory");	\
 		break;								\
 										\
 	      case 8:								\
-		__asm__ __volatile__ (IA64_SEMFIX"fetchadd8.rel %0=[%1],%2"	\
+		__asm__ __volatile__ ("fetchadd8.rel %0=[%1],%2"		\
 				      : "=r"(tmp) : "r"(v), "i"(n) : "memory");	\
 		break;								\
 										\
@@ -299,22 +248,22 @@ __xchg (unsigned long x, volatile void *ptr, int size)
 
 	switch (size) {
 	      case 1:
-		__asm__ __volatile (IA64_SEMFIX"xchg1 %0=[%1],%2" : "=r" (result)
+		__asm__ __volatile ("xchg1 %0=[%1],%2" : "=r" (result)
 				    : "r" (ptr), "r" (x) : "memory");
 		return result;
 
 	      case 2:
-		__asm__ __volatile (IA64_SEMFIX"xchg2 %0=[%1],%2" : "=r" (result)
+		__asm__ __volatile ("xchg2 %0=[%1],%2" : "=r" (result)
 				    : "r" (ptr), "r" (x) : "memory");
 		return result;
 
 	      case 4:
-		__asm__ __volatile (IA64_SEMFIX"xchg4 %0=[%1],%2" : "=r" (result)
+		__asm__ __volatile ("xchg4 %0=[%1],%2" : "=r" (result)
 				    : "r" (ptr), "r" (x) : "memory");
 		return result;
 
 	      case 8:
-		__asm__ __volatile (IA64_SEMFIX"xchg8 %0=[%1],%2" : "=r" (result)
+		__asm__ __volatile ("xchg8 %0=[%1],%2" : "=r" (result)
 				    : "r" (ptr), "r" (x) : "memory");
 		return result;
 	}
@@ -325,7 +274,7 @@ __xchg (unsigned long x, volatile void *ptr, int size)
 #define xchg(ptr,x)							     \
   ((__typeof__(*(ptr))) __xchg ((unsigned long) (x), (ptr), sizeof(*(ptr))))
 
-/* 
+/*
  * Atomic compare and exchange.  Compare OLD with MEM, if identical,
  * store NEW in MEM.  Return the initial value in MEM.  Success is
  * indicated by comparing RETURN with OLD.
@@ -350,27 +299,27 @@ extern long __cmpxchg_called_with_bad_pointer(void);
 	      case 2: _o_ = (__u16) (long) (old); break;				\
 	      case 4: _o_ = (__u32) (long) (old); break;				\
 	      case 8: _o_ = (__u64) (long) (old); break;				\
-	      default:									\
+	      default: break;								\
 	}										\
 	 __asm__ __volatile__ ("mov ar.ccv=%0;;" :: "rO"(_o_));				\
 	switch (size) {									\
 	      case 1:									\
-		__asm__ __volatile__ (IA64_SEMFIX"cmpxchg1."sem" %0=[%1],%2,ar.ccv"	\
+		__asm__ __volatile__ ("cmpxchg1."sem" %0=[%1],%2,ar.ccv"		\
 				      : "=r"(_r_) : "r"(_p_), "r"(_n_) : "memory");	\
 		break;									\
 											\
 	      case 2:									\
-		__asm__ __volatile__ (IA64_SEMFIX"cmpxchg2."sem" %0=[%1],%2,ar.ccv"	\
+		__asm__ __volatile__ ("cmpxchg2."sem" %0=[%1],%2,ar.ccv"		\
 				      : "=r"(_r_) : "r"(_p_), "r"(_n_) : "memory");	\
 		break;									\
 											\
 	      case 4:									\
-		__asm__ __volatile__ (IA64_SEMFIX"cmpxchg4."sem" %0=[%1],%2,ar.ccv"	\
+		__asm__ __volatile__ ("cmpxchg4."sem" %0=[%1],%2,ar.ccv"		\
 				      : "=r"(_r_) : "r"(_p_), "r"(_n_) : "memory");	\
 		break;									\
 											\
 	      case 8:									\
-		__asm__ __volatile__ (IA64_SEMFIX"cmpxchg8."sem" %0=[%1],%2,ar.ccv"	\
+		__asm__ __volatile__ ("cmpxchg8."sem" %0=[%1],%2,ar.ccv"		\
 				      : "=r"(_r_) : "r"(_p_), "r"(_n_) : "memory");	\
 		break;									\
 											\
@@ -439,7 +388,7 @@ extern void ia64_load_extra (struct task_struct *task);
 	(last) = ia64_switch_to((next));						\
 } while (0)
 
-#ifdef CONFIG_SMP 
+#ifdef CONFIG_SMP
   /*
    * In the SMP case, we save the fph state when context-switching
    * away from a thread that modified fph.  This way, when the thread

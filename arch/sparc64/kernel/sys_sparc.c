@@ -1,4 +1,4 @@
-/* $Id: sys_sparc.c,v 1.47 2000/11/29 05:56:12 anton Exp $
+/* $Id: sys_sparc.c,v 1.54 2001/10/28 20:49:13 davem Exp $
  * linux/arch/sparc64/kernel/sys_sparc.c
  *
  * This file contains various random system calls that
@@ -21,7 +21,7 @@
 #include <linux/utsname.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ipc.h>
 #include <linux/personality.h>
 
@@ -42,19 +42,28 @@ asmlinkage unsigned long sys_getpagesize(void)
 
 #define COLOUR_ALIGN(addr)	(((addr)+SHMLBA-1)&~(SHMLBA-1))
 
-unsigned long get_unmapped_area(unsigned long addr, unsigned long len)
+unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsigned long len, unsigned long pgoff, unsigned long flags)
 {
 	struct vm_area_struct * vmm;
 	unsigned long task_size = TASK_SIZE;
 
+	if (flags & MAP_FIXED) {
+		/* We do not accept a shared mapping if it would violate
+		 * cache aliasing constraints.
+		 */
+		if ((flags & MAP_SHARED) && (addr & (SHMLBA - 1)))
+			return -EINVAL;
+		return addr;
+	}
+
 	if (current->thread.flags & SPARC_FLAG_32BIT)
 		task_size = 0xf0000000UL;
 	if (len > task_size || len > -PAGE_OFFSET)
-		return 0;
+		return -ENOMEM;
 	if (!addr)
 		addr = TASK_UNMAPPED_BASE;
 
-	if (current->thread.flags & SPARC_FLAG_MMAPSHARED)
+	if (flags & MAP_SHARED)
 		addr = COLOUR_ALIGN(addr);
 	else
 		addr = PAGE_ALIGN(addr);
@@ -68,13 +77,56 @@ unsigned long get_unmapped_area(unsigned long addr, unsigned long len)
 			vmm = find_vma(current->mm, PAGE_OFFSET);
 		}
 		if (task_size < addr)
-			return 0;
+			return -ENOMEM;
 		if (!vmm || addr + len <= vmm->vm_start)
 			return addr;
 		addr = vmm->vm_end;
-		if (current->thread.flags & SPARC_FLAG_MMAPSHARED)
+		if (flags & MAP_SHARED)
 			addr = COLOUR_ALIGN(addr);
 	}
+}
+
+/* Try to align mapping such that we align it as much as possible. */
+unsigned long get_fb_unmapped_area(struct file *filp, unsigned long orig_addr, unsigned long len, unsigned long pgoff, unsigned long flags)
+{
+	unsigned long align_goal, addr = -ENOMEM;
+
+	if (flags & MAP_FIXED) {
+		/* Ok, don't mess with it. */
+		return get_unmapped_area(NULL, addr, len, pgoff, flags);
+	}
+	flags &= ~MAP_SHARED;
+
+	align_goal = PAGE_SIZE;
+	if (len >= (4UL * 1024 * 1024))
+		align_goal = (4UL * 1024 * 1024);
+	else if (len >= (512UL * 1024))
+		align_goal = (512UL * 1024);
+	else if (len >= (64UL * 1024))
+		align_goal = (64UL * 1024);
+
+	do {
+		addr = get_unmapped_area(NULL, orig_addr, len + (align_goal - PAGE_SIZE), pgoff, flags);
+		if (!(addr & ~PAGE_MASK)) {
+			addr = (addr + (align_goal - 1UL)) & ~(align_goal - 1UL);
+			break;
+		}
+
+		if (align_goal == (4UL * 1024 * 1024))
+			align_goal = (512UL * 1024);
+		else if (align_goal == (512UL * 1024))
+			align_goal = (64UL * 1024);
+		else
+			align_goal = PAGE_SIZE;
+	} while ((addr & ~PAGE_MASK) && align_goal > PAGE_SIZE);
+
+	/* Mapping is smaller than 64K or larger areas could not
+	 * be obtained.
+	 */
+	if (addr & ~PAGE_MASK)
+		addr = get_unmapped_area(NULL, orig_addr, len, pgoff, flags);
+
+	return addr;
 }
 
 extern asmlinkage unsigned long sys_brk(unsigned long brk);
@@ -203,13 +255,27 @@ extern asmlinkage long sys_personality(unsigned long);
 
 asmlinkage int sparc64_personality(unsigned long personality)
 {
-	int ret;
-	if (current->personality == PER_LINUX32 && personality == PER_LINUX)
-		personality = PER_LINUX32;
-	ret = sys_personality(personality);
-	if (ret == PER_LINUX32)
+	unsigned long ret, trying, orig_ret;
+
+	trying = ret = personality;
+
+	if (current->personality == PER_LINUX32 &&
+	    trying == PER_LINUX)
+		trying = ret = PER_LINUX32;
+
+	/* For PER_LINUX32 we want to retain &default_exec_domain.  */
+	if (trying == PER_LINUX32)
 		ret = PER_LINUX;
-	return ret;
+
+	orig_ret = ret;
+	ret = sys_personality(ret);
+
+	if (orig_ret == PER_LINUX && trying == PER_LINUX32) {
+		current->personality = PER_LINUX32;
+		ret = PER_LINUX;
+	}
+
+	return (int) ret;
 }
 
 /* Linux version of mmap */
@@ -240,14 +306,9 @@ asmlinkage unsigned long sys_mmap(unsigned long addr, unsigned long len,
 			goto out_putf;
 	}
 
-	if (flags & MAP_SHARED)
-		current->thread.flags |= SPARC_FLAG_MMAPSHARED;
-
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	retval = do_mmap(file, addr, len, prot, flags, off);
-	up(&current->mm->mmap_sem);
-
-	current->thread.flags &= ~(SPARC_FLAG_MMAPSHARED);
+	up_write(&current->mm->mmap_sem);
 
 out_putf:
 	if (file)
@@ -263,9 +324,9 @@ asmlinkage long sys64_munmap(unsigned long addr, size_t len)
 	if (len > -PAGE_OFFSET ||
 	    (addr < PAGE_OFFSET && addr + len > -PAGE_OFFSET))
 		return -EINVAL;
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	ret = do_munmap(current->mm, addr, len);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 	return ret;
 }
 
@@ -285,27 +346,38 @@ asmlinkage unsigned long sys64_mremap(unsigned long addr,
 		goto out;
 	if (addr < PAGE_OFFSET && addr + old_len > -PAGE_OFFSET)
 		goto out;
-	down(&current->mm->mmap_sem);
-	vma = find_vma(current->mm, addr);
-	if (vma && (vma->vm_flags & VM_SHARED))
-		current->thread.flags |= SPARC_FLAG_MMAPSHARED;
+	down_write(&current->mm->mmap_sem);
 	if (flags & MREMAP_FIXED) {
 		if (new_addr < PAGE_OFFSET &&
 		    new_addr + new_len > -PAGE_OFFSET)
 			goto out_sem;
 	} else if (addr < PAGE_OFFSET && addr + new_len > -PAGE_OFFSET) {
+		unsigned long map_flags = 0;
+		struct file *file = NULL;
+
 		ret = -ENOMEM;
 		if (!(flags & MREMAP_MAYMOVE))
 			goto out_sem;
-		new_addr = get_unmapped_area(addr, new_len);
-		if (!new_addr)
+
+		vma = find_vma(current->mm, addr);
+		if (vma) {
+			if (vma->vm_flags & VM_SHARED)
+				map_flags |= MAP_SHARED;
+			file = vma->vm_file;
+		}
+
+		/* MREMAP_FIXED checked above. */
+		new_addr = get_unmapped_area(file, addr, new_len,
+				    vma ? vma->vm_pgoff : 0,
+				    map_flags);
+		ret = new_addr;
+		if (new_addr & ~PAGE_MASK)
 			goto out_sem;
 		flags |= MREMAP_FIXED;
 	}
 	ret = do_mremap(addr, old_len, new_len, flags, new_addr);
 out_sem:
-	current->thread.flags &= ~(SPARC_FLAG_MMAPSHARED);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 out:
 	return ret;       
 }
@@ -335,6 +407,10 @@ sparc_breakpoint (struct pt_regs *regs)
 {
 	siginfo_t info;
 
+	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+		regs->tpc &= 0xffffffff;
+		regs->tnpc &= 0xffffffff;
+	}
 #ifdef DEBUG_SPARC_BREAKPOINT
         printk ("TRAP: Entering kernel PC=%lx, nPC=%lx\n", regs->tpc, regs->tnpc);
 #endif
@@ -384,6 +460,10 @@ asmlinkage int solaris_syscall(struct pt_regs *regs)
 
 	regs->tpc = regs->tnpc;
 	regs->tnpc += 4;
+	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+		regs->tpc &= 0xffffffff;
+		regs->tnpc &= 0xffffffff;
+	}
 	if(++count <= 5) {
 		printk ("For Solaris binary emulation you need solaris module loaded\n");
 		show_regs (regs);
@@ -400,6 +480,10 @@ asmlinkage int sunos_syscall(struct pt_regs *regs)
 
 	regs->tpc = regs->tnpc;
 	regs->tnpc += 4;
+	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+		regs->tpc &= 0xffffffff;
+		regs->tnpc &= 0xffffffff;
+	}
 	if(++count <= 20)
 		printk ("SunOS binary emulation not compiled in\n");
 	force_sig(SIGSEGV, current);

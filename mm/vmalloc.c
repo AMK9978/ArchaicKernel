@@ -6,9 +6,10 @@
  *  SMP-safe vmalloc/vfree/ioremap, Tigran Aivazian <tigran@veritas.com>, May 2000
  */
 
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/spinlock.h>
+#include <linux/highmem.h>
 #include <linux/smp_lock.h>
 
 #include <asm/uaccess.h>
@@ -101,9 +102,11 @@ static inline int alloc_area_pte (pte_t * pte, unsigned long address,
 		end = PMD_SIZE;
 	do {
 		struct page * page;
+		spin_unlock(&init_mm.page_table_lock);
+		page = alloc_page(gfp_mask);
+		spin_lock(&init_mm.page_table_lock);
 		if (!pte_none(*pte))
 			printk(KERN_ERR "alloc_area_pte: page already exists\n");
-		page = alloc_page(gfp_mask);
 		if (!page)
 			return -ENOMEM;
 		set_pte(pte, mk_pte(page, prot));
@@ -122,7 +125,7 @@ static inline int alloc_area_pmd(pmd_t * pmd, unsigned long address, unsigned lo
 	if (end > PGDIR_SIZE)
 		end = PGDIR_SIZE;
 	do {
-		pte_t * pte = pte_alloc_kernel(pmd, address);
+		pte_t * pte = pte_alloc(&init_mm, pmd, address);
 		if (!pte)
 			return -ENOMEM;
 		if (alloc_area_pte(pte, address, end - address, gfp_mask, prot))
@@ -141,12 +144,11 @@ inline int vmalloc_area_pages (unsigned long address, unsigned long size,
 	int ret;
 
 	dir = pgd_offset_k(address);
-	flush_cache_all();
-	lock_kernel();
+	spin_lock(&init_mm.page_table_lock);
 	do {
 		pmd_t *pmd;
 		
-		pmd = pmd_alloc_kernel(dir, address);
+		pmd = pmd_alloc(&init_mm, dir, address);
 		ret = -ENOMEM;
 		if (!pmd)
 			break;
@@ -160,8 +162,7 @@ inline int vmalloc_area_pages (unsigned long address, unsigned long size,
 
 		ret = 0;
 	} while (address && (address < end));
-	unlock_kernel();
-	flush_tlb_all();
+	spin_unlock(&init_mm.page_table_lock);
 	return ret;
 }
 
@@ -177,19 +178,13 @@ struct vm_struct * get_vm_area(unsigned long size, unsigned long flags)
 	addr = VMALLOC_START;
 	write_lock(&vmlist_lock);
 	for (p = &vmlist; (tmp = *p) ; p = &tmp->next) {
-		if ((size + addr) < addr) {
-			write_unlock(&vmlist_lock);
-			kfree(area);
-			return NULL;
-		}
-		if (size + addr < (unsigned long) tmp->addr)
+		if ((size + addr) < addr)
+			goto out;
+		if (size + addr <= (unsigned long) tmp->addr)
 			break;
 		addr = tmp->size + (unsigned long) tmp->addr;
-		if (addr > VMALLOC_END-size) {
-			write_unlock(&vmlist_lock);
-			kfree(area);
-			return NULL;
-		}
+		if (addr > VMALLOC_END-size)
+			goto out;
 	}
 	area->flags = flags;
 	area->addr = (void *)addr;
@@ -198,6 +193,11 @@ struct vm_struct * get_vm_area(unsigned long size, unsigned long flags)
 	*p = area;
 	write_unlock(&vmlist_lock);
 	return area;
+
+out:
+	write_unlock(&vmlist_lock);
+	kfree(area);
+	return NULL;
 }
 
 void vfree(void * addr)

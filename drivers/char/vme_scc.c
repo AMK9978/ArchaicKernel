@@ -31,7 +31,7 @@
 #include <linux/delay.h>
 #include <linux/tqueue.h>
 #include <linux/version.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/miscdevice.h>
 #include <linux/console.h>
 #include <linux/init.h>
@@ -1047,7 +1047,7 @@ static void scc_ch_write (char ch)
 	*p = ch;
 }
 
-/* The console_lock must be held when we get here. */
+/* The console must be locked when we get here. */
 
 static void scc_console_write (struct console *co, const char *str, unsigned count)
 {

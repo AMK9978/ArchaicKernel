@@ -50,7 +50,7 @@ ifdef CONFIG_M686
 CFLAGS += -march=i686
 endif
 
-ifdef CONFIG_M686FXSR
+ifdef CONFIG_MPENTIUMIII
 CFLAGS += -march=i686
 endif
 
@@ -79,6 +79,10 @@ CFLAGS += -march=i586
 endif
 
 ifdef CONFIG_MWINCHIP3D
+CFLAGS += -march=i586
+endif
+
+ifdef CONFIG_MCYRIXIII
 CFLAGS += -march=i586
 endif
 

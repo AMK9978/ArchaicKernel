@@ -16,14 +16,14 @@ FONTMAPFILE = cp437.uni
 
 O_TARGET := char.o
 
-obj-y	 += tty_io.o n_tty.o tty_ioctl.o mem.o raw.o pty.o misc.o random.o
+obj-y	 += mem.o tty_io.o n_tty.o tty_ioctl.o raw.o pty.o misc.o random.o
 
 # All of the (potential) objects that export symbols.
 # This list comes from 'grep -l EXPORT_SYMBOL *.[hc]'.
 
 export-objs     :=	busmouse.o console.o keyboard.o sysrq.o \
 			misc.o pty.o random.o selection.o serial.o \
-			tty_io.o
+			sonypi.o tty_io.o tty_ioctl.o generic_serial.o
 
 mod-subdirs	:=	joystick ftape drm pcmcia
 
@@ -35,6 +35,19 @@ CONSOLE  =console.o
 SERIAL   =serial.o
 
 ifeq ($(ARCH),s390)
+  KEYMAP   =
+  KEYBD    =
+  CONSOLE  =
+  SERIAL   =
+endif
+
+ifeq ($(ARCH),mips)
+  ifneq ($(CONFIG_PC_KEYB),y)
+    KEYBD    =
+  endif
+endif
+
+ifeq ($(ARCH),s390x)
   KEYMAP   =
   KEYBD    =
   CONSOLE  =
@@ -68,11 +81,29 @@ ifeq ($(ARCH),sh)
   KEYBD    = scan_keyb.o hp600_keyb.o
   CONSOLE  = console.o
   endif
+  ifeq ($(CONFIG_SH_DMIDA),y)
+  # DMIDA does not connect the HD64465 PS/2 keyboard port
+  # but we allow for USB keyboards to be plugged in.
+  KEYMAP   = defkeymap.o
+  KEYBD    = # hd64465_keyb.o pc_keyb.o
+  CONSOLE  = console.o
+  endif
+  ifeq ($(CONFIG_SH_EC3104),y)
+  KEYMAP   = defkeymap.o
+  KEYBD    = ec3104_keyb.o
+  CONSOLE  = console.o
+  endif
+  ifeq ($(CONFIG_SH_DREAMCAST),y)
+  KEYMAP   = defkeymap.o
+  KEYBD    =
+  CONSOLE  = console.o
+  endif
 endif
 
 ifeq ($(CONFIG_DECSTATION),y)
+  KEYMAP   =
   KEYBD    =
-  SERIAL   =
+  SERIAL   = decserial.o
 endif
 
 ifeq ($(CONFIG_BAGET_MIPS),y)
@@ -80,13 +111,22 @@ ifeq ($(CONFIG_BAGET_MIPS),y)
   SERIAL   =
 endif
 
+ifeq ($(CONFIG_NINO),y)
+  SERIAL   =
+endif
+
 ifneq ($(CONFIG_SUN_SERIAL),)
   SERIAL   =
 endif
 
+ifeq ($(CONFIG_QTRONIX_KEYBOARD),y)
+  KEYBD    = qtronix.o
+  KEYMAP   = qtronixmap.o
+endif
 
 obj-$(CONFIG_VT) += vt.o vc_screen.o consolemap.o consolemap_deftbl.o $(CONSOLE) selection.o
 obj-$(CONFIG_SERIAL) += $(SERIAL)
+obj-$(CONFIG_SERIAL_ACPI) += acpi_serial.o
 obj-$(CONFIG_SERIAL_21285) += serial_21285.o
 obj-$(CONFIG_SERIAL_SA1100) += serial_sa1100.o
 obj-$(CONFIG_SERIAL_AMBA) += serial_amba.o
@@ -115,6 +155,7 @@ obj-$(CONFIG_SYNCLINK) += synclink.o
 obj-$(CONFIG_N_HDLC) += n_hdlc.o
 obj-$(CONFIG_SPECIALIX) += specialix.o
 obj-$(CONFIG_AMIGA_BUILTIN_SERIAL) += amiserial.o
+obj-$(CONFIG_A2232) += ser_a2232.o generic_serial.o
 obj-$(CONFIG_SX) += sx.o generic_serial.o
 obj-$(CONFIG_RIO) += rio/rio.o generic_serial.o
 obj-$(CONFIG_SH_SCI) += sh-sci.o generic_serial.o
@@ -122,6 +163,7 @@ obj-$(CONFIG_SERIAL167) += serial167.o
 obj-$(CONFIG_MVME147_SCC) += generic_serial.o vme_scc.o
 obj-$(CONFIG_MVME162_SCC) += generic_serial.o vme_scc.o
 obj-$(CONFIG_BVME6000_SCC) += generic_serial.o vme_scc.o
+obj-$(CONFIG_SERIAL_TX3912) += generic_serial.o serial_tx3912.o
 
 subdir-$(CONFIG_RIO) += rio
 subdir-$(CONFIG_INPUT) += joystick
@@ -138,6 +180,7 @@ obj-$(CONFIG_BUSMOUSE) += busmouse.o
 obj-$(CONFIG_DTLK) += dtlk.o
 obj-$(CONFIG_R3964) += n_r3964.o
 obj-$(CONFIG_APPLICOM) += applicom.o
+obj-$(CONFIG_SONYPI) += sonypi.o
 obj-$(CONFIG_MS_BUSMOUSE) += msbusmouse.o
 obj-$(CONFIG_82C710_MOUSE) += qpmouse.o
 obj-$(CONFIG_AMIGAMOUSE) += amigamouse.o
@@ -150,6 +193,7 @@ ifeq ($(CONFIG_PPC),)
   obj-$(CONFIG_NVRAM) += nvram.o
 endif
 obj-$(CONFIG_TOSHIBA) += toshiba.o
+obj-$(CONFIG_I8K) += i8k.o
 obj-$(CONFIG_DS1620) += ds1620.o
 obj-$(CONFIG_INTEL_RNG) += i810_rng.o
 
@@ -177,6 +221,8 @@ obj-$(CONFIG_NWFLASH) += nwflash.o
 
 obj-$(CONFIG_PCWATCHDOG) += pcwd.o
 obj-$(CONFIG_ACQUIRE_WDT) += acquirewdt.o
+obj-$(CONFIG_ADVANTECH_WDT) += advantechwdt.o
+obj-$(CONFIG_IB700_WDT) += ib700wdt.o
 obj-$(CONFIG_MIXCOMWD) += mixcomwd.o
 obj-$(CONFIG_60XX_WDT) += sbc60xxwdt.o
 obj-$(CONFIG_WDT) += wdt.o
@@ -184,8 +230,15 @@ obj-$(CONFIG_WDTPCI) += wdt_pci.o
 obj-$(CONFIG_21285_WATCHDOG) += wdt285.o
 obj-$(CONFIG_977_WATCHDOG) += wdt977.o
 obj-$(CONFIG_I810_TCO) += i810-tco.o
+obj-$(CONFIG_MACHZ_WDT) += machzwd.o
+obj-$(CONFIG_SH_WDT) += shwdt.o
+obj-$(CONFIG_EUROTECH_WDT) += eurotechwdt.o
 obj-$(CONFIG_SOFT_WATCHDOG) += softdog.o
 
+subdir-$(CONFIG_MWAVE) += mwave
+ifeq ($(CONFIG_MWAVE),y)
+  obj-y += mwave/mwave.o
+endif
 
 include $(TOPDIR)/Rules.make
 
@@ -199,5 +252,10 @@ consolemap_deftbl.c: $(FONTMAPFILE) conmakehash
 
 consolemap_deftbl.o: consolemap_deftbl.c $(TOPDIR)/include/linux/types.h
 
+.DELETE_ON_ERROR:
+
 defkeymap.c: defkeymap.map
-	loadkeys --mktable defkeymap.map > defkeymap.c
+	set -e ; loadkeys --mktable $< | sed -e 's/^static *//' > $@
+
+qtronixmap.c: qtronixmap.map
+	set -e ; loadkeys --mktable $< | sed -e 's/^static *//' > $@

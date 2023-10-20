@@ -43,15 +43,8 @@
 
 #define LAP_ADDR_HEADER 1  /* IrLAP Address Header */
 #define LAP_CTRL_HEADER 1  /* IrLAP Control Header */
-#define LAP_COMP_HEADER 1  /* IrLAP Compression Header */
 
-#ifdef CONFIG_IRDA_COMPRESSION
-#  define LAP_MAX_HEADER  (LAP_ADDR_HEADER + LAP_CTRL_HEADER + LAP_COMP_HEADER)
-#  define IRDA_COMPRESSED 1
-#  define IRDA_NORMAL     0
-#else
 #define LAP_MAX_HEADER (LAP_ADDR_HEADER + LAP_CTRL_HEADER)
-#endif
 
 #define BROADCAST  0xffffffff /* Broadcast device address */
 #define CBROADCAST 0xfe       /* Connection broadcast address */
@@ -68,32 +61,14 @@
 #define NS_UNEXPECTED   0
 #define NS_INVALID     -1
 
-#ifdef CONFIG_IRDA_COMPRESSION
-
-/*  
- *  Just some shortcuts (may give you strange compiler errors if you change 
- *  them :-)
- */
-#define irda_compress    (*self->compessor.cp->compress)
-#define irda_comp_free   (*self->compressor.cp->comp_free)
-#define irda_decompress  (*self->decompressor.cp->decompress)
-#define irda_decomp_free (*self->decompressor.cp->decomp_free)
-#define irda_incomp      (*self->decompressor.cp->incomp)
-
-struct irda_compressor {
-	irda_queue_t q;
-
-	struct compressor *cp;
-	void *state; /* Not used by IrDA */
-};
-#endif
-
 /* Main structure of IrLAP */
 struct irlap_cb {
 	irda_queue_t q;     /* Must be first */
 	magic_t magic;
 
+	/* Device we are attached to */
 	struct net_device  *netdev;
+	char		hw_name[2*IFNAMSIZ + 1];
 
 	/* Connection state */
 	volatile IRLAP_STATE state;       /* Current state */
@@ -168,7 +143,7 @@ struct irlap_cb {
 	hashbin_t   *discovery_log;
  	discovery_t *discovery_cmd;
 
-	__u32 speed; 
+	__u32 speed;		/* Link speed */
 
 	struct qos_info  qos_tx;   /* QoS requested by peer */
 	struct qos_info  qos_rx;   /* QoS requested by self */
@@ -179,11 +154,7 @@ struct irlap_cb {
 	int    mtt_required;  /* Minumum turnaround time required */
 	int    xbofs_delay;   /* Nr of XBOF's used to MTT */
 	int    bofs_count;    /* Negotiated extra BOFs */
-
-#ifdef CONFIG_IRDA_COMPRESSION
-	struct irda_compressor compressor;
-        struct irda_compressor decompressor;
-#endif /* CONFIG_IRDA_COMPRESSION */
+	int    next_bofs;     /* Negotiated extra BOFs after next frame */
 };
 
 extern hashbin_t *irlap;
@@ -194,7 +165,8 @@ extern hashbin_t *irlap;
 int irlap_init(void);
 void irlap_cleanup(void);
 
-struct irlap_cb *irlap_open(struct net_device *dev, struct qos_info *qos);
+struct irlap_cb *irlap_open(struct net_device *dev, struct qos_info *qos,
+			    char *	hw_name);
 void irlap_close(struct irlap_cb *self);
 
 void irlap_connect_request(struct irlap_cb *self, __u32 daddr, 
@@ -237,7 +209,7 @@ void irlap_wait_min_turn_around(struct irlap_cb *, struct qos_info *);
 
 void irlap_init_qos_capabilities(struct irlap_cb *, struct qos_info *);
 void irlap_apply_default_connection_parameters(struct irlap_cb *self);
-void irlap_apply_connection_parameters(struct irlap_cb *self);
+void irlap_apply_connection_parameters(struct irlap_cb *self, int now);
 void irlap_set_local_busy(struct irlap_cb *self, int status);
 
 #define IRLAP_GET_HEADER_SIZE(self) 2 /* Will be different when we get VFIR */

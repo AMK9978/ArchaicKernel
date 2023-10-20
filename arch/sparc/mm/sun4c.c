@@ -1,10 +1,10 @@
-/* $Id: sun4c.c,v 1.202 2000/12/01 03:17:31 anton Exp $
+/* $Id: sun4c.c,v 1.210 2001/11/13 03:27:47 davem Exp $
  * sun4c.c: Doing in software what should be done in hardware.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
  * Copyright (C) 1996 Eddie C. Dost (ecd@skynet.be)
  * Copyright (C) 1996 Andrew Tridgell (Andrew.Tridgell@anu.edu.au)
- * Copyright (C) 1997-2000 Anton Blanchard (anton@linuxcare.com)
+ * Copyright (C) 1997-2000 Anton Blanchard (anton@samba.org)
  * Copyright (C) 1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
  */
 
@@ -15,6 +15,9 @@
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/bootmem.h>
+#include <linux/highmem.h>
+#include <linux/fs.h>
+#include <linux/seq_file.h>
 
 #include <asm/scatterlist.h>
 #include <asm/page.h>
@@ -31,6 +34,7 @@
 #include <asm/openprom.h>
 #include <asm/mmu_context.h>
 #include <asm/sun4paddr.h>
+#include <asm/highmem.h>
 
 /* Because of our dynamic kernel TLB miss strategy, and how
  * our DVMA mapping allocation works, you _MUST_:
@@ -133,25 +137,26 @@ static void sun4c_flush_context_sw(void)
 	unsigned long nbytes = SUN4C_VAC_SIZE;
 	unsigned long lsize = sun4c_vacinfo.linesize;
 
-	__asm__ __volatile__("
-	add	%2, %2, %%g1
-	add	%2, %%g1, %%g2
-	add	%2, %%g2, %%g3
-	add	%2, %%g3, %%g4
-	add	%2, %%g4, %%g5
-	add	%2, %%g5, %%o4
-	add	%2, %%o4, %%o5
-1:	subcc	%0, %%o5, %0
-	sta	%%g0, [%0] %3
-	sta	%%g0, [%0 + %2] %3
-	sta	%%g0, [%0 + %%g1] %3
-	sta	%%g0, [%0 + %%g2] %3
-	sta	%%g0, [%0 + %%g3] %3
-	sta	%%g0, [%0 + %%g4] %3
-	sta	%%g0, [%0 + %%g5] %3
-	bg	1b
-	 sta	%%g0, [%1 + %%o4] %3
-"	: "=&r" (nbytes)
+	__asm__ __volatile__(
+	"add	%2, %2, %%g1\n\t"
+	"add	%2, %%g1, %%g2\n\t"
+	"add	%2, %%g2, %%g3\n\t"
+	"add	%2, %%g3, %%g4\n\t"
+	"add	%2, %%g4, %%g5\n\t"
+	"add	%2, %%g5, %%o4\n\t"
+	"add	%2, %%o4, %%o5\n"
+	"1:\n\t"
+	"subcc	%0, %%o5, %0\n\t"
+	"sta	%%g0, [%0] %3\n\t"
+	"sta	%%g0, [%0 + %2] %3\n\t"
+	"sta	%%g0, [%0 + %%g1] %3\n\t"
+	"sta	%%g0, [%0 + %%g2] %3\n\t"
+	"sta	%%g0, [%0 + %%g3] %3\n\t"
+	"sta	%%g0, [%0 + %%g4] %3\n\t"
+	"sta	%%g0, [%0 + %%g5] %3\n\t"
+	"bg	1b\n\t"
+	" sta	%%g0, [%1 + %%o4] %3\n"
+	: "=&r" (nbytes)
 	: "0" (nbytes), "r" (lsize), "i" (ASI_FLUSHCTX)
 	: "g1", "g2", "g3", "g4", "g5", "o4", "o5", "cc");
 }
@@ -163,26 +168,27 @@ static void sun4c_flush_segment_sw(unsigned long addr)
 		unsigned long nbytes = SUN4C_VAC_SIZE;
 		unsigned long lsize = sun4c_vacinfo.linesize;
 
-		__asm__ __volatile__("
-		add	%2, %2, %%g1
-		add	%2, %%g1, %%g2
-		add	%2, %%g2, %%g3
-		add	%2, %%g3, %%g4
-		add	%2, %%g4, %%g5
-		add	%2, %%g5, %%o4
-		add	%2, %%o4, %%o5
-1:		subcc	%1, %%o5, %1
-		sta	%%g0, [%0] %6
-		sta	%%g0, [%0 + %2] %6
-		sta	%%g0, [%0 + %%g1] %6
-		sta	%%g0, [%0 + %%g2] %6
-		sta	%%g0, [%0 + %%g3] %6
-		sta	%%g0, [%0 + %%g4] %6
-		sta	%%g0, [%0 + %%g5] %6
-		sta	%%g0, [%0 + %%o4] %6
-		bg	1b
-		 add	%0, %%o5, %0
-"		: "=&r" (addr), "=&r" (nbytes), "=&r" (lsize)
+		__asm__ __volatile__(
+		"add	%2, %2, %%g1\n\t"
+		"add	%2, %%g1, %%g2\n\t"
+		"add	%2, %%g2, %%g3\n\t"
+		"add	%2, %%g3, %%g4\n\t"
+		"add	%2, %%g4, %%g5\n\t"
+		"add	%2, %%g5, %%o4\n\t"
+		"add	%2, %%o4, %%o5\n"
+		"1:\n\t"
+		"subcc	%1, %%o5, %1\n\t"
+		"sta	%%g0, [%0] %6\n\t"
+		"sta	%%g0, [%0 + %2] %6\n\t"
+		"sta	%%g0, [%0 + %%g1] %6\n\t"
+		"sta	%%g0, [%0 + %%g2] %6\n\t"
+		"sta	%%g0, [%0 + %%g3] %6\n\t"
+		"sta	%%g0, [%0 + %%g4] %6\n\t"
+		"sta	%%g0, [%0 + %%g5] %6\n\t"
+		"sta	%%g0, [%0 + %%o4] %6\n\t"
+		"bg	1b\n\t"
+		" add	%0, %%o5, %0\n"
+		: "=&r" (addr), "=&r" (nbytes), "=&r" (lsize)
 		: "0" (addr), "1" (nbytes), "2" (lsize),
 		  "i" (ASI_FLUSHSEG)
 		: "g1", "g2", "g3", "g4", "g5", "o4", "o5", "cc");
@@ -240,26 +246,27 @@ static void sun4c_flush_page_sw(unsigned long addr)
 		unsigned long left = PAGE_SIZE;
 		unsigned long lsize = sun4c_vacinfo.linesize;
 
-		__asm__ __volatile__("
-		add	%2, %2, %%g1
-		add	%2, %%g1, %%g2
-		add	%2, %%g2, %%g3
-		add	%2, %%g3, %%g4
-		add	%2, %%g4, %%g5
-		add	%2, %%g5, %%o4
-		add	%2, %%o4, %%o5
-1:		subcc	%1, %%o5, %1
-		sta	%%g0, [%0] %6
-		sta	%%g0, [%0 + %2] %6
-		sta	%%g0, [%0 + %%g1] %6
-		sta	%%g0, [%0 + %%g2] %6
-		sta	%%g0, [%0 + %%g3] %6
-		sta	%%g0, [%0 + %%g4] %6
-		sta	%%g0, [%0 + %%g5] %6
-		sta	%%g0, [%0 + %%o4] %6
-		bg	1b
-		 add	%0, %%o5, %0
-"		: "=&r" (addr), "=&r" (left), "=&r" (lsize)
+		__asm__ __volatile__(
+		"add	%2, %2, %%g1\n\t"
+		"add	%2, %%g1, %%g2\n\t"
+		"add	%2, %%g2, %%g3\n\t"
+		"add	%2, %%g3, %%g4\n\t"
+		"add	%2, %%g4, %%g5\n\t"
+		"add	%2, %%g5, %%o4\n\t"
+		"add	%2, %%o4, %%o5\n"
+		"1:\n\t"
+		"subcc	%1, %%o5, %1\n\t"
+		"sta	%%g0, [%0] %6\n\t"
+		"sta	%%g0, [%0 + %2] %6\n\t"
+		"sta	%%g0, [%0 + %%g1] %6\n\t"
+		"sta	%%g0, [%0 + %%g2] %6\n\t"
+		"sta	%%g0, [%0 + %%g3] %6\n\t"
+		"sta	%%g0, [%0 + %%g4] %6\n\t"
+		"sta	%%g0, [%0 + %%g5] %6\n\t"
+		"sta	%%g0, [%0 + %%o4] %6\n\t"
+		"bg	1b\n\t"
+		" add	%0, %%o5, %0\n"
+		: "=&r" (addr), "=&r" (left), "=&r" (lsize)
 		: "0" (addr), "1" (left), "2" (lsize),
 		  "i" (ASI_FLUSHPG)
 		: "g1", "g2", "g3", "g4", "g5", "o4", "o5", "cc");
@@ -353,7 +360,7 @@ void __init sun4c_probe_vac(void)
 			break;
 
 		default:
-			prom_printf("Cannot initialize VAC - wierd sun4 model idprom->id_machtype = %d", idprom->id_machtype);
+			prom_printf("Cannot initialize VAC - weird sun4 model idprom->id_machtype = %d", idprom->id_machtype);
 			prom_halt();
 		};
 	} else {
@@ -1400,46 +1407,46 @@ static void sun4c_flush_cache_all(void)
 
 	if (sun4c_vacinfo.linesize == 32) {
 		while (begin < end) {
-			__asm__ __volatile__("
-			ld	[%0 + 0x00], %%g0
-			ld	[%0 + 0x20], %%g0
-			ld	[%0 + 0x40], %%g0
-			ld	[%0 + 0x60], %%g0
-			ld	[%0 + 0x80], %%g0
-			ld	[%0 + 0xa0], %%g0
-			ld	[%0 + 0xc0], %%g0
-			ld	[%0 + 0xe0], %%g0
-			ld	[%0 + 0x100], %%g0
-			ld	[%0 + 0x120], %%g0
-			ld	[%0 + 0x140], %%g0
-			ld	[%0 + 0x160], %%g0
-			ld	[%0 + 0x180], %%g0
-			ld	[%0 + 0x1a0], %%g0
-			ld	[%0 + 0x1c0], %%g0
-			ld	[%0 + 0x1e0], %%g0
-			" : : "r" (begin));
+			__asm__ __volatile__(
+			"ld	[%0 + 0x00], %%g0\n\t"
+			"ld	[%0 + 0x20], %%g0\n\t"
+			"ld	[%0 + 0x40], %%g0\n\t"
+			"ld	[%0 + 0x60], %%g0\n\t"
+			"ld	[%0 + 0x80], %%g0\n\t"
+			"ld	[%0 + 0xa0], %%g0\n\t"
+			"ld	[%0 + 0xc0], %%g0\n\t"
+			"ld	[%0 + 0xe0], %%g0\n\t"
+			"ld	[%0 + 0x100], %%g0\n\t"
+			"ld	[%0 + 0x120], %%g0\n\t"
+			"ld	[%0 + 0x140], %%g0\n\t"
+			"ld	[%0 + 0x160], %%g0\n\t"
+			"ld	[%0 + 0x180], %%g0\n\t"
+			"ld	[%0 + 0x1a0], %%g0\n\t"
+			"ld	[%0 + 0x1c0], %%g0\n\t"
+			"ld	[%0 + 0x1e0], %%g0\n"
+			: : "r" (begin));
 			begin += 512;
 		}
 	} else {
 		while (begin < end) {
-			__asm__ __volatile__("
-			ld	[%0 + 0x00], %%g0
-			ld	[%0 + 0x10], %%g0
-			ld	[%0 + 0x20], %%g0
-			ld	[%0 + 0x30], %%g0
-			ld	[%0 + 0x40], %%g0
-			ld	[%0 + 0x50], %%g0
-			ld	[%0 + 0x60], %%g0
-			ld	[%0 + 0x70], %%g0
-			ld	[%0 + 0x80], %%g0
-			ld	[%0 + 0x90], %%g0
-			ld	[%0 + 0xa0], %%g0
-			ld	[%0 + 0xb0], %%g0
-			ld	[%0 + 0xc0], %%g0
-			ld	[%0 + 0xd0], %%g0
-			ld	[%0 + 0xe0], %%g0
-			ld	[%0 + 0xf0], %%g0
-			" : : "r" (begin));
+			__asm__ __volatile__(
+			"ld	[%0 + 0x00], %%g0\n\t"
+			"ld	[%0 + 0x10], %%g0\n\t"
+			"ld	[%0 + 0x20], %%g0\n\t"
+			"ld	[%0 + 0x30], %%g0\n\t"
+			"ld	[%0 + 0x40], %%g0\n\t"
+			"ld	[%0 + 0x50], %%g0\n\t"
+			"ld	[%0 + 0x60], %%g0\n\t"
+			"ld	[%0 + 0x70], %%g0\n\t"
+			"ld	[%0 + 0x80], %%g0\n\t"
+			"ld	[%0 + 0x90], %%g0\n\t"
+			"ld	[%0 + 0xa0], %%g0\n\t"
+			"ld	[%0 + 0xb0], %%g0\n\t"
+			"ld	[%0 + 0xc0], %%g0\n\t"
+			"ld	[%0 + 0xd0], %%g0\n\t"
+			"ld	[%0 + 0xe0], %%g0\n\t"
+			"ld	[%0 + 0xf0], %%g0\n"
+			: : "r" (begin));
 			begin += 256;
 		}
 	}
@@ -2038,40 +2045,37 @@ static void sun4c_destroy_context_sw(struct mm_struct *mm)
 	}
 }
 
-static int sun4c_mmu_info(char *buf)
+static void sun4c_mmu_info(struct seq_file *m)
 {
 	int used_user_entries, i;
-	int len;
 
 	used_user_entries = 0;
 	for (i = 0; i < num_contexts; i++)
 		used_user_entries += sun4c_context_ring[i].num_entries;
 
-	len = sprintf(buf, 
-		"vacsize\t\t: %d bytes\n"
-		"vachwflush\t: %s\n"
-		"vaclinesize\t: %d bytes\n"
-		"mmuctxs\t\t: %d\n"
-		"mmupsegs\t: %d\n"
-		"kernelpsegs\t: %d\n"
-		"kfreepsegs\t: %d\n"
-		"usedpsegs\t: %d\n"
-		"ufreepsegs\t: %d\n"
-		"user_taken\t: %d\n"
-		"max_taken\t: %d\n",
-		sun4c_vacinfo.num_bytes,
-		(sun4c_vacinfo.do_hwflushes ? "yes" : "no"),
-		sun4c_vacinfo.linesize,
-		num_contexts,
-		(invalid_segment + 1),
-		sun4c_kernel_ring.num_entries,
-		sun4c_kfree_ring.num_entries,
-		used_user_entries,
-		sun4c_ufree_ring.num_entries,
-		sun4c_user_taken_entries,
-		max_user_taken_entries);
-
-	return len;
+	seq_printf(m, 
+		   "vacsize\t\t: %d bytes\n"
+		   "vachwflush\t: %s\n"
+		   "vaclinesize\t: %d bytes\n"
+		   "mmuctxs\t\t: %d\n"
+		   "mmupsegs\t: %d\n"
+		   "kernelpsegs\t: %d\n"
+		   "kfreepsegs\t: %d\n"
+		   "usedpsegs\t: %d\n"
+		   "ufreepsegs\t: %d\n"
+		   "user_taken\t: %d\n"
+		   "max_taken\t: %d\n",
+		   sun4c_vacinfo.num_bytes,
+		   (sun4c_vacinfo.do_hwflushes ? "yes" : "no"),
+		   sun4c_vacinfo.linesize,
+		   num_contexts,
+		   (invalid_segment + 1),
+		   sun4c_kernel_ring.num_entries,
+		   sun4c_kfree_ring.num_entries,
+		   used_user_entries,
+		   sun4c_ufree_ring.num_entries,
+		   sun4c_user_taken_entries,
+		   max_user_taken_entries);
 }
 
 /* Nothing below here should touch the mmu hardware nor the mmu_entry
@@ -2095,7 +2099,6 @@ static int sun4c_pte_present(pte_t pte)
 }
 static void sun4c_pte_clear(pte_t *ptep)	{ *ptep = __pte(0); }
 
-static int sun4c_pmd_none(pmd_t pmd)		{ return !pmd_val(pmd); }
 static int sun4c_pmd_bad(pmd_t pmd)
 {
 	return (((pmd_val(pmd) & ~PAGE_MASK) != PGD_TABLE) ||
@@ -2176,7 +2179,7 @@ static unsigned long sun4c_pgd_page(pgd_t pgd)
 }
 
 /* to find an entry in a page-table-directory */
-extern inline pgd_t *sun4c_pgd_offset(struct mm_struct * mm, unsigned long address)
+static inline pgd_t *sun4c_pgd_offset(struct mm_struct * mm, unsigned long address)
 {
 	return mm->pgd + (address >> SUN4C_PGDIR_SHIFT);
 }
@@ -2193,41 +2196,6 @@ pte_t *sun4c_pte_offset(pmd_t * dir, unsigned long address)
 	return (pte_t *) sun4c_pmd_page(*dir) +	((address >> PAGE_SHIFT) & (SUN4C_PTRS_PER_PTE - 1));
 }
 
-/* Please take special note on the foo_kernel() routines below, our
- * fast in window fault handler wants to get at the pte's for vmalloc
- * area with traps off, therefore they _MUST_ be locked down to prevent
- * a watchdog from happening.  It only takes 4 pages of pte's to lock
- * down the maximum vmalloc space possible on sun4c so we statically
- * allocate these page table pieces in the kernel image.  Therefore
- * we should never have to really allocate or free any kernel page
- * table information.
- */
-
-/* Allocate and free page tables. The xxx_kernel() versions are
- * used to allocate a kernel page table - this turns on ASN bits
- * if any, and marks the page tables reserved.
- */
-static void sun4c_pte_free_kernel(pte_t *pte)
-{
-	/* This should never get called. */
-	panic("sun4c_pte_free_kernel called, can't happen...");
-}
-
-static pte_t *sun4c_pte_alloc_kernel(pmd_t *pmd, unsigned long address)
-{
-	if (address >= SUN4C_LOCK_VADDR)
-		return NULL;
-	address = (address >> PAGE_SHIFT) & (SUN4C_PTRS_PER_PTE - 1);
-	if (sun4c_pmd_none(*pmd))
-		panic("sun4c_pmd_none for kernel pmd, can't happen...");
-	if (sun4c_pmd_bad(*pmd)) {
-		printk("Bad pmd in pte_alloc_kernel: %08lx\n", pmd_val(*pmd));
-		*pmd = __pmd(PGD_TABLE | (unsigned long) BAD_PAGETABLE);
-		return NULL;
-	}
-	return (pte_t *) sun4c_pmd_page(*pmd) + address;
-}
-
 static void sun4c_free_pte_slow(pte_t *pte)
 {
 	free_page((unsigned long)pte);
@@ -2238,20 +2206,7 @@ static void sun4c_free_pgd_slow(pgd_t *pgd)
 	free_page((unsigned long)pgd);
 }
 
-/*
- * allocating and freeing a pmd is trivial: the 1-entry pmd is
- * inside the pgd, so has no extra memory associated with it.
- */
-static void sun4c_pmd_free_kernel(pmd_t *pmd)
-{
-}
-
-static pmd_t *sun4c_pmd_alloc_kernel(pgd_t *pgd, unsigned long address)
-{
-	return (pmd_t *) pgd;
-}
-
-extern __inline__ pgd_t *sun4c_get_pgd_fast(void)
+static pgd_t *sun4c_get_pgd_fast(void)
 {
 	unsigned long *ret;
 
@@ -2271,14 +2226,22 @@ extern __inline__ pgd_t *sun4c_get_pgd_fast(void)
 	return (pgd_t *)ret;
 }
 
-extern __inline__ void sun4c_free_pgd_fast(pgd_t *pgd)
+static void sun4c_free_pgd_fast(pgd_t *pgd)
 {
 	*(unsigned long *)pgd = (unsigned long) pgd_quicklist;
 	pgd_quicklist = (unsigned long *) pgd;
 	pgtable_cache_size++;
 }
 
-extern __inline__ pte_t *sun4c_get_pte_fast(void)
+static pte_t *sun4c_pte_alloc_one(struct mm_struct *mm, unsigned long address)
+{
+	pte_t *pte = (pte_t *)__get_free_page(GFP_KERNEL);
+	if (pte)
+		memset(pte, 0, PAGE_SIZE);
+	return pte;
+}
+
+pte_t *sun4c_pte_alloc_one_fast(struct mm_struct *mm, unsigned long address)
 {
 	unsigned long *ret;
 
@@ -2290,68 +2253,25 @@ extern __inline__ pte_t *sun4c_get_pte_fast(void)
 	return (pte_t *)ret;
 }
 
-extern __inline__ void sun4c_free_pte_fast(pte_t *pte)
+static __inline__ void sun4c_free_pte_fast(pte_t *pte)
 {
 	*(unsigned long *)pte = (unsigned long) pte_quicklist;
 	pte_quicklist = (unsigned long *) pte;
 	pgtable_cache_size++;
 }
 
-static void sun4c_pte_free(pte_t *pte)
-{
-	sun4c_free_pte_fast(pte);
-}
-
-static pte_t *sun4c_pte_alloc(pmd_t * pmd, unsigned long address)
-{
-	address = (address >> PAGE_SHIFT) & (SUN4C_PTRS_PER_PTE - 1);
-	if (sun4c_pmd_none(*pmd)) {
-		pte_t *page = (pte_t *) sun4c_get_pte_fast();
-		
-		if (page) {
-			*pmd = __pmd(PGD_TABLE | (unsigned long) page);
-			return page + address;
-		}
-		page = (pte_t *) get_free_page(GFP_KERNEL);
-		if (sun4c_pmd_none(*pmd)) {
-			if (page) {
-				*pmd = __pmd(PGD_TABLE | (unsigned long) page);
-				return page + address;
-			}
-			*pmd = __pmd(PGD_TABLE | (unsigned long) BAD_PAGETABLE);
-			return NULL;
-		}
-		free_page((unsigned long) page);
-	}
-	if (sun4c_pmd_bad(*pmd)) {
-		printk("Bad pmd in pte_alloc: %08lx\n", pmd_val(*pmd));
-		*pmd = __pmd(PGD_TABLE | (unsigned long) BAD_PAGETABLE);
-		return NULL;
-	}
-	return (pte_t *) sun4c_pmd_page(*pmd) + address;
-}
-
 /*
  * allocating and freeing a pmd is trivial: the 1-entry pmd is
  * inside the pgd, so has no extra memory associated with it.
  */
-static void sun4c_pmd_free(pmd_t * pmd)
+static pmd_t *sun4c_pmd_alloc_one_fast(struct mm_struct *mm, unsigned long address)
 {
+	BUG();
+	return NULL;
 }
 
-static pmd_t *sun4c_pmd_alloc(pgd_t * pgd, unsigned long address)
+static void sun4c_free_pmd_fast(pmd_t * pmd)
 {
-	return (pmd_t *) pgd;
-}
-
-static void sun4c_pgd_free(pgd_t *pgd)
-{
-	sun4c_free_pgd_fast(pgd);
-}
-
-static pgd_t *sun4c_pgd_alloc(void)
-{
-	return sun4c_get_pgd_fast();
 }
 
 static int sun4c_check_pgt_cache(int low, int high)
@@ -2361,13 +2281,8 @@ static int sun4c_check_pgt_cache(int low, int high)
 		do {
 			if (pgd_quicklist)
 				sun4c_free_pgd_slow(sun4c_get_pgd_fast()), freed++;
-	/* Only two level page tables at the moment, sun4 3 level mmu is not supported - Anton */
-#if 0
-			if (pmd_quicklist)
-				sun4c_free_pmd_slow(sun4c_get_pmd_fast()), freed++;
-#endif
 			if (pte_quicklist)
-				sun4c_free_pte_slow(sun4c_get_pte_fast()), freed++;
+				sun4c_free_pte_slow(sun4c_pte_alloc_one_fast(NULL, 0)), freed++;
 		} while (pgtable_cache_size > low);
 	}
 	return freed;
@@ -2432,7 +2347,7 @@ void sun4c_update_mmu_cache(struct vm_area_struct *vma, unsigned long address, p
 
 extern void sparc_context_init(int);
 extern unsigned long end;
-extern void bootmem_init(void);
+extern unsigned long bootmem_init(unsigned long *pages_avail);
 extern unsigned long last_valid_pfn;
 extern void sun_serial_setup(void);
 
@@ -2441,13 +2356,14 @@ void __init sun4c_paging_init(void)
 	int i, cnt;
 	unsigned long kernel_end, vaddr;
 	extern struct resource sparc_iomap;
-	unsigned long end_pfn;
+	unsigned long end_pfn, pages_avail;
 
 	kernel_end = (unsigned long) &end;
 	kernel_end += (SUN4C_REAL_PGDIR_SIZE * 4);
 	kernel_end = SUN4C_REAL_PGDIR_ALIGN(kernel_end);
 
-	bootmem_init();
+	pages_avail = 0;
+	last_valid_pfn = bootmem_init(&pages_avail);
 	end_pfn = last_valid_pfn;
 
 	/* This does not logically belong here, but we need to
@@ -2488,10 +2404,25 @@ void __init sun4c_paging_init(void)
 	sparc_context_init(num_contexts);
 
 	{
-		unsigned long zones_size[MAX_NR_ZONES] = { 0, 0, 0};
+		unsigned long zones_size[MAX_NR_ZONES];
+		unsigned long zholes_size[MAX_NR_ZONES];
+		unsigned long npages;
+		int znum;
 
-		zones_size[ZONE_DMA] = end_pfn;
-		free_area_init(zones_size);
+		for (znum = 0; znum < MAX_NR_ZONES; znum++)
+			zones_size[znum] = zholes_size[znum] = 0;
+
+		npages = max_low_pfn - (phys_base >> PAGE_SHIFT);
+
+		zones_size[ZONE_DMA] = npages;
+		zholes_size[ZONE_DMA] = npages - pages_avail;
+
+		npages = highend_pfn - max_low_pfn;
+		zones_size[ZONE_HIGHMEM] = npages;
+		zholes_size[ZONE_HIGHMEM] = npages - calc_highpages();
+
+		free_area_init_node(0, NULL, NULL, zones_size,
+				    phys_base, zholes_size);
 	}
 
 	cnt = 0;
@@ -2597,16 +2528,13 @@ void __init ld_mmu_sun4c(void)
 	BTFIXUPSET_INT(pte_modify_mask, _SUN4C_PAGE_CHG_MASK);
 	BTFIXUPSET_CALL(pmd_offset, sun4c_pmd_offset, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(pte_offset, sun4c_pte_offset, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(pte_free_kernel, sun4c_pte_free_kernel, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(pmd_free_kernel, sun4c_pmd_free_kernel, BTFIXUPCALL_NOP);
-	BTFIXUPSET_CALL(pte_alloc_kernel, sun4c_pte_alloc_kernel, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(pmd_alloc_kernel, sun4c_pmd_alloc_kernel, BTFIXUPCALL_RETO0);
-	BTFIXUPSET_CALL(pte_free, sun4c_pte_free, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(pte_alloc, sun4c_pte_alloc, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(pmd_free, sun4c_pmd_free, BTFIXUPCALL_NOP);
-	BTFIXUPSET_CALL(pmd_alloc, sun4c_pmd_alloc, BTFIXUPCALL_RETO0);
-	BTFIXUPSET_CALL(pgd_free, sun4c_pgd_free, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(pgd_alloc, sun4c_pgd_alloc, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(free_pte_fast, sun4c_free_pte_fast, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(pte_alloc_one, sun4c_pte_alloc_one, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(pte_alloc_one_fast, sun4c_pte_alloc_one_fast, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(free_pmd_fast, sun4c_free_pmd_fast, BTFIXUPCALL_NOP);
+	BTFIXUPSET_CALL(pmd_alloc_one_fast, sun4c_pmd_alloc_one_fast, BTFIXUPCALL_RETO0);
+	BTFIXUPSET_CALL(free_pgd_fast, sun4c_free_pgd_fast, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(get_pgd_fast, sun4c_get_pgd_fast, BTFIXUPCALL_NORM);
 
 	BTFIXUPSET_HALF(pte_writei, _SUN4C_PAGE_WRITE);
 	BTFIXUPSET_HALF(pte_dirtyi, _SUN4C_PAGE_MODIFIED);

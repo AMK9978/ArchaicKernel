@@ -8,7 +8,7 @@
 	Director, National Security Agency.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
 	    TODO:
 
@@ -44,7 +44,7 @@ static int version_printed;
 #include <linux/etherdevice.h>
 #include "8390.h"
 
-int ns8390_probe1(struct net_device *dev, int word16, char *name, int id,
+static int ns8390_probe1(struct net_device *dev, int word16, char *name, int id,
 				  int prom, struct nubus_dev *ndev);
 
 static int ns8390_open(struct net_device *dev);
@@ -144,7 +144,7 @@ enum mac8390_type {
 	NS8390_CABLETRON
 };
 
-int __init ns8390_ident(struct nubus_dev* ndev)
+static int __init ns8390_ident(struct nubus_dev* ndev)
 {
 	/* This really needs to be tested and tested hard.  */
 		
@@ -194,7 +194,7 @@ int __init ns8390_ident(struct nubus_dev* ndev)
  *	Memory probe for 8390 cards
  */
  
-int __init apple_8390_mem_probe(volatile unsigned short *p)
+static int __init apple_8390_mem_probe(volatile unsigned short *p)
 {
 	int i, j;
 	/*
@@ -250,12 +250,12 @@ int __init apple_8390_mem_probe(volatile unsigned short *p)
 
 int __init mac8390_probe(struct net_device *dev)
 {
-	static int slots = 0;
+	static int slots;
 	volatile unsigned short *i;
 	volatile unsigned char *p;
 	int plen;
 	int id;
-	static struct nubus_dev* ndev = NULL;
+	static struct nubus_dev* ndev;
 
 	/* Find the first card that hasn't already been seen */
 	while ((ndev = nubus_find_type(NUBUS_CAT_NETWORK,
@@ -275,6 +275,9 @@ int __init mac8390_probe(struct net_device *dev)
 		return -ENODEV;
 
 	dev = init_etherdev(dev, 0);
+	if (!dev)
+		return -ENOMEM;
+	SET_MODULE_OWNER(dev);
 
 	if (!version_printed) {
 		printk(KERN_INFO "%s", version);
@@ -445,7 +448,7 @@ int __init mac8390_probe(struct net_device *dev)
 	}
 
 	/* We should hopefully not get here */
-	printk(KERN_ERR "Probe unsucessful.\n");
+	printk(KERN_ERR "Probe unsuccessful.\n");
 	return -ENODEV;
 
  membad:
@@ -454,8 +457,7 @@ int __init mac8390_probe(struct net_device *dev)
 	return -ENODEV;
 }
 
-int __init mac8390_ethernet_addr(struct nubus_dev* ndev, 
-				 unsigned char addr[6])
+static int __init mac8390_ethernet_addr(struct nubus_dev* ndev, unsigned char addr[6])
 {
 	struct nubus_dir dir;
 	struct nubus_dirent ent;
@@ -470,8 +472,8 @@ int __init mac8390_ethernet_addr(struct nubus_dev* ndev,
 	return 0;
 }
 
-int __init ns8390_probe1(struct net_device *dev, int word16, char *model_name,
-			 int type, int promoff, struct nubus_dev *ndev)
+static int __init ns8390_probe1(struct net_device *dev, int word16, char *model_name,
+			 	int type, int promoff, struct nubus_dev *ndev)
 {
 	static u32 fwrd4_offsets[16]={
 		0,      4,      8,      12,
@@ -631,7 +633,8 @@ int __init ns8390_probe1(struct net_device *dev, int word16, char *model_name,
 
 static int ns8390_open(struct net_device *dev)
 {
-	MOD_INC_USE_COUNT;
+	int ret;
+
 	ei_open(dev);
 
 	/* At least on my card (a Focus Enhancements PDS card) I start */
@@ -640,11 +643,10 @@ static int ns8390_open(struct net_device *dev)
 	/*                             - funaho@jurai.org (1999-05-17) */
 
 	/* Non-slow interrupt, works around issues with the SONIC driver */
-	if (request_irq(dev->irq, ei_interrupt, 0, "8390 Ethernet", dev)) 
-	{
+	ret = request_irq(dev->irq, ei_interrupt, 0, dev->name, dev); 
+	if (ret) {
 		printk ("%s: unable to get IRQ %d.\n", dev->name, dev->irq);
-		MOD_DEC_USE_COUNT;
-		return -EAGAIN;
+		return ret;
 	}
 	return 0;
 }
@@ -655,7 +657,6 @@ static void ns8390_no_reset(struct net_device *dev)
 		printk("Need to reset the NS8390 t=%lu...", jiffies);
 	ei_status.txing = 0;
 	if (ei_debug > 1) printk("reset not supported\n");
-	return;
 }
 
 static int ns8390_close_card(struct net_device *dev)
@@ -664,7 +665,6 @@ static int ns8390_close_card(struct net_device *dev)
 		printk("%s: Shutting down ethercard.\n", dev->name);
 	free_irq(dev->irq, dev);
 	ei_close(dev);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 

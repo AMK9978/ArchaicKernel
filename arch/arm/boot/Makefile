@@ -55,8 +55,7 @@ INITRD_VIRT	 = 0xc0800000
 endif
 
 ifeq ($(CONFIG_ARCH_NEXUSPCI),y)
-ZTEXTADDR	 = 0x40200000
-ZRELADDR	 = 0x40008000
+ZTEXTADDR	 = 0x40008000
 endif
 
 ifeq ($(CONFIG_ARCH_L7200),y)
@@ -70,12 +69,20 @@ ZRELADDR	 = 0xf0008000
 ZBSSADDR	 = 0xf03e0000
 endif
 
-ifeq ($(CONFIG_ARCH_P720T),y)
-ZTEXTADDR	 = 0xc0018000
-ZRELADDR	 = 0xc0018000
+# The standard locations for stuff on CLPS711x type processors
+ifeq ($(CONFIG_ARCH_CLPS711X),y)
+ZTEXTADDR	 = 0xc0028000
 PARAMS_PHYS	 = 0xc0000100
+endif
+
+# Should probably have some agreement on these...
+ifeq ($(CONFIG_ARCH_P720T),y)
 INITRD_PHYS	 = 0xc0400000
 INITRD_VIRT	 = 0xc0400000
+endif
+ifeq ($(CONFIG_ARCH_CDB89712),y)
+INITRD_PHYS	 = 0x00700000
+INITRD_VIRT	 = 0xc0300000
 endif
 
 ifeq ($(CONFIG_ARCH_SA1100),y)
@@ -83,15 +90,32 @@ ZTEXTADDR	 = 0xc0008000
 ZRELADDR	 = 0xc0008000
 ifeq ($(CONFIG_SA1100_VICTOR),y)
   ZTEXTADDR	 = 0x00002000
-  ZBSSADDR	 = 0xc0100000
+  ZBSSADDR	 = 0xc0200000
 endif
 ifeq ($(CONFIG_SA1100_SHERMAN),y)
   ZTEXTADDR      = 0x00050000   
-  ZBSSADDR       = 0xc0100000
+  ZBSSADDR       = 0xc0200000
 endif
 ifeq ($(CONFIG_SA1100_GRAPHICSCLIENT),y)
   ZTEXTADDR	 = 0xC0200000
 endif
+ifeq ($(CONFIG_SA1100_GRAPHICSMASTER),y)
+  ZTEXTADDR	 = 0xC0400000
+endif
+ifeq ($(CONFIG_SA1100_ADSBITSY),y)
+  ZTEXTADDR	 = 0xC0400000
+endif
+ifeq ($(CONFIG_SA1100_YOPY),y)
+  ZTEXTADDR      = 0x00080000
+  ZBSSADDR       = 0xc0200000
+endif
+ifeq ($(CONFIG_SA1111),y)
+  ZRELADDR	 = 0xc0208000
+endif
+endif
+
+ifeq ($(CONFIG_ARCH_ANAKIN),y)
+ZTEXTADDR	 = 0x20008000
 endif
 
 #
@@ -105,15 +129,15 @@ endif
 export	SYSTEM ZTEXTADDR ZBSSADDR ZRELADDR INITRD_PHYS INITRD_VIRT PARAMS_PHYS
 
 Image:	$(CONFIGURE) $(SYSTEM)
-	$(OBJCOPY) $(SYSTEM) $@
+	$(OBJCOPY) -O binary -R .note -R .comment -S $(SYSTEM) $@
 
 bzImage: zImage
 
 zImage:	$(CONFIGURE) compressed/vmlinux
-	$(OBJCOPY) compressed/vmlinux $@
+	$(OBJCOPY) -O binary -R .note -R .comment -S compressed/vmlinux $@
 
 bootpImage: bootp/bootp
-	$(OBJCOPY) bootp/bootp $@
+	$(OBJCOPY) -O binary -R .note -R .comment -S bootp/bootp $@
 
 compressed/vmlinux: $(TOPDIR)/vmlinux dep
 	@$(MAKE) -C compressed vmlinux

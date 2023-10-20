@@ -1,4 +1,4 @@
-/* $Id: vaddrs.h,v 1.26 2000/08/01 04:53:58 anton Exp $ */
+/* $Id: vaddrs.h,v 1.27 2001/07/04 00:18:18 davem Exp $ */
 #ifndef _SPARC_VADDRS_H
 #define _SPARC_VADDRS_H
 
@@ -9,7 +9,7 @@
  *                      which important things will be mapped.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
- * Copyright (C) 2000 Anton Blanchard (anton@linuxcare.com)
+ * Copyright (C) 2000 Anton Blanchard (anton@samba.org)
  */
 
 #define SRMMU_MAXMEM		0x0c000000

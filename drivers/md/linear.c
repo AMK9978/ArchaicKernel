@@ -19,7 +19,7 @@
 #include <linux/module.h>
 
 #include <linux/raid/md.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 #include <linux/raid/linear.h>
 
@@ -203,3 +203,4 @@ static void linear_exit (void)
 
 module_init(linear_init);
 module_exit(linear_exit);
+MODULE_LICENSE("GPL");

@@ -5,13 +5,15 @@
 	Copyright 1994 by Donald Becker.
 	Copyright 1993 United States Government as represented by the
 	Director, National Security Agency.  This software may be used and
-	distributed according to the terms of the GNU Public License,
+	distributed according to the terms of the GNU General Public License,
 	incorporated herein by reference.
 
 	This is a driver for the Cabletron E2100 series ethercards.
 
-	The Author may be reached as becker@cesdis.gsfc.nasa.gov, or
-	C/O Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The Author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
 
 	The E2100 series ethercard is a fairly generic shared memory 8390
 	implementation.  The only unusual aspect is the way the shared memory
@@ -31,7 +33,7 @@
 	If this happens, you must power down the machine for about 30 seconds.
 */
 
-static const char *version =
+static const char version[] =
 	"e2100.c:v1.01 7/21/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 #include <linux/module.h>
@@ -140,7 +142,7 @@ static int __init e21_probe1(struct net_device *dev, int ioaddr)
 {
 	int i, status, retval;
 	unsigned char *station_addr = dev->dev_addr;
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 
 	if (!request_region(ioaddr, E21_IO_EXTENT, dev->name))
 		return -EBUSY;
@@ -386,6 +388,10 @@ MODULE_PARM(io, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
 MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
 MODULE_PARM(xcvr, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
+MODULE_PARM_DESC(io, "E2100 I/O base address(es)");
+MODULE_PARM_DESC(irq, "E2100 IRQ number(s)");
+MODULE_PARM_DESC(mem, " E2100 memory base address(es)");
+MODULE_PARM_DESC(xcvr, "E2100 tranceiver(s) (0=internal, 1=external)");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
@@ -434,6 +440,8 @@ cleanup_module(void)
 	}
 }
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
+
 
 /*
  * Local variables:

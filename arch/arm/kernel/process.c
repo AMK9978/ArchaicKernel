@@ -17,10 +17,11 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/delay.h>
 #include <linux/reboot.h>
+#include <linux/interrupt.h>
 #include <linux/init.h>
 
 #include <asm/system.h>
@@ -38,8 +39,6 @@
 
 extern const char *processor_modes[];
 extern void setup_mm_for_reboot(char mode);
-
-asmlinkage void ret_from_sys_call(void) __asm__("ret_from_sys_call");
 
 static volatile int hlt_counter;
 
@@ -92,8 +91,10 @@ void cpu_idle(void)
 		void (*idle)(void) = pm_idle;
 		if (!idle)
 			idle = arch_idle;
+		leds_event(led_idle_start);
 		while (!current->need_resched)
 			idle();
+		leds_event(led_idle_end);
 		schedule();
 #ifndef CONFIG_NO_PGT_CACHE
 		check_pgt_cache();
@@ -157,10 +158,10 @@ void show_regs(struct pt_regs * regs)
 
 	flags = condition_codes(regs);
 
-	printk("pc : [<%08lx>]    lr : [<%08lx>]\n"
+	printk("pc : [<%08lx>]    lr : [<%08lx>]    %s\n"
 	       "sp : %08lx  ip : %08lx  fp : %08lx\n",
 		instruction_pointer(regs),
-		regs->ARM_lr, regs->ARM_sp,
+		regs->ARM_lr, print_tainted(), regs->ARM_sp,
 		regs->ARM_ip, regs->ARM_fp);
 	printk("r10: %08lx  r9 : %08lx  r8 : %08lx\n",
 		regs->ARM_r10, regs->ARM_r9,
@@ -294,6 +295,8 @@ void release_thread(struct task_struct *dead_task)
 {
 }
 
+asmlinkage void ret_from_fork(void) __asm__("ret_from_fork");
+
 int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 	unsigned long unused,
 	struct task_struct * p, struct pt_regs * regs)
@@ -309,7 +312,9 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 	childregs->ARM_sp = esp;
 
 	save = ((struct context_save_struct *)(childregs)) - 1;
-	init_thread_css(save);
+	*save = INIT_CSS;
+	save->pc |= (unsigned long)ret_from_fork;
+
 	p->thread.save = save;
 
 	return 0;
@@ -364,20 +369,23 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
  */
 pid_t kernel_thread(int (*fn)(void *), void *arg, unsigned long flags)
 {
-	extern long sys_exit(int) __attribute__((noreturn));
 	pid_t __ret;
 
 	__asm__ __volatile__(
-	"mov	r0, %1		@ kernel_thread sys_clone
+	"orr	r0, %1, %2	@ kernel_thread sys_clone
 	mov	r1, #0
 	"__syscall(clone)"
-	teq	r0, #0		@ if we are the child
-	moveq	fp, #0		@ ensure that fp is zero
-	mov	%0, r0"
+	movs	%0, r0		@ if we are the child
+	bne	1f
+	mov	fp, #0		@ ensure that fp is zero
+	mov	r0, %4
+	mov	lr, pc
+	mov	pc, %3
+	b	sys_exit
+1:	"
         : "=r" (__ret)
-        : "Ir" (flags | CLONE_VM) : "r0", "r1");
-	if (__ret == 0)
-		sys_exit((fn)(arg));
+        : "Ir" (flags), "I" (CLONE_VM), "r" (fn), "r" (arg)
+	: "r0", "r1", "lr");
 	return __ret;
 }
 

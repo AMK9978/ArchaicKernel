@@ -49,7 +49,7 @@
 #include <linux/netdevice.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/rtnetlink.h>
 
@@ -90,7 +90,7 @@ static int nsc_ircc_init_338(nsc_chip_t *chip, chipio_t *info);
 static nsc_chip_t chips[] = {
 	{ "PC87108", { 0x150, 0x398, 0xea }, 0x05, 0x10, 0xf0, 
 	  nsc_ircc_probe_108, nsc_ircc_init_108 },
-	{ "PC87338", { 0x398, 0x15c, 0x2e }, 0x08, 0xb0, 0xf0, 
+	{ "PC87338", { 0x398, 0x15c, 0x2e }, 0x08, 0xb0, 0xf8, 
 	  nsc_ircc_probe_338, nsc_ircc_init_338 },
 	{ NULL }
 };
@@ -112,7 +112,7 @@ static char *dongle_types[] = {
 	"Reserved",
 	"Reserved",
 	"HP HSDL-1100/HSDL-2100",
-	"HP HSDL-1100/HSDL-2100"
+	"HP HSDL-1100/HSDL-2100",
 	"Supports SIR Mode only",
 	"No dongle connected",
 };
@@ -160,7 +160,7 @@ int __init nsc_ircc_init(void)
 	int i = 0;
 
 	/* Probe for all the NSC chipsets we know about */
-	for (chip=chips; chip->name ; chip++,i++) {
+	for (chip=chips; chip->name ; chip++) {
 		IRDA_DEBUG(2, __FUNCTION__"(), Probing for %s ...\n", 
 			   chip->name);
 		
@@ -196,7 +196,7 @@ int __init nsc_ircc_init(void)
 				 * we init the chip, if not we probe the values
 				 * set by the BIOS
 				 */				
-				if (io[i] < 2000) {
+				if (io[i] < 0x2000) {
 					chip->init(chip, &info);
 				} else
 					chip->probe(chip, &info);
@@ -251,8 +251,13 @@ static int nsc_ircc_open(int i, chipio_t *info)
 
 	IRDA_DEBUG(2, __FUNCTION__ "()\n");
 
+	MESSAGE("%s, Found chip at base=0x%03x\n", driver_name,
+		info->cfg_base);
+
 	if ((nsc_ircc_setup(info)) == -1)
 		return -1;
+
+	MESSAGE("%s, driver loaded (Dag Brattli)\n", driver_name);
 
 	/* Allocate new instance of the driver */
 	self = kmalloc(sizeof(struct nsc_ircc_cb), GFP_KERNEL);
@@ -315,8 +320,8 @@ static int nsc_ircc_open(int i, chipio_t *info)
 	self->tx_buff.head = (__u8 *) kmalloc(self->tx_buff.truesize, 
 					      GFP_KERNEL|GFP_DMA);
 	if (self->tx_buff.head == NULL) {
-		kfree(self);
 		kfree(self->rx_buff.head);
+		kfree(self);
 		return -ENOMEM;
 	}
 	memset(self->tx_buff.head, 0, self->tx_buff.truesize);
@@ -597,7 +602,7 @@ static int nsc_ircc_probe_338(nsc_chip_t *chip, chipio_t *info)
 	outb(CFG_PNP0, cfg_base);
 	reg = inb(cfg_base+1);
 	
-	pnp = (reg >> 4) & 0x01;
+	pnp = (reg >> 3) & 0x01;
 	if (pnp) {
 		IRDA_DEBUG(2, "(), Chip is in PnP mode\n");
 		outb(0x46, cfg_base);
@@ -699,8 +704,6 @@ static int nsc_ircc_setup(chipio_t *info)
 		ERROR("%s, Wrong chip version %02x\n", driver_name, version);
 		return -1;
 	}
-	MESSAGE("%s, Found chip at base=0x%03x\n", driver_name, 
-		info->cfg_base);
 
 	/* Switch to advanced mode */
 	switch_bank(iobase, BANK2);
@@ -728,8 +731,6 @@ static int nsc_ircc_setup(chipio_t *info)
 	outb(0x0a, iobase+1); /* Set MIR pulse width */
 	outb(0x0d, iobase+2); /* Set SIR pulse width to 1.6us */
 	outb(0x2a, iobase+4); /* Set beginning frag, and preamble length */
-
-	MESSAGE("%s, driver loaded (Dag Brattli)\n", driver_name);
 
 	/* Enable receive interrupts */
 	switch_bank(iobase, BANK0);
@@ -1064,7 +1065,7 @@ static int nsc_ircc_hard_xmit_sir(struct sk_buff *skb, struct net_device *dev)
 	struct nsc_ircc_cb *self;
 	unsigned long flags;
 	int iobase;
-	__u32 speed;
+	__s32 speed;
 	__u8 bank;
 	
 	self = (struct nsc_ircc_cb *) dev->priv;
@@ -1076,10 +1077,12 @@ static int nsc_ircc_hard_xmit_sir(struct sk_buff *skb, struct net_device *dev)
 	netif_stop_queue(dev);
 		
 	/* Check if we need to change the speed */
-	if ((speed = irda_get_speed(skb)) != self->io.speed) {
+	speed = irda_get_next_speed(skb);
+	if ((speed != self->io.speed) && (speed != -1)) {
 		/* Check for empty frame */
 		if (!skb->len) {
 			nsc_ircc_change_speed(self, speed); 
+			dev_kfree_skb(skb);
 			return 0;
 		} else
 			self->new_speed = speed;
@@ -1116,7 +1119,7 @@ static int nsc_ircc_hard_xmit_fir(struct sk_buff *skb, struct net_device *dev)
 	struct nsc_ircc_cb *self;
 	unsigned long flags;
 	int iobase;
-	__u32 speed;
+	__s32 speed;
 	__u8 bank;
 	int mtt, diff;
 	
@@ -1126,10 +1129,12 @@ static int nsc_ircc_hard_xmit_fir(struct sk_buff *skb, struct net_device *dev)
 	netif_stop_queue(dev);
 	
 	/* Check if we need to change the speed */
-	if ((speed = irda_get_speed(skb)) != self->io.speed) {
+	speed = irda_get_next_speed(skb);
+	if ((speed != self->io.speed) && (speed != -1)) {
 		/* Check for empty frame */
 		if (!skb->len) {
 			nsc_ircc_change_speed(self, speed); 
+			dev_kfree_skb(skb);
 			return 0;
 		} else
 			self->new_speed = speed;
@@ -1259,7 +1264,7 @@ static void nsc_ircc_dma_xmit(struct nsc_ircc_cb *self, int iobase)
  * Function nsc_ircc_pio_xmit (self, iobase)
  *
  *    Transmit data using PIO. Returns the number of bytes that actually
- *    got transfered
+ *    got transferred
  *
  */
 static int nsc_ircc_pio_write(int iobase, __u8 *buf, int len, int fifo_size)
@@ -1831,6 +1836,7 @@ static int nsc_ircc_net_open(struct net_device *dev)
 {
 	struct nsc_ircc_cb *self;
 	int iobase;
+	char hwname[32];
 	__u8 bank;
 	
 	IRDA_DEBUG(4, __FUNCTION__ "()\n");
@@ -1854,7 +1860,7 @@ static int nsc_ircc_net_open(struct net_device *dev)
 	if (request_dma(self->io.dma, dev->name)) {
 		WARNING("%s, unable to allocate dma=%d\n", driver_name, 
 			self->io.dma);
-		free_irq(self->io.irq, self);
+		free_irq(self->io.irq, dev);
 		return -EAGAIN;
 	}
 	
@@ -1869,14 +1875,16 @@ static int nsc_ircc_net_open(struct net_device *dev)
 	outb(bank, iobase+BSR);
 
 	/* Ready to play! */
-
 	netif_start_queue(dev);
 	
+	/* Give self a hardware name */
+	sprintf(hwname, "NSC-FIR @ 0x%03x", self->io.fir_base);
+
 	/* 
 	 * Open new IrLAP layer instance, now that everything should be
 	 * initialized properly 
 	 */
-	self->irlap = irlap_open(dev, &self->qos);
+	self->irlap = irlap_open(dev, &self->qos, hwname);
 
 	MOD_INC_USE_COUNT;
 
@@ -1956,16 +1964,20 @@ static int nsc_ircc_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	/* Disable interrupts & save flags */
 	save_flags(flags);
 	cli();
-	
+
 	switch (cmd) {
 	case SIOCSBANDWIDTH: /* Set bandwidth */
-		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
+		if (!capable(CAP_NET_ADMIN)) {
+			ret = -EPERM;
+			goto out;
+		}
 		nsc_ircc_change_speed(self, irq->ifr_baudrate);
 		break;
 	case SIOCSMEDIABUSY: /* Set media busy */
-		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
+		if (!capable(CAP_NET_ADMIN)) {
+			ret = -EPERM;
+			goto out;
+		}
 		irda_device_set_media_busy(self->netdev, TRUE);
 		break;
 	case SIOCGRECEIVING: /* Check if we are receiving right now */
@@ -1974,9 +1986,8 @@ static int nsc_ircc_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	default:
 		ret = -EOPNOTSUPP;
 	}
-	
+out:
 	restore_flags(flags);
-	
 	return ret;
 }
 
@@ -2001,18 +2012,10 @@ static void nsc_ircc_suspend(struct nsc_ircc_cb *self)
 
 static void nsc_ircc_wakeup(struct nsc_ircc_cb *self)
 {
-	int iobase;
-
 	if (!self->io.suspended)
 		return;
 
-	iobase = self->io.fir_base;
-
-	/* Switch to advanced mode */
-	switch_bank(iobase, BANK2);
-	outb(ECR1_EXT_SL, iobase+ECR1);
-	switch_bank(iobase, BANK0);
-
+	nsc_ircc_setup(&self->io);
 	nsc_ircc_net_open(self->netdev);
 	
 	MESSAGE("%s, Waking up\n", driver_name);
@@ -2039,6 +2042,8 @@ static int nsc_ircc_pmproc(struct pm_dev *dev, pm_request_t rqst, void *data)
 #ifdef MODULE
 MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");
 MODULE_DESCRIPTION("NSC IrDA Device Driver");
+MODULE_LICENSE("GPL");
+
 
 MODULE_PARM(qos_mtt_bits, "i");
 MODULE_PARM_DESC(qos_mtt_bits, "Minimum Turn Time");

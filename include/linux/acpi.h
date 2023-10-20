@@ -28,35 +28,24 @@
 #include <linux/wait.h>
 #endif /* __KERNEL__ */
 
-u64 acpi_get_rsdp_ptr(void);
-
-/*
- * System sleep states
- */
-enum
-{
-	ACPI_S0, /* working */
-	ACPI_S1, /* sleep */
-	ACPI_S2, /* sleep */
-	ACPI_S3, /* sleep */
-	ACPI_S4, /* non-volatile sleep */
-	ACPI_S5, /* soft-off */
-};
-
-typedef int acpi_sstate_t;
-
 /*
  * Device states
  */
-enum
-{
+typedef enum {
 	ACPI_D0, /* fully-on */
 	ACPI_D1, /* partial-on */
 	ACPI_D2, /* partial-on */
 	ACPI_D3, /* fully-off */
-};
+} acpi_dstate_t;
 
-typedef int acpi_dstate_t;
+typedef enum {
+	ACPI_S0, /* working state */
+	ACPI_S1, /* power-on suspend */
+	ACPI_S2, /* suspend to ram, with devices */
+	ACPI_S3, /* suspend to ram */
+	ACPI_S4, /* suspend to disk */
+	ACPI_S5, /* soft-off */
+} acpi_sstate_t;
 
 /* RSDP location */
 #define ACPI_BIOS_ROM_BASE (0x0e0000)
@@ -97,13 +86,11 @@ typedef int acpi_dstate_t;
 /* PM_TMR masks */
 #define ACPI_TMR_VAL_EXT 0x00000100
 #define ACPI_TMR_MASK	 0x00ffffff
-#define ACPI_TMR_HZ	 3580000 /* 3.58 MHz */
+#define ACPI_TMR_HZ	 3579545 /* 3.58 MHz */
+#define ACPI_TMR_KHZ	 (ACPI_TMR_HZ / 1000)
 
-/* strangess to avoid integer overflow */
 #define ACPI_MICROSEC_TO_TMR_TICKS(val) \
-  (((val) * (ACPI_TMR_HZ / 10000)) / 100)
-#define ACPI_TMR_TICKS_TO_MICROSEC(ticks) \
-  (((ticks) * 100) / (ACPI_TMR_HZ / 10000))
+  (((val) * (ACPI_TMR_KHZ)) / 1000)
 
 /* PM2_CNT flags */
 #define ACPI_ARB_DIS 0x01
@@ -162,6 +149,9 @@ enum
 	ACPI_C1_TIME,
 	ACPI_C2_TIME,
 	ACPI_C3_TIME,
+	ACPI_C1_COUNT,
+	ACPI_C2_COUNT,
+	ACPI_C3_COUNT,
 	ACPI_S0_SLP_TYP,
 	ACPI_S1_SLP_TYP,
 	ACPI_S5_SLP_TYP,
@@ -169,9 +159,22 @@ enum
 	ACPI_FACS,
 	ACPI_XSDT,
 	ACPI_PMTIMER,
-	ACPI_BATTERY,
+	ACPI_BATT,
 };
 
 #define ACPI_SLP_TYP_DISABLED	(~0UL)
+
+#ifdef __KERNEL__
+
+/* routines for saving/restoring kernel state */
+FASTCALL(extern unsigned long acpi_save_state_mem(unsigned long return_point));
+FASTCALL(extern int acpi_save_state_disk(unsigned long return_point));
+extern void acpi_restore_state(void);
+
+extern unsigned long acpi_wakeup_address;
+
+#endif /* __KERNEL__ */
+
+int acpi_init(void);
 
 #endif /* _LINUX_ACPI_H */

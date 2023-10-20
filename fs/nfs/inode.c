@@ -15,6 +15,7 @@
 
 #include <linux/config.h>
 #include <linux/module.h>
+#include <linux/init.h>
 
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -44,17 +45,20 @@ void nfs_zap_caches(struct inode *);
 static void nfs_invalidate_inode(struct inode *);
 
 static void nfs_read_inode(struct inode *);
+static void nfs_write_inode(struct inode *,int);
 static void nfs_delete_inode(struct inode *);
 static void nfs_put_super(struct super_block *);
+static void nfs_clear_inode(struct inode *);
 static void nfs_umount_begin(struct super_block *);
 static int  nfs_statfs(struct super_block *, struct statfs *);
 
 static struct super_operations nfs_sops = { 
 	read_inode:	nfs_read_inode,
-	put_inode:	force_delete,
+	write_inode:	nfs_write_inode,
 	delete_inode:	nfs_delete_inode,
 	put_super:	nfs_put_super,
 	statfs:		nfs_statfs,
+	clear_inode:	nfs_clear_inode,
 	umount_begin:	nfs_umount_begin,
 };
 
@@ -98,8 +102,11 @@ nfs_read_inode(struct inode * inode)
 	inode->i_blksize = inode->i_sb->s_blocksize;
 	inode->i_mode = 0;
 	inode->i_rdev = 0;
+	/* We can't support UPDATE_ATIME(), since the server will reset it */
+	inode->i_flags |= S_NOATIME;
 	NFS_FILEID(inode) = 0;
 	NFS_FSID(inode) = 0;
+	NFS_FLAGS(inode) = 0;
 	INIT_LIST_HEAD(&inode->u.nfs_i.read);
 	INIT_LIST_HEAD(&inode->u.nfs_i.dirty);
 	INIT_LIST_HEAD(&inode->u.nfs_i.commit);
@@ -111,6 +118,14 @@ nfs_read_inode(struct inode * inode)
 	NFS_CACHEINV(inode);
 	NFS_ATTRTIMEO(inode) = NFS_MINATTRTIMEO(inode);
 	NFS_ATTRTIMEO_UPDATE(inode) = jiffies;
+}
+
+static void
+nfs_write_inode(struct inode *inode, int sync)
+{
+	int flags = sync ? FLUSH_WAIT : 0;
+
+	nfs_sync_file(inode, NULL, 0, 0, flags);
 }
 
 static void
@@ -126,6 +141,19 @@ nfs_delete_inode(struct inode * inode)
 	}
 
 	clear_inode(inode);
+}
+
+/*
+ * For the moment, the only task for the NFS clear_inode method is to
+ * release the mmap credential
+ */
+static void
+nfs_clear_inode(struct inode *inode)
+{
+	struct rpc_cred *cred = NFS_I(inode)->mm_cred;
+
+	if (cred)
+		put_rpccred(cred);
 }
 
 void
@@ -284,6 +312,7 @@ nfs_read_super(struct super_block *sb, void *raw_data, int silent)
 	if (data->flags & NFS_MOUNT_NOAC) {
 		data->acregmin = data->acregmax = 0;
 		data->acdirmin = data->acdirmax = 0;
+		sb->s_flags |= MS_SYNCHRONOUS;
 	}
 	server->acregmin = data->acregmin*HZ;
 	server->acregmax = data->acregmax*HZ;
@@ -295,6 +324,10 @@ nfs_read_super(struct super_block *sb, void *raw_data, int silent)
 	if (!server->hostname)
 		goto out_unlock;
 	strcpy(server->hostname, data->hostname);
+	INIT_LIST_HEAD(&server->lru_read);
+	INIT_LIST_HEAD(&server->lru_dirty);
+	INIT_LIST_HEAD(&server->lru_commit);
+	INIT_LIST_HEAD(&server->lru_busy);
 
  nfsv3_try_again:
 	/* Check NFS protocol revision and initialize RPC op vector
@@ -432,6 +465,8 @@ nfs_read_super(struct super_block *sb, void *raw_data, int silent)
 
         if (server->namelen == 0 || server->namelen > maxlen)
                 server->namelen = maxlen;
+
+	sb->s_maxbytes = fsinfo.maxfilesize;
 
 	/* Fire up the writeback cache */
 	if (nfs_reqlist_alloc(server) < 0) {
@@ -585,7 +620,6 @@ nfs_fill_inode(struct inode *inode, struct nfs_fh *fh, struct nfs_fattr *fattr)
 		inode->i_ctime = nfs_time_to_secs(fattr->ctime);
 		NFS_CACHE_CTIME(inode) = fattr->ctime;
 		NFS_CACHE_MTIME(inode) = fattr->mtime;
-		NFS_CACHE_ATIME(inode) = fattr->atime;
 		NFS_CACHE_ISIZE(inode) = fattr->size;
 		NFS_ATTRTIMEO(inode) = NFS_MINATTRTIMEO(inode);
 		NFS_ATTRTIMEO_UPDATE(inode) = jiffies;
@@ -631,7 +665,7 @@ nfs_inode_is_stale(struct inode *inode, struct nfs_fh *fh, struct nfs_fattr *fat
 	if ((fattr->mode & S_IFMT) != (inode->i_mode & S_IFMT))
 		return 1;
 
-	if (is_bad_inode(inode))
+	if (is_bad_inode(inode) || NFS_STALE(inode))
 		return 1;
 
 	/* Has the filehandle changed? If so is the old one stale? */
@@ -779,6 +813,21 @@ nfs_revalidate(struct dentry *dentry)
 }
 
 /*
+ * Ensure that mmap has a recent RPC credential for use when writing out
+ * shared pages
+ */
+static inline void
+nfs_set_mmcred(struct inode *inode, struct rpc_cred *cred)
+{
+	struct rpc_cred **p = &NFS_I(inode)->mm_cred,
+			*oldcred = *p;
+
+	*p = get_rpccred(cred);
+	if (oldcred)
+		put_rpccred(oldcred);
+}
+
+/*
  * These are probably going to contain hooks for
  * allocating and releasing RPC credentials for
  * the file. I'll have to think about Tronds patch
@@ -793,20 +842,20 @@ int nfs_open(struct inode *inode, struct file *filp)
 	auth = NFS_CLIENT(inode)->cl_auth;
 	cred = rpcauth_lookupcred(auth, 0);
 	filp->private_data = cred;
+	if (filp->f_mode & FMODE_WRITE)
+		nfs_set_mmcred(inode, cred);
 	unlock_kernel();
 	return 0;
 }
 
 int nfs_release(struct inode *inode, struct file *filp)
 {
-	struct rpc_auth *auth;
 	struct rpc_cred *cred;
 
 	lock_kernel();
-	auth = NFS_CLIENT(inode)->cl_auth;
 	cred = nfs_file_cred(filp);
 	if (cred)
-		rpcauth_releasecred(auth, cred);
+		put_rpccred(cred);
 	unlock_kernel();
 	return 0;
 }
@@ -818,24 +867,22 @@ int nfs_release(struct inode *inode, struct file *filp)
 int
 __nfs_revalidate_inode(struct nfs_server *server, struct inode *inode)
 {
-	int		 status = 0;
+	int		 status = -ESTALE;
 	struct nfs_fattr fattr;
 
 	dfprintk(PAGECACHE, "NFS: revalidating (%x/%Ld)\n",
 		inode->i_dev, (long long)NFS_FILEID(inode));
 
 	lock_kernel();
-	if (!inode || is_bad_inode(inode) || NFS_STALE(inode)) {
-		unlock_kernel();
-		return -ESTALE;
-	}
+	if (!inode || is_bad_inode(inode))
+ 		goto out_nowait;
+	if (NFS_STALE(inode) && inode != inode->i_sb->s_root->d_inode)
+ 		goto out_nowait;
 
 	while (NFS_REVALIDATING(inode)) {
 		status = nfs_wait_on_inode(inode, NFS_INO_REVALIDATING);
-		if (status < 0) {
-			unlock_kernel();
-			return status;
-		}
+		if (status < 0)
+			goto out_nowait;
 		if (time_before(jiffies,NFS_READTIME(inode)+NFS_ATTRTIMEO(inode))) {
 			status = NFS_STALE(inode) ? -ESTALE : 0;
 			goto out_nowait;
@@ -849,7 +896,8 @@ __nfs_revalidate_inode(struct nfs_server *server, struct inode *inode)
 			 inode->i_dev, (long long)NFS_FILEID(inode), status);
 		if (status == -ESTALE) {
 			NFS_FLAGS(inode) |= NFS_INO_STALE;
-			remove_inode_hash(inode);
+			if (inode != inode->i_sb->s_root->d_inode)
+				remove_inode_hash(inode);
 		}
 		goto out;
 	}
@@ -862,6 +910,8 @@ __nfs_revalidate_inode(struct nfs_server *server, struct inode *inode)
 	}
 	dfprintk(PAGECACHE, "NFS: (%x/%Ld) revalidation complete\n",
 		inode->i_dev, (long long)NFS_FILEID(inode));
+
+	NFS_FLAGS(inode) &= ~NFS_INO_STALE;
 out:
 	NFS_FLAGS(inode) &= ~NFS_INO_REVALIDATING;
 	wake_up(&inode->i_wait);
@@ -883,32 +933,15 @@ out:
  * A very similar scenario holds for the dir cache.
  */
 int
-nfs_refresh_inode(struct inode *inode, struct nfs_fattr *fattr)
+__nfs_refresh_inode(struct inode *inode, struct nfs_fattr *fattr)
 {
 	__u64		new_size, new_mtime;
 	loff_t		new_isize;
 	int		invalid = 0;
-	int		error = -EIO;
-
-	if (!inode || !fattr) {
-		printk(KERN_ERR "nfs_refresh_inode: inode or fattr is NULL\n");
-		goto out;
-	}
-	if (inode->i_mode == 0) {
-		printk(KERN_ERR "nfs_refresh_inode: empty inode\n");
-		goto out;
-	}
-
-	if ((fattr->valid & NFS_ATTR_FATTR) == 0)
-		goto out;
-
-	if (is_bad_inode(inode))
-		goto out;
 
 	dfprintk(VFS, "NFS: refresh_inode(%x/%ld ct=%d info=0x%x)\n",
 			inode->i_dev, inode->i_ino,
 			atomic_read(&inode->i_count), fattr->valid);
-
 
 	if (NFS_FSID(inode) != fattr->fsid ||
 	    NFS_FILEID(inode) != fattr->fileid) {
@@ -916,7 +949,7 @@ nfs_refresh_inode(struct inode *inode, struct nfs_fattr *fattr)
 		       "expected (0x%Lx/0x%Lx), got (0x%Lx/0x%Lx)\n",
 		       (long long)NFS_FSID(inode), (long long)NFS_FILEID(inode),
 		       (long long)fattr->fsid, (long long)fattr->fileid);
-		goto out;
+		goto out_err;
 	}
 
 	/*
@@ -928,8 +961,6 @@ nfs_refresh_inode(struct inode *inode, struct nfs_fattr *fattr)
  	new_mtime = fattr->mtime;
 	new_size = fattr->size;
  	new_isize = nfs_size_to_loff_t(fattr->size);
-
-	error = 0;
 
 	/*
 	 * Update the read time so we don't revalidate too often.
@@ -979,12 +1010,8 @@ nfs_refresh_inode(struct inode *inode, struct nfs_fattr *fattr)
 
 	NFS_CACHE_CTIME(inode) = fattr->ctime;
 	inode->i_ctime = nfs_time_to_secs(fattr->ctime);
-	/* If we've been messing around with atime, don't
-	 * update it. Save the server value in NFS_CACHE_ATIME.
-	 */
-	NFS_CACHE_ATIME(inode) = fattr->atime;
-	if (time_before(inode->i_atime, nfs_time_to_secs(fattr->atime)))
-		inode->i_atime = nfs_time_to_secs(fattr->atime);
+
+	inode->i_atime = nfs_time_to_secs(fattr->atime);
 
 	NFS_CACHE_MTIME(inode) = new_mtime;
 	inode->i_mtime = nfs_time_to_secs(new_mtime);
@@ -1020,11 +1047,9 @@ nfs_refresh_inode(struct inode *inode, struct nfs_fattr *fattr)
 
 	if (invalid)
 		nfs_zap_caches(inode);
+	return 0;
 
-out:
-	return error;
-
-out_changed:
+ out_changed:
 	/*
 	 * Big trouble! The inode has become a different object.
 	 */
@@ -1038,7 +1063,8 @@ out_changed:
 	 * (But we fall through to invalidate the caches.)
 	 */
 	nfs_invalidate_inode(inode);
-	goto out;
+ out_err:
+	return -EIO;
 }
 
 /*
@@ -1050,12 +1076,13 @@ extern int nfs_init_nfspagecache(void);
 extern void nfs_destroy_nfspagecache(void);
 extern int nfs_init_readpagecache(void);
 extern int nfs_destroy_readpagecache(void);
+extern int nfs_init_writepagecache(void);
+extern int nfs_destroy_writepagecache(void);
 
 /*
  * Initialize NFS
  */
-int
-init_nfs_fs(void)
+static int __init init_nfs_fs(void)
 {
 	int err;
 
@@ -1067,30 +1094,19 @@ init_nfs_fs(void)
 	if (err)
 		return err;
 
+	err = nfs_init_writepagecache();
+	if (err)
+		return err;
+
 #ifdef CONFIG_PROC_FS
 	rpc_proc_register(&nfs_rpcstat);
 #endif
         return register_filesystem(&nfs_fs_type);
 }
 
-/*
- * Every kernel module contains stuff like this.
- */
-#ifdef MODULE
-
-EXPORT_NO_SYMBOLS;
-/* Not quite true; I just maintain it */
-MODULE_AUTHOR("Olaf Kirch <okir@monad.swb.de>");
-
-int
-init_module(void)
+static void __exit exit_nfs_fs(void)
 {
-	return init_nfs_fs();
-}
-
-void
-cleanup_module(void)
-{
+	nfs_destroy_writepagecache();
 	nfs_destroy_readpagecache();
 	nfs_destroy_nfspagecache();
 #ifdef CONFIG_PROC_FS
@@ -1098,4 +1114,11 @@ cleanup_module(void)
 #endif
 	unregister_filesystem(&nfs_fs_type);
 }
-#endif
+
+EXPORT_NO_SYMBOLS;
+/* Not quite true; I just maintain it */
+MODULE_AUTHOR("Olaf Kirch <okir@monad.swb.de>");
+MODULE_LICENSE("GPL");
+
+module_init(init_nfs_fs)
+module_exit(exit_nfs_fs)

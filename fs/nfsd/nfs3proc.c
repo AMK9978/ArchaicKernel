@@ -18,7 +18,7 @@
 #include <linux/in.h>
 #include <linux/version.h>
 #include <linux/unistd.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/major.h>
 
 #include <linux/sunrpc/svc.h>
@@ -91,7 +91,8 @@ nfsd3_proc_setattr(struct svc_rqst *rqstp, struct nfsd3_sattrargs *argp,
 				SVCFH_fmt(&argp->fh));
 
 	fh_copy(&resp->fh, &argp->fh);
-	nfserr = nfsd_setattr(rqstp, &resp->fh, &argp->attrs);
+	nfserr = nfsd_setattr(rqstp, &resp->fh, &argp->attrs,
+			      argp->check_guard, argp->guardtime);
 	RETURN_STATUS(nfserr);
 }
 
@@ -104,8 +105,9 @@ nfsd3_proc_lookup(struct svc_rqst *rqstp, struct nfsd3_diropargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: LOOKUP(3)   %s %s\n",
+	dprintk("nfsd: LOOKUP(3)   %s %.*s\n",
 				SVCFH_fmt(&argp->fh),
+				argp->len,
 				argp->name);
 
 	fh_copy(&resp->dirfh, &argp->fh);
@@ -239,8 +241,9 @@ nfsd3_proc_create(struct svc_rqst *rqstp, struct nfsd3_createargs *argp,
 	struct iattr	*attr;
 	u32		nfserr;
 
-	dprintk("nfsd: CREATE(3)   %s %s\n",
+	dprintk("nfsd: CREATE(3)   %s %.*s\n",
 				SVCFH_fmt(&argp->fh),
+				argp->len,
 				argp->name);
 
 	dirfhp = fh_copy(&resp->dirfh, &argp->fh);
@@ -278,8 +281,9 @@ nfsd3_proc_mkdir(struct svc_rqst *rqstp, struct nfsd3_createargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: MKDIR(3)    %s %s\n",
+	dprintk("nfsd: MKDIR(3)    %s %.*s\n",
 				SVCFH_fmt(&argp->fh),
+				argp->len,
 				argp->name);
 
 	argp->attrs.ia_valid &= ~ATTR_SIZE;
@@ -297,9 +301,10 @@ nfsd3_proc_symlink(struct svc_rqst *rqstp, struct nfsd3_symlinkargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: SYMLINK(3)  %s %s -> %s\n",
+	dprintk("nfsd: SYMLINK(3)  %s %.*s -> %.*s\n",
 				SVCFH_fmt(&argp->ffh),
-				argp->fname, argp->tname);
+				argp->flen, argp->fname,
+				argp->tlen, argp->tname);
 
 	fh_copy(&resp->dirfh, &argp->ffh);
 	fh_init(&resp->fh, NFS3_FHSIZE);
@@ -319,8 +324,9 @@ nfsd3_proc_mknod(struct svc_rqst *rqstp, struct nfsd3_mknodargs *argp,
 	int	nfserr, type;
 	dev_t	rdev = 0;
 
-	dprintk("nfsd: MKNOD(3)    %s %s\n",
+	dprintk("nfsd: MKNOD(3)    %s %.*s\n",
 				SVCFH_fmt(&argp->fh),
+				argp->len,
 				argp->name);
 
 	fh_copy(&resp->dirfh, &argp->fh);
@@ -354,8 +360,9 @@ nfsd3_proc_remove(struct svc_rqst *rqstp, struct nfsd3_diropargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: REMOVE(3)   %s %s\n",
+	dprintk("nfsd: REMOVE(3)   %s %.*s\n",
 				SVCFH_fmt(&argp->fh),
+				argp->len,
 				argp->name);
 
 	/* Unlink. -S_IFDIR means file must not be a directory */
@@ -373,8 +380,9 @@ nfsd3_proc_rmdir(struct svc_rqst *rqstp, struct nfsd3_diropargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: RMDIR(3)    %s %s\n",
+	dprintk("nfsd: RMDIR(3)    %s %.*s\n",
 				SVCFH_fmt(&argp->fh),
+				argp->len,
 				argp->name);
 
 	fh_copy(&resp->fh, &argp->fh);
@@ -388,11 +396,13 @@ nfsd3_proc_rename(struct svc_rqst *rqstp, struct nfsd3_renameargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: RENAME(3)   %s %s ->\n",
+	dprintk("nfsd: RENAME(3)   %s %.*s ->\n",
 				SVCFH_fmt(&argp->ffh),
+				argp->flen,
 				argp->fname);
-	dprintk("nfsd: -> %s %s\n",
+	dprintk("nfsd: -> %s %.*s\n",
 				SVCFH_fmt(&argp->tfh),
+				argp->tlen,
 				argp->tname);
 
 	fh_copy(&resp->ffh, &argp->ffh);
@@ -410,8 +420,9 @@ nfsd3_proc_link(struct svc_rqst *rqstp, struct nfsd3_linkargs *argp,
 
 	dprintk("nfsd: LINK(3)     %s ->\n",
 				SVCFH_fmt(&argp->ffh));
-	dprintk("nfsd:   -> %s %s\n",
+	dprintk("nfsd:   -> %s %.*s\n",
 				SVCFH_fmt(&argp->tfh),
+				argp->tlen,
 				argp->tname);
 
 	fh_copy(&resp->fh,  &argp->ffh);
@@ -542,6 +553,7 @@ nfsd3_proc_fsinfo(struct svc_rqst * rqstp, struct nfsd_fhandle    *argp,
 		if (sb->s_magic == 0x4d44 /* MSDOS_SUPER_MAGIC */) {
 			resp->f_properties = NFS3_FSF_BILLYBOY;
 		}
+		resp->f_maxfilesize = sb->s_maxbytes;
 	}
 
 	fh_put(&argp->fh);

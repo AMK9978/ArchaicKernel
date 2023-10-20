@@ -26,7 +26,7 @@
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/major.h>
 #include <linux/fs.h>
@@ -44,16 +44,29 @@
 #include <linux/genhd.h>
 
 #define CCISS_DRIVER_VERSION(maj,min,submin) ((maj<<16)|(min<<8)|(submin))
-#define DRIVER_NAME "Compaq CISS Driver (v 2.4.0)"
-#define DRIVER_VERSION CCISS_DRIVER_VERSION(2,4,0)
+#define DRIVER_NAME "Compaq CISS Driver (v 2.4.5)"
+#define DRIVER_VERSION CCISS_DRIVER_VERSION(2,4,5)
 
 /* Embedded module documentation macros - see modules.h */
 MODULE_AUTHOR("Charles M. White III - Compaq Computer Corporation");
 MODULE_DESCRIPTION("Driver for Compaq Smart Array Controller 5300");
+MODULE_LICENSE("GPL");
 
 #include "cciss_cmd.h"
 #include "cciss.h"
 #include <linux/cciss_ioctl.h>
+
+/* define the PCI info for the cards we can control */
+const struct pci_device_id cciss_pci_device_id[] = {
+	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_CISS,
+			0x0E11, 0x4070, 0, 0, 0},
+	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_CISSB,
+                        0x0E11, 0x4080, 0, 0, 0},
+	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_CISSB,
+                        0x0E11, 0x4082, 0, 0, 0},
+	{0,}
+};
+MODULE_DEVICE_TABLE(pci, cciss_pci_device_id);
 
 #define NR_PRODUCTS (sizeof(products)/sizeof(struct board_type))
 
@@ -63,6 +76,8 @@ MODULE_DESCRIPTION("Driver for Compaq Smart Array Controller 5300");
  */
 static struct board_type products[] = {
 	{ 0x40700E11, "Smart Array 5300",	&SA5_access },
+	{ 0x40800E11, "Smart Array 5i", &SA5B_access},
+	{ 0x40820E11, "Smart Array 532", &SA5B_access},
 };
 
 /* How long to wait (in millesconds) for board to go into simple mode */
@@ -71,28 +86,14 @@ static struct board_type products[] = {
 #define READ_AHEAD 	 128
 #define NR_CMDS		 128 /* #commands that can be outstanding */
 #define MAX_CTLR 8
-static int nr_ctlr; 
+
+#define CCISS_DMA_MASK	0xFFFFFFFF	/* 32 bit DMA */
+
 static ctlr_info_t *hba[MAX_CTLR];
 
 static struct proc_dir_entry *proc_cciss;
 
-static void do_cciss_request(int i);
-/*
- * This is a hack.  This driver eats a major number for each controller, and
- * sets blkdev[xxx].request_fn to each one of these so the real request
- * function knows what controller its working with.
- */
-#define DO_CCISS_REQUEST(x) { do_cciss_request(x); }
-
-static void do_cciss_request0(request_queue_t * q) DO_CCISS_REQUEST(0);
-static void do_cciss_request1(request_queue_t * q) DO_CCISS_REQUEST(1);
-static void do_cciss_request2(request_queue_t * q) DO_CCISS_REQUEST(2);
-static void do_cciss_request3(request_queue_t * q) DO_CCISS_REQUEST(3);
-static void do_cciss_request4(request_queue_t * q) DO_CCISS_REQUEST(4);
-static void do_cciss_request5(request_queue_t * q) DO_CCISS_REQUEST(5);
-static void do_cciss_request6(request_queue_t * q) DO_CCISS_REQUEST(6);
-static void do_cciss_request7(request_queue_t * q) DO_CCISS_REQUEST(7);
-
+static void do_cciss_request(request_queue_t *q);
 static int cciss_open(struct inode *inode, struct file *filep);
 static int cciss_release(struct inode *inode, struct file *filep);
 static int cciss_ioctl(struct inode *inode, struct file *filep, 
@@ -118,6 +119,7 @@ static void cciss_procinit(int i) {}
 #endif /* CONFIG_PROC_FS */
 
 static struct block_device_operations cciss_fops  = {
+	owner:			THIS_MODULE,
 	open:			cciss_open, 
 	release:        	cciss_release,
         ioctl:			cciss_ioctl,
@@ -139,10 +141,10 @@ static int cciss_proc_get_info(char *buffer, char **start, off_t offset,
 
         ctlr = h->ctlr;
         size = sprintf(buffer, "%s:  Compaq %s Controller\n"
-                "       Board ID: %08lx\n"
+                "       Board ID: 0x%08lx\n"
 		"       Firmware Version: %c%c%c%c\n"
-                "       Memory Address: %08lx\n"
-                "       IRQ: 0x%x\n"
+                "       Memory Address: 0x%08lx\n"
+                "       IRQ: %d\n"
                 "       Logical drives: %d\n"
                 "       Current Q depth: %d\n"
 		"       Current # commands on controller %d\n"
@@ -186,7 +188,7 @@ static int cciss_proc_get_info(char *buffer, char **start, off_t offset,
 static void __init cciss_procinit(int i)
 {
         if (proc_cciss == NULL) {
-                proc_cciss = proc_mkdir("driver/cciss", NULL);
+                proc_cciss = proc_mkdir("cciss", proc_root_driver);
                 if (!proc_cciss) 
 			return;
         }
@@ -200,29 +202,32 @@ static void __init cciss_procinit(int i)
  * For operations that cannot sleep, a command block is allocated at init, 
  * and managed by cmd_alloc() and cmd_free() using a simple bitmap to track
  * which ones are free or in use.  For operations that can wait for kmalloc 
- * to possible sleep, this routine can be called with a NULL pointer. 
- * cmd_free() MUST be called with a NULL pointer if cmd_alloc was. 
+ * to possible sleep, this routine can be called with get_from_pool set to 0. 
+ * cmd_free() MUST be called with a got_from_pool set to 0 if cmd_alloc was. 
  */ 
-static CommandList_struct * cmd_alloc(ctlr_info_t *h)
+static CommandList_struct * cmd_alloc(ctlr_info_t *h, int get_from_pool)
 {
 	CommandList_struct *c;
 	int i; 
 	u64bit temp64;
+	dma_addr_t cmd_dma_handle, err_dma_handle;
 
-	if (h == NULL)
+	if (!get_from_pool)
 	{
-		c = (CommandList_struct *)kmalloc(sizeof(CommandList_struct), 
-			GFP_KERNEL);
+		c = (CommandList_struct *) pci_alloc_consistent(
+			h->pdev, sizeof(CommandList_struct), &cmd_dma_handle); 
         	if(c==NULL)
                  	return NULL;
 		memset(c, 0, sizeof(CommandList_struct));
 
-		c->err_info = (ErrorInfo_struct *)kmalloc(
-					sizeof(ErrorInfo_struct), GFP_KERNEL);
+		c->err_info = (ErrorInfo_struct *)pci_alloc_consistent(
+					h->pdev, sizeof(ErrorInfo_struct), 
+					&err_dma_handle);
 	
 		if (c->err_info == NULL)
 		{
-			kfree(c);
+			pci_free_consistent(h->pdev, 
+				sizeof(CommandList_struct), c, cmd_dma_handle);
 			return NULL;
 		}
 		memset(c->err_info, 0, sizeof(ErrorInfo_struct));
@@ -237,18 +242,23 @@ static CommandList_struct * cmd_alloc(ctlr_info_t *h)
 		printk(KERN_DEBUG "cciss: using command buffer %d\n", i);
 #endif
                 c = h->cmd_pool + i;
-		memset(c, 0, sizeof(CommandList_struct));			
+		memset(c, 0, sizeof(CommandList_struct));
+		cmd_dma_handle = h->cmd_pool_dhandle 
+					+ i*sizeof(CommandList_struct);
 		c->err_info = h->errinfo_pool + i;
 		memset(c->err_info, 0, sizeof(ErrorInfo_struct));
+		err_dma_handle = h->errinfo_pool_dhandle 
+					+ i*sizeof(ErrorInfo_struct);
                 h->nr_allocs++;
         }
 
-
-	temp64.val = (__u64) virt_to_bus(c->err_info);
+	c->busaddr = (__u32) cmd_dma_handle;
+	temp64.val = (__u64) err_dma_handle;	
 	c->ErrDesc.Addr.lower = temp64.val32.lower;
 	c->ErrDesc.Addr.upper = temp64.val32.upper;
 	c->ErrDesc.Len = sizeof(ErrorInfo_struct);
-       	c->busaddr = virt_to_bus(c);
+	
+	c->ctlr = h->ctlr;
         return c;
 
 
@@ -257,14 +267,19 @@ static CommandList_struct * cmd_alloc(ctlr_info_t *h)
 /* 
  * Frees a command block that was previously allocated with cmd_alloc(). 
  */
-static void cmd_free(ctlr_info_t *h, CommandList_struct *c)
+static void cmd_free(ctlr_info_t *h, CommandList_struct *c, int got_from_pool)
 {
 	int i;
+	u64bit temp64;
 
-	if( h == NULL)
+	if( !got_from_pool)
 	{ 
-		kfree(c->err_info);
-		kfree(c);	
+		temp64.val32.lower = c->ErrDesc.Addr.lower;
+		temp64.val32.upper = c->ErrDesc.Addr.upper;
+		pci_free_consistent(h->pdev, sizeof(ErrorInfo_struct), 
+			c->err_info, (dma_addr_t) temp64.val);
+		pci_free_consistent(h->pdev, sizeof(CommandList_struct), 
+			c, (dma_addr_t) c->busaddr);
 	} else 
 	{
 		i = c - h->cmd_pool;
@@ -333,7 +348,6 @@ static int cciss_open(struct inode *inode, struct file *filep)
 
 	hba[ctlr]->drv[dsk].usage_count++;
 	hba[ctlr]->usage_count++;
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 /*
@@ -352,7 +366,6 @@ static int cciss_release(struct inode *inode, struct file *filep)
 
 	hba[ctlr]->drv[dsk].usage_count--;
 	hba[ctlr]->usage_count--;
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -387,25 +400,31 @@ static int cciss_ioctl(struct inode *inode, struct file *filep,
 		put_user(hba[ctlr]->hd[MINOR(inode->i_rdev)].start_sect, &geo->start);
 		return 0;
 	case BLKGETSIZE:
-		if (!arg) return -EINVAL;
-		put_user(hba[ctlr]->hd[MINOR(inode->i_rdev)].nr_sects, (long*)arg);
+		put_user(hba[ctlr]->hd[MINOR(inode->i_rdev)].nr_sects, (unsigned long *)arg);
+		return 0;
+	case BLKGETSIZE64:
+		put_user((u64)hba[ctlr]->hd[MINOR(inode->i_rdev)].nr_sects << 9, (u64*)arg);
 		return 0;
 	case BLKRRPART:
 		return revalidate_logvol(inode->i_rdev, 1);
 	case BLKFLSBUF:
+	case BLKBSZSET:
+	case BLKBSZGET:
 	case BLKROSET:
 	case BLKROGET:
 	case BLKRASET:
 	case BLKRAGET:
 	case BLKPG:
+	case BLKELVGET:
+	case BLKELVSET:
 		return( blk_ioctl(inode->i_rdev, cmd, arg));
 	case CCISS_GETPCIINFO:
 	{
 		cciss_pci_info_struct pciinfo;
 
 		if (!arg) return -EINVAL;
-		pciinfo.bus = hba[ctlr]->pci_bus;
-		pciinfo.dev_fn = hba[ctlr]->pci_dev_fn;
+		pciinfo.bus = hba[ctlr]->pdev->bus->number;
+		pciinfo.dev_fn = hba[ctlr]->pdev->devfn;
 		pciinfo.board_id = hba[ctlr]->board_id;
 		if (copy_to_user((void *) arg, &pciinfo,  sizeof( cciss_pci_info_struct )))
 			return  -EFAULT;
@@ -598,12 +617,14 @@ static int cciss_ioctl(struct inode *inode, struct file *filep,
 		{
 			/* Copy the data into the buffer we created */ 
 			if (copy_from_user(buff, iocommand.buf, iocommand.buf_size))
-				return -EFAULT;
-		}
-		if ((c = cmd_alloc(NULL)) == NULL)
-		{
-			if(buff!=NULL)
+			{
 				kfree(buff);
+				return -EFAULT;
+			}
+		}
+		if ((c = cmd_alloc(h , 0)) == NULL)
+		{
+			kfree(buff);
 			return -ENOMEM;
 		}
 			// Fill in the command type 
@@ -627,8 +648,10 @@ static int cciss_ioctl(struct inode *inode, struct file *filep,
 	
 		// Fill in the scatter gather information
 		if (iocommand.buf_size > 0 ) 
-		{	
-			temp64.val = (__u64) virt_to_bus(buff);
+		{
+			temp64.val = pci_map_single( h->pdev, buff,
+                                        iocommand.buf_size, 
+                                PCI_DMA_BIDIRECTIONAL);	
 			c->SG[0].Addr.lower = temp64.val32.lower;
 			c->SG[0].Addr.upper = temp64.val32.upper;
 			c->SG[0].Len = iocommand.buf_size;
@@ -645,13 +668,18 @@ static int cciss_ioctl(struct inode *inode, struct file *filep,
 		while(c->cmd_type != CMD_IOCTL_DONE)
 			schedule_timeout(1);
 
+		/* unlock the buffers from DMA */
+		temp64.val32.lower = c->SG[0].Addr.lower;
+                temp64.val32.upper = c->SG[0].Addr.upper;
+                pci_unmap_single( h->pdev, (dma_addr_t) temp64.val,
+                	iocommand.buf_size, PCI_DMA_BIDIRECTIONAL);
+
 		/* Copy the error information out */ 
 		iocommand.error_info = *(c->err_info);
 		if ( copy_to_user((void *) arg, &iocommand, sizeof( IOCTL_Command_struct) ) )
 		{
-			cmd_free(NULL, c);
-			if (buff != NULL) 
-				kfree(buff);
+			kfree(buff);
+			cmd_free(h, c, 0);
 			return( -EFAULT);	
 		} 	
 
@@ -660,13 +688,13 @@ static int cciss_ioctl(struct inode *inode, struct file *filep,
                         /* Copy the data out of the buffer we created */
                         if (copy_to_user(iocommand.buf, buff, iocommand.buf_size))
 			{
-			             cmd_free(NULL, c);
-			             kfree(buff);
+                        	kfree(buff);
+				cmd_free(h, c, 0);
+				return -EFAULT;
 			}
                 }
-		cmd_free(NULL, c);
-                if (buff != NULL)
-                	kfree(buff);
+                kfree(buff);
+		cmd_free(h, c, 0);
                 return(0);
 	} 
 
@@ -693,7 +721,7 @@ static int revalidate_logvol(kdev_t dev, int maxusage)
         spin_lock_irqsave(&io_request_lock, flags);
         if (hba[ctlr]->drv[target].usage_count > maxusage) {
                 spin_unlock_irqrestore(&io_request_lock, flags);
-                printk(KERN_WARNING "cpqarray: Device busy for "
+                printk(KERN_WARNING "cciss: Device busy for "
                         "revalidation (usage=%d)\n",
                         hba[ctlr]->drv[target].usage_count);
                 return -EBUSY;
@@ -704,13 +732,9 @@ static int revalidate_logvol(kdev_t dev, int maxusage)
         max_p = gdev->max_p;
         start = target << gdev->minor_shift;
 
-        for(i=max_p; i>=0; i--) {
+        for(i=max_p-1; i>=0; i--) {
                 int minor = start+i;
-                kdev_t devi = MKDEV(MAJOR_NR + ctlr, minor);
-                struct super_block *sb = get_super(devi);
-                sync_dev(devi);
-                if (sb) invalidate_inodes(sb);
-                invalidate_buffers(devi);
+                invalidate_device(MKDEV(MAJOR_NR + ctlr, minor), 1);
                 gdev->part[minor].start_sect = 0;
                 gdev->part[minor].nr_sects = 0;
 
@@ -775,7 +799,7 @@ static int revalidate_allvol(kdev_t dev)
         hba[ctlr]->gendisk.nr_real = 0;
 
         /*
-         * Tell the array controller not to give us any interupts while
+         * Tell the array controller not to give us any interrupts while
          * we check the new geometry.  Then turn interrupts back on when
          * we're done.
          */
@@ -833,9 +857,9 @@ static int sendcmd(
 	int i;
 	unsigned long complete;
 	ctlr_info_t *info_p= hba[ctlr];
-	u64bit temp64;
+	u64bit buff_dma_handle;
 
-	c = cmd_alloc(info_p);
+	c = cmd_alloc(info_p, 1);
 	if (c == NULL)
 	{
 		printk(KERN_WARNING "cciss: unable to get memory");
@@ -916,15 +940,16 @@ static int sendcmd(
 			printk(KERN_WARNING
 				"cciss:  Unknown Command 0x%c sent attempted\n",
 				  cmd);
-			cmd_free(info_p, c);
+			cmd_free(info_p, c, 1);
 			return(IO_ERROR);
 	};
 	// Fill in the scatter gather information
 	if (size > 0 ) 
 	{
-		temp64.val = (__u64) virt_to_bus(buff);
-		c->SG[0].Addr.lower = temp64.val32.lower;
-		c->SG[0].Addr.upper = temp64.val32.upper;
+		buff_dma_handle.val = (__u64) pci_map_single( info_p->pdev, 
+			buff, size, PCI_DMA_BIDIRECTIONAL);
+		c->SG[0].Addr.lower = buff_dma_handle.val32.lower;
+		c->SG[0].Addr.upper = buff_dma_handle.val32.upper;
 		c->SG[0].Len = size;
 		c->SG[0].Ext = 0;  // we are not chaining
 	}
@@ -960,6 +985,9 @@ static int sendcmd(
 	printk(KERN_DEBUG "cciss: command completed\n");
 #endif /* CCISS_DEBUG */
 
+	/* unlock the data buffer from DMA */
+	pci_unmap_single(info_p->pdev, (dma_addr_t) buff_dma_handle.val,
+                                size, PCI_DMA_BIDIRECTIONAL);
 	if (complete != 1) {
 		if ( (complete & CISS_ERROR_BIT)
 		     && (complete & ~CISS_ERROR_BIT) == c->busaddr)
@@ -987,7 +1015,7 @@ static int sendcmd(
 				  c->err_info->MoreErrInfo.Invalid_Cmd.offense_size,
 				  c->err_info->MoreErrInfo.Invalid_Cmd.offense_num,
 				  c->err_info->MoreErrInfo.Invalid_Cmd.offense_value);
-				cmd_free(info_p,c);
+				cmd_free(info_p,c, 1);
 				return(IO_ERROR);
 			}
 		}
@@ -995,7 +1023,7 @@ static int sendcmd(
                         printk( KERN_WARNING "cciss cciss%d: SendCmd "
                       "Invalid command list address returned! (%lx)\n",
                                 ctlr, complete);
-                        cmd_free(info_p, c);
+                        cmd_free(info_p, c, 1);
                         return (IO_ERROR);
                 }
         } else {
@@ -1003,10 +1031,10 @@ static int sendcmd(
                         "cciss cciss%d: SendCmd Timeout out, "
                         "No command list address returned!\n",
                         ctlr);
-                cmd_free(info_p, c);
+                cmd_free(info_p, c, 1);
                 return (IO_ERROR);
         }
-	cmd_free(info_p, c);
+	cmd_free(info_p, c, 1);
         return (IO_OK);
 } 
 /*
@@ -1086,6 +1114,7 @@ static inline void complete_buffers( struct buffer_head *bh, int status)
 	{
 		xbh = bh->b_reqnext; 
 		bh->b_reqnext = NULL; 
+		blk_finished_io(bh->b_size >> 9);
 		bh->b_end_io(bh, status);
 		bh = xbh;
 	}
@@ -1096,11 +1125,24 @@ static inline void complete_buffers( struct buffer_head *bh, int status)
 static inline void complete_command( CommandList_struct *cmd, int timeout)
 {
 	int status = 1;
-	
+	int i;
+	u64bit temp64;
+		
 	if (timeout)
 		status = 0; 
+	/* unmap the DMA mapping for all the scatter gather elements */
+	for(i=0; i<cmd->Header.SGList; i++)
+	{
+		temp64.val32.lower = cmd->SG[i].Addr.lower;
+		temp64.val32.upper = cmd->SG[i].Addr.upper;
+		pci_unmap_single(hba[cmd->ctlr]->pdev,
+			temp64.val, cmd->SG[i].Len, 
+			(cmd->Request.Type.Direction == XFER_READ) ? 
+				PCI_DMA_FROMDEVICE : PCI_DMA_TODEVICE);
+	}
+
 	if(cmd->err_info->CommandStatus != 0) 
-	{ /* an error has occured */ 
+	{ /* an error has occurred */ 
 		switch(cmd->err_info->CommandStatus)
 		{
 			case CMD_TARGET_STATUS:
@@ -1172,63 +1214,112 @@ static inline void complete_command( CommandList_struct *cmd, int timeout)
 				status=0;
 		}
 	}
-	complete_buffers(cmd->bh, status);
+	complete_buffers(cmd->rq->bh, status);
+
+#ifdef CCISS_DEBUG
+	printk("Done with %p\n", cmd->rq);
+#endif /* CCISS_DEBUG */ 
+	end_that_request_last(cmd->rq);
 }
+
+
+static inline int cpq_new_segment(request_queue_t *q, struct request *rq,
+                                  int max_segments)
+{
+        if (rq->nr_segments < MAXSGENTRIES) {
+                rq->nr_segments++;
+                return 1;
+        }
+        return 0;
+}
+
+static int cpq_back_merge_fn(request_queue_t *q, struct request *rq,
+                             struct buffer_head *bh, int max_segments)
+{
+        if (rq->bhtail->b_data + rq->bhtail->b_size == bh->b_data)
+                return 1;
+        return cpq_new_segment(q, rq, max_segments);
+}
+
+static int cpq_front_merge_fn(request_queue_t *q, struct request *rq,
+                             struct buffer_head *bh, int max_segments)
+{
+        if (bh->b_data + bh->b_size == rq->bh->b_data)
+                return 1;
+        return cpq_new_segment(q, rq, max_segments);
+}
+
+static int cpq_merge_requests_fn(request_queue_t *q, struct request *rq,
+                                 struct request *nxt, int max_segments)
+{
+        int total_segments = rq->nr_segments + nxt->nr_segments;
+
+        if (rq->bhtail->b_data + rq->bhtail->b_size == nxt->bh->b_data)
+                total_segments--;
+
+        if (total_segments > MAXSGENTRIES)
+                return 0;
+
+        rq->nr_segments = total_segments;
+        return 1;
+}
+
 /* 
  * Get a request and submit it to the controller. 
  * Currently we do one request at a time.  Ideally we would like to send
  * everything to the controller on the first call, but there is a danger
  * of holding the io_request_lock for to long.  
  */
-static void do_cciss_request(int ctlr)
+static void do_cciss_request(request_queue_t *q)
 {
-	ctlr_info_t *h= hba[ctlr];
+	ctlr_info_t *h= q->queuedata; 
 	CommandList_struct *c;
-	int log_unit, start_blk, seg, sect;
+	int log_unit, start_blk, seg;
 	char *lastdataend;
 	struct buffer_head *bh;
-	struct list_head *queue_head;
+	struct list_head *queue_head = &q->queue_head;
 	struct request *creq;
 	u64bit temp64;
+	struct my_sg tmp_sg[MAXSGENTRIES];
+	int i;
 
-	queue_head = &blk_dev[MAJOR_NR+ctlr].request_queue.queue_head;	
+	if (q->plugged)
+		goto startio;
+
+queue_next:
 	if (list_empty(queue_head))
-	{
-		/* nothing to do... */
-		start_io(h);
-		return;
-	}
+		goto startio;
+
 	creq =	blkdev_entry_next_request(queue_head); 
-	if ((creq == NULL) || (creq->rq_status == RQ_INACTIVE))
-	{
-		/* nothing to do... restart processing and return */ 
-		start_io(h);
-		return;
-	}
-	if ((ctlr != (MAJOR(creq->rq_dev)-MAJOR_NR)) || (ctlr > nr_ctlr)
-		|| (h == NULL))
-	{
-#ifdef CCISS_DEBUG
-		printk(KERN_WARNING "cciss: doreq cmd of %d, %x at %p\n",
-			ctlr, creq->rq_dev, creq);
-#endif /* CCISS_DEBUG */
-		complete_buffers(creq->bh, 0);
-		start_io(h); 
-		return;
-	}
-	if (( c = cmd_alloc(h)) == NULL)
-	{
-		start_io(h);
-		return;
-	}
+	if (creq->nr_segments > MAXSGENTRIES)
+                BUG();
+
+        if (h->ctlr != MAJOR(creq->rq_dev)-MAJOR_NR )
+        {
+                printk(KERN_WARNING "doreq cmd for %d, %x at %p\n",
+                                h->ctlr, creq->rq_dev, creq);
+                blkdev_dequeue_request(creq);
+                complete_buffers(creq->bh, 0);
+		end_that_request_last(creq);
+		goto startio;
+        }
+
+	if (( c = cmd_alloc(h, 1)) == NULL)
+		goto startio;
+
+	blkdev_dequeue_request(creq);
+
+	spin_unlock_irq(&io_request_lock);
+
 	c->cmd_type = CMD_RWREQ;      
-	bh = c->bh = creq->bh;
+	bh = creq->bh;
+	c->rq = creq;
 	
 	/* fill in the request */ 
 	log_unit = MINOR(creq->rq_dev) >> NWD_SHIFT; 
 	c->Header.ReplyQueue = 0;  // unused in simple mode
 	c->Header.Tag.lower = c->busaddr;  // use the physical address the cmd block for tag
-	c->Header.LUN.LogDev.VolId= hba[ctlr]->drv[log_unit].LunID;
+	c->Header.LUN.LogDev.VolId= hba[h->ctlr]->drv[log_unit].LunID;
 	c->Header.LUN.LogDev.Mode = 1;
 	c->Request.CDBLen = 10; // 12 byte commands not in FW yet;
 	c->Request.Type.Type =  TYPE_CMD; // It is a command. 
@@ -1237,54 +1328,51 @@ static void do_cciss_request(int ctlr)
 		(creq->cmd == READ) ? XFER_READ: XFER_WRITE; 
 	c->Request.Timeout = 0; // Don't time out	
 	c->Request.CDB[0] = (creq->cmd == READ) ? CCISS_READ : CCISS_WRITE;
-	start_blk = hba[ctlr]->hd[MINOR(creq->rq_dev)].start_sect + creq->sector;
+	start_blk = hba[h->ctlr]->hd[MINOR(creq->rq_dev)].start_sect + creq->sector;
+#ifdef CCISS_DEBUG
 	if (bh == NULL)
 		panic("cciss: bh== NULL?");
-#ifdef CCISS_DEBUG
 	printk(KERN_DEBUG "ciss: sector =%d nr_sectors=%d\n",(int) creq->sector,
 		(int) creq->nr_sectors);	
 #endif /* CCISS_DEBUG */
 	seg = 0; 
 	lastdataend = NULL;
-	sect = 0;
 	while(bh)
 	{
-		sect += bh->b_size/512;
-		if (bh->b_size % 512)
-		{
-			printk(KERN_CRIT "cciss:  Oh Man.  %d+%d, size=%d\n", 
-				(int) creq->sector, sect, (int) bh->b_size);
-			panic("b_size 512 != 0\n");
-		}
 		if (bh->b_data == lastdataend)
 		{  // tack it on to the last segment 
-			c->SG[seg-1].Len +=bh->b_size;
+			tmp_sg[seg-1].len +=bh->b_size;
 			lastdataend += bh->b_size;
 		} else
 		{
-			c->SG[seg].Len = bh->b_size;
-			temp64.val = (__u64) virt_to_bus(bh->b_data);
-			c->SG[seg].Addr.lower = temp64.val32.lower;
-			c->SG[seg].Addr.upper = temp64.val32.upper;
-			c->SG[0].Ext = 0;  // we are not chaining
+			if (seg == MAXSGENTRIES)
+				BUG();
+			tmp_sg[seg].len = bh->b_size;
+			tmp_sg[seg].start_addr = bh->b_data;
 			lastdataend = bh->b_data + bh->b_size;
-			if( ++seg == MAXSGENTRIES)
-			{
-				break; 
-			}
+			seg++;
 		}
 		bh = bh->b_reqnext;
+	}
+	/* get the DMA records for the setup */ 
+	for (i=0; i<seg; i++)
+	{
+		c->SG[i].Len = tmp_sg[i].len;
+		temp64.val = (__u64) pci_map_single( h->pdev,
+			tmp_sg[i].start_addr,
+			tmp_sg[i].len,
+			(c->Request.Type.Direction == XFER_READ) ? 
+                                PCI_DMA_FROMDEVICE : PCI_DMA_TODEVICE);
+		c->SG[i].Addr.lower = temp64.val32.lower;
+                c->SG[i].Addr.upper = temp64.val32.upper;
+                c->SG[i].Ext = 0;  // we are not chaining
 	}
 	/* track how many SG entries we are using */ 
 	if( seg > h->maxSG)
 		h->maxSG = seg; 
 
-	/* adjusting the remaining request, if any */ 
-	creq-> sector+= sect;
-	creq->nr_sectors -= sect; 
-
 #ifdef CCISS_DEBUG
-	printk(KERN_DEBUG "cciss: Submitting %d sectors in %d segments\n", sect, seg);
+	printk(KERN_DEBUG "cciss: Submitting %d sectors in %d segments\n", creq->nr_sectors, seg);
 #endif /* CCISS_DEBUG */
 
 	c->Header.SGList = c->Header.SGTotal = seg;
@@ -1294,35 +1382,19 @@ static void do_cciss_request(int ctlr)
 	c->Request.CDB[4]= (start_blk >>  8) & 0xff;
 	c->Request.CDB[5]= start_blk & 0xff;
 	c->Request.CDB[6]= 0; // (sect >> 24) & 0xff; MSB
-	// c->Request.CDB[7]= (sect >> 16) & 0xff; 
-	c->Request.CDB[7]= (sect >>  8) & 0xff; 
-	c->Request.CDB[8]= sect & 0xff; 
+	c->Request.CDB[7]= (creq->nr_sectors >>  8) & 0xff; 
+	c->Request.CDB[8]= creq->nr_sectors & 0xff; 
 	c->Request.CDB[9] = c->Request.CDB[11] = c->Request.CDB[12] = 0;
 
-	/* check to see if we going to complete the entire request */ 
-	/* if so, mark this request as Done and ready the next one */ 
-	if (creq->nr_sectors)
-	{
-#ifdef CCISS_DEBUG
-		printk(KERN_DEBUG "cciss: More to do on the same request %p %ld\n", 
-			creq, creq->nr_sectors);
-#endif /* CCISS_DEBUG */
+	spin_lock_irq(&io_request_lock);
 
-		creq->bh = bh->b_reqnext;
-		bh->b_reqnext = NULL;
-	} else
-	{
-#ifdef CCISS_DEBUG
-		printk("cciss: Done with %p, queueing %p\n", creq);
-#endif /* CCISS_DEBUG */
-			
-		blkdev_dequeue_request(creq);
-		end_that_request_last(creq);
-	}
 	addQ(&(h->reqQ),c);
 	h->Qdepth++;
 	if(h->Qdepth > h->maxQsinceinit)
 		h->maxQsinceinit = h->Qdepth; 
+
+	goto queue_next;
+startio:
 	start_io(h);
 }
 
@@ -1351,7 +1423,7 @@ static void do_cciss_intr(int irq, void *dev_id, struct pt_regs *regs)
 			a &= ~3;
 			if ((c = h->cmpQ) == NULL)
 			{  
-				printk(KERN_WARNING "cpqarray: Completion of %08lx ignored\n", (unsigned long)a1);
+				printk(KERN_WARNING "cciss: Completion of %08lx ignored\n", (unsigned long)a1);
 				continue;	
 			} 
 			while(c->busaddr != a) {
@@ -1367,7 +1439,7 @@ static void do_cciss_intr(int irq, void *dev_id, struct pt_regs *regs)
 				removeQ(&h->cmpQ, c);
 				if (c->cmd_type == CMD_RWREQ) {
 					complete_command(c, 0);
-					cmd_free(h, c);
+					cmd_free(h, c, 1);
 				} else if (c->cmd_type == CMD_IOCTL_PEND) {
 					c->cmd_type = CMD_IOCTL_DONE;
 				}
@@ -1378,7 +1450,7 @@ static void do_cciss_intr(int irq, void *dev_id, struct pt_regs *regs)
 	/*
 	 * See if we can queue up some more IO
 	 */
-	do_cciss_request(h->ctlr);
+	do_cciss_request(BLK_DEFAULT_QUEUE(MAJOR_NR + h->ctlr));
 	spin_unlock_irqrestore(&io_request_lock, flags);
 }
 /* 
@@ -1419,20 +1491,20 @@ static void print_cfg_table( CfgTable_struct *tb)
 	printk("   Heartbeat Counter = 0x%x\n\n\n", 
 			readl(&(tb->HeartBeat)));
 }
-#endif /* CCISS_DEBUG */
+#endif /* CCISS_DEBUG */ 
 
-static int cciss_pci_init(ctlr_info_t *c, unchar bus, unchar device_fn)
+static int cciss_pci_init(ctlr_info_t *c, struct pci_dev *pdev)
 {
 	ushort vendor_id, device_id, command;
 	unchar cache_line_size, latency_timer;
 	unchar irq, revision;
 	uint addr[6];
 	__u32 board_id;
-	struct pci_dev *pdev;
-
+	int cfg_offset;
+	int cfg_base_addr;
+	int cfg_base_addr_index;
 	int i;
 
-	pdev = pci_find_slot(bus, device_fn);
 	vendor_id = pdev->vendor;
 	device_id = pdev->device;
 	irq = pdev->irq;
@@ -1441,7 +1513,15 @@ static int cciss_pci_init(ctlr_info_t *c, unchar bus, unchar device_fn)
 		addr[i] = pdev->resource[i].start;
 
 	if (pci_enable_device(pdev))
+	{
+		printk(KERN_ERR "cciss: Unable to Enable PCI device\n");
 		return( -1);
+	}
+	if (pci_set_dma_mask(pdev, CCISS_DMA_MASK ) != 0)
+	{
+		printk(KERN_ERR "cciss:  Unable to set DMA mask\n");
+		return(-1);
+	}
 	
 	(void) pci_read_config_word(pdev, PCI_COMMAND,&command);
 	(void) pci_read_config_byte(pdev, PCI_CLASS_REVISION, &revision);
@@ -1472,15 +1552,38 @@ static int cciss_pci_init(ctlr_info_t *c, unchar bus, unchar device_fn)
 	 * Memory base addr is first addr , the second points to the config
          *   table
 	 */
-	c->paddr = pci_resource_start(pdev, 0);
-	c->vaddr = remap_pci_mem(c->paddr, 128);
-	c->cfgtable = (CfgTable_struct *) remap_pci_mem(addr[1], 
-						sizeof(CfgTable_struct));
+
+	c->paddr = addr[0] & 0xfffffff0; /* remove the addressing mode bits */
+#ifdef CCISS_DEBUG
+	printk("address 0 = %x\n", c->paddr);
+#endif /* CCISS_DEBUG */ 
+	c->vaddr = remap_pci_mem(c->paddr, 200);
+
+	/* get the address index number */
+	cfg_base_addr = readl(c->vaddr + SA5_CTCFG_OFFSET);
+	/* I am not prepared to deal with a 64 bit address value */
+	cfg_base_addr &= 0xffff;
+#ifdef CCISS_DEBUG
+	printk("cfg base address = %x\n", cfg_base_addr);
+#endif /* CCISS_DEBUG */
+	cfg_base_addr_index = (cfg_base_addr  - PCI_BASE_ADDRESS_0)/4;
+#ifdef CCISS_DEBUG
+	printk("cfg base address index = %x\n", cfg_base_addr_index);
+#endif /* CCISS_DEBUG */
+
+	cfg_offset = readl(c->vaddr + SA5_CTMEM_OFFSET);
+#ifdef CCISS_DEBUG
+	printk("cfg offset = %x\n", cfg_offset);
+#endif /* CCISS_DEBUG */
+	c->cfgtable = (CfgTable_struct *) 
+		remap_pci_mem((addr[cfg_base_addr_index] & 0xfffffff0)
+				+ cfg_offset, sizeof(CfgTable_struct));
 	c->board_id = board_id;
 
 #ifdef CCISS_DEBUG
 	print_cfg_table(c->cfgtable); 
 #endif /* CCISS_DEBUG */
+
 	for(i=0; i<NR_PRODUCTS; i++) {
 		if (board_id == products[i].board_id) {
 			c->product_name = products[i].product_name;
@@ -1492,6 +1595,14 @@ static int cciss_pci_init(ctlr_info_t *c, unchar bus, unchar device_fn)
 		printk(KERN_WARNING "cciss: Sorry, I don't know how"
 			" to access the Smart Array controller %08lx\n", 
 				(unsigned long)board_id);
+		return -1;
+	}
+	if (  (readb(&c->cfgtable->Signature[0]) != 'C') ||
+	      (readb(&c->cfgtable->Signature[1]) != 'I') ||
+	      (readb(&c->cfgtable->Signature[2]) != 'S') ||
+	      (readb(&c->cfgtable->Signature[3]) != 'S') )
+	{
+		printk("Does not appear to be a valid CISS config table\n");
 		return -1;
 	}
 #ifdef CCISS_DEBUG
@@ -1525,50 +1636,6 @@ static int cciss_pci_init(ctlr_info_t *c, unchar bus, unchar device_fn)
 		return -1;
 	}
 	return 0;
-
-}
-/* 
- * Scans PCI space for any controllers that this driver can control. 
- */
-static int cciss_pci_detect(void)
-{
-
-	int index;
-	unchar bus=0, dev_fn=0;
-	
-		for(index=0; ; index++) {
-			if (pcibios_find_device(PCI_VENDOR_ID_COMPAQ,
-			 	PCI_DEVICE_ID_COMPAQ_CISS, 
-					index, &bus, &dev_fn))
-				break;
-			printk(KERN_DEBUG "cciss: Device %x has been found at %x %x\n",
-				PCI_DEVICE_ID_COMPAQ_CISS, bus, dev_fn);
-			if (index == 1000000) break;
-			if (nr_ctlr == 8) {
-				printk(KERN_WARNING "cciss: This driver"
-				" supports a maximum of 8 controllers.\n");
-				break;
-			}
-			hba[nr_ctlr] = kmalloc(sizeof(ctlr_info_t), GFP_KERNEL);
-			if(hba[nr_ctlr]==NULL)
-			{
-				printk(KERN_ERR "cciss: out of memory.\n");
-				continue;
-			}
-			memset(hba[nr_ctlr], 0, sizeof(ctlr_info_t));
-			if (cciss_pci_init(hba[nr_ctlr], bus, dev_fn) != 0)
-			{
-				kfree(hba[nr_ctlr]);
-				continue;
-			}
-			sprintf(hba[nr_ctlr]->devname, "cciss%d", nr_ctlr);
-			hba[nr_ctlr]->ctlr = nr_ctlr;
-			hba[nr_ctlr]->pci_bus = bus;
-			hba[nr_ctlr]->pci_dev_fn = dev_fn;
-			nr_ctlr++;
-
-		}
-	return nr_ctlr;
 
 }
 
@@ -1697,8 +1764,8 @@ static void cciss_getgeometry(int cntl_num)
 			printk(KERN_WARNING "cciss: read capacity failed\n");
 			total_size = block_size = 0; 
 		}	
-		printk("      blocks= %d block_size= %d\n", total_size,
-					block_size);
+		printk(KERN_INFO "      blocks= %d block_size= %d\n", 
+					total_size, block_size);
 
 		/* Execute the command to read the disk geometry */
 		memset(inq_buff, 0, sizeof(InquiryData_struct));
@@ -1749,168 +1816,252 @@ static void cciss_getgeometry(int cntl_num)
 	kfree(size_buff);
 }	
 
+/* Function to find the first free pointer into our hba[] array */
+/* Returns -1 if no free entries are left.  */
+static int alloc_cciss_hba(void)
+{
+	int i;
+	for(i=0; i< MAX_CTLR; i++)
+	{
+		if (hba[i] == NULL)
+		{
+			hba[i] = kmalloc(sizeof(ctlr_info_t), GFP_KERNEL);
+			if(hba[i]==NULL)
+			{
+				printk(KERN_ERR "cciss: out of memory.\n");
+				return (-1);
+			}
+			return (i);
+		}
+	}
+	printk(KERN_WARNING "cciss: This driver supports a maximum"
+		" of 8 controllers.\n");
+	return(-1);
+}
+
+static void free_hba(int i)
+{
+	kfree(hba[i]);
+	hba[i]=NULL;
+}
+
 /*
  *  This is it.  Find all the controllers and register them.  I really hate
  *  stealing all these major device numbers.
  *  returns the number of block devices registered.
  */
-int __init cciss_init(void)
+static int __init cciss_init_one(struct pci_dev *pdev,
+	const struct pci_device_id *ent)
 {
-	int num_cntlrs_reg = 0;
-	int i,j;
+	request_queue_t *q;
+	int i;
+	int j;
 
-	void (*request_fns[MAX_CTLR])(request_queue_t *) = {
-                do_cciss_request0, do_cciss_request1,
-                do_cciss_request2, do_cciss_request3,
-                do_cciss_request4, do_cciss_request5,
-                do_cciss_request6, do_cciss_request7,
-        };
-
-	/* detect controllers */
-	cciss_pci_detect();
-
-	if (nr_ctlr == 0)
-		return(num_cntlrs_reg);
-
-	printk(KERN_INFO DRIVER_NAME "\n");
-	printk(KERN_INFO "Found %d controller(s)\n", nr_ctlr);
-	for(i=0;i<nr_ctlr;i++)
+	printk(KERN_DEBUG "cciss: Device 0x%x has been found at"
+			" bus %d dev %d func %d\n",
+		pdev->device, pdev->bus->number, PCI_SLOT(pdev->devfn),
+			PCI_FUNC(pdev->devfn));
+	i = alloc_cciss_hba();
+	if( i < 0 ) 
+		return (-1);
+	memset(hba[i], 0, sizeof(ctlr_info_t));
+	if (cciss_pci_init(hba[i], pdev) != 0)
 	{
-		if( register_blkdev(MAJOR_NR+i, hba[i]->devname, &cciss_fops))
-		{
-			printk(KERN_ERR "cciss:  Unable to get major number "
-				"%d for %s\n", MAJOR_NR+i, hba[i]->devname);
-			continue;
-		}
-		/* make sure the board interrupts are off */
-		hba[i]->access.set_intr_mask(hba[i], CCISS_INTR_OFF);
-		if( request_irq(hba[i]->intr, do_cciss_intr, SA_INTERRUPT|SA_SHIRQ, hba[i]->devname, hba[i]))
-		{
-			printk(KERN_ERR "ciss: Unable to get irq %d for %s\n",
-				hba[i]->intr, hba[i]->devname);
-			unregister_blkdev( MAJOR_NR+i, hba[i]->devname);
-			continue;
-		}
-		num_cntlrs_reg++;
-		hba[i]->cmd_pool_bits = (__u32*)kmalloc(
-                                ((NR_CMDS+31)/32)*sizeof(__u32), GFP_KERNEL);
-		hba[i]->cmd_pool = (CommandList_struct *)kmalloc(
-                                NR_CMDS * sizeof(CommandList_struct), 
-					GFP_KERNEL);
-		hba[i]->errinfo_pool = (ErrorInfo_struct *)kmalloc(
-                                NR_CMDS * sizeof( ErrorInfo_struct), 
-					GFP_KERNEL);
-		if((hba[i]->cmd_pool_bits == NULL) 
-			|| (hba[i]->cmd_pool == NULL)
-			|| (hba[i]->errinfo_pool == NULL))
-                {
-                        nr_ctlr = i;
-			if(hba[i]->cmd_pool_bits)
-                                kfree(hba[i]->cmd_pool_bits);
-                        if(hba[i]->cmd_pool)
-                                kfree(hba[i]->cmd_pool);
-			if(hba[i]->errinfo_pool)
-				kfree(hba[i]->errinfo_pool);
-                        free_irq(hba[i]->intr, hba[i]);
-                        unregister_blkdev(MAJOR_NR+i, hba[i]->devname);
-                        num_cntlrs_reg--;
-                        printk( KERN_ERR "cciss: out of memory");
-			return(num_cntlrs_reg);
-		}
+		free_hba(i);
+		return (-1);
+	}
+	sprintf(hba[i]->devname, "cciss%d", i);
+	hba[i]->ctlr = i;
+	hba[i]->pdev = pdev;
+			
+	if( register_blkdev(MAJOR_NR+i, hba[i]->devname, &cciss_fops))
+	{
+		printk(KERN_ERR "cciss:  Unable to get major number "
+			"%d for %s\n", MAJOR_NR+i, hba[i]->devname);
+		free_hba(i);
+		return(-1);
+	}
+	/* make sure the board interrupts are off */
+	hba[i]->access.set_intr_mask(hba[i], CCISS_INTR_OFF);
+	if( request_irq(hba[i]->intr, do_cciss_intr, 
+		SA_INTERRUPT|SA_SHIRQ, hba[i]->devname, hba[i]))
+	{
+		printk(KERN_ERR "ciss: Unable to get irq %d for %s\n",
+			hba[i]->intr, hba[i]->devname);
+		unregister_blkdev( MAJOR_NR+i, hba[i]->devname);
+		free_hba(i);
+		return(-1);
+	}
+	hba[i]->cmd_pool_bits = (__u32*)kmalloc(
+        	((NR_CMDS+31)/32)*sizeof(__u32), GFP_KERNEL);
+	hba[i]->cmd_pool = (CommandList_struct *)pci_alloc_consistent(
+		hba[i]->pdev, NR_CMDS * sizeof(CommandList_struct), 
+		&(hba[i]->cmd_pool_dhandle));
+	hba[i]->errinfo_pool = (ErrorInfo_struct *)pci_alloc_consistent(
+		hba[i]->pdev, NR_CMDS * sizeof( ErrorInfo_struct), 
+		&(hba[i]->errinfo_pool_dhandle));
+	if((hba[i]->cmd_pool_bits == NULL) 
+		|| (hba[i]->cmd_pool == NULL)
+		|| (hba[i]->errinfo_pool == NULL))
+        {
+		if(hba[i]->cmd_pool_bits)
+                	kfree(hba[i]->cmd_pool_bits);
+                if(hba[i]->cmd_pool)
+                	pci_free_consistent(hba[i]->pdev,  
+				NR_CMDS * sizeof(CommandList_struct), 
+				hba[i]->cmd_pool, hba[i]->cmd_pool_dhandle);	
+		if(hba[i]->errinfo_pool)
+			pci_free_consistent(hba[i]->pdev,
+				NR_CMDS * sizeof( ErrorInfo_struct),
+				hba[i]->errinfo_pool, 
+				hba[i]->errinfo_pool_dhandle);
+                free_irq(hba[i]->intr, hba[i]);
+                unregister_blkdev(MAJOR_NR+i, hba[i]->devname);
+		free_hba(i);
+                printk( KERN_ERR "cciss: out of memory");
+		return(-1);
+	}
 
-		/* command and error info recs zeroed out before 
+	/* Initialize the pdev driver private data. 
+		have it point to hba[i].  */
+	pci_set_drvdata(pdev, hba[i]);
+	/* command and error info recs zeroed out before 
 			they are used */
-                memset(hba[i]->cmd_pool_bits, 0, 
-			((NR_CMDS+31)/32)*sizeof(__u32));
+        memset(hba[i]->cmd_pool_bits, 0, ((NR_CMDS+31)/32)*sizeof(__u32));
 
 #ifdef CCISS_DEBUG	
-		printk(KERN_DEBUG "Scanning for drives on controller cciss%d\n",i);
+	printk(KERN_DEBUG "Scanning for drives on controller cciss%d\n",i);
 #endif /* CCISS_DEBUG */
 
-		cciss_getgeometry(i);
+	cciss_getgeometry(i);
 
-		/* Turn the interrupts on so we can service requests */
-		hba[i]->access.set_intr_mask(hba[i], CCISS_INTR_ON);
+	/* Turn the interrupts on so we can service requests */
+	hba[i]->access.set_intr_mask(hba[i], CCISS_INTR_ON);
 
-		cciss_procinit(i);
-		
-		blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR+i),
-				request_fns[i]);
-		blk_queue_headactive(BLK_DEFAULT_QUEUE(MAJOR_NR+i), 0);
+	cciss_procinit(i);
 
-		/* fill in the other Kernel structs */
-		blksize_size[MAJOR_NR+i] = hba[i]->blocksizes;
-                hardsect_size[MAJOR_NR+i] = hba[i]->hardsizes;
-                read_ahead[MAJOR_NR+i] = READ_AHEAD;
+	q = BLK_DEFAULT_QUEUE(MAJOR_NR + i);
+        q->queuedata = hba[i];
+        blk_init_queue(q, do_cciss_request);
+        blk_queue_headactive(q, 0);		
 
-		/* Fill in the gendisk data */ 	
-		hba[i]->gendisk.major = MAJOR_NR + i;
-		hba[i]->gendisk.major_name = "cciss";
-		hba[i]->gendisk.minor_shift = NWD_SHIFT;
-		hba[i]->gendisk.max_p = MAX_PART;
-		hba[i]->gendisk.part = hba[i]->hd;
-		hba[i]->gendisk.sizes = hba[i]->sizes;
-		hba[i]->gendisk.nr_real = hba[i]->num_luns;
+	/* fill in the other Kernel structs */
+	blksize_size[MAJOR_NR+i] = hba[i]->blocksizes;
+        hardsect_size[MAJOR_NR+i] = hba[i]->hardsizes;
+        read_ahead[MAJOR_NR+i] = READ_AHEAD;
 
-		/* Get on the disk list */ 
-		hba[i]->gendisk.next = gendisk_head;
-		gendisk_head = &(hba[i]->gendisk); 
+	/* Set the pointers to queue functions */ 
+	q->back_merge_fn = cpq_back_merge_fn;
+        q->front_merge_fn = cpq_front_merge_fn;
+        q->merge_requests_fn = cpq_merge_requests_fn;
 
-		cciss_geninit(i);
-		for(j=0; j<NWD; j++)
-			register_disk(&(hba[i]->gendisk),
-				MKDEV(MAJOR_NR+i, j <<4), 
-				MAX_PART, &cciss_fops, 
-				hba[i]->drv[j].nr_blocks);
-	}
-	return(nr_ctlr);
+
+	/* Fill in the gendisk data */ 	
+	hba[i]->gendisk.major = MAJOR_NR + i;
+	hba[i]->gendisk.major_name = "cciss";
+	hba[i]->gendisk.minor_shift = NWD_SHIFT;
+	hba[i]->gendisk.max_p = MAX_PART;
+	hba[i]->gendisk.part = hba[i]->hd;
+	hba[i]->gendisk.sizes = hba[i]->sizes;
+	hba[i]->gendisk.nr_real = hba[i]->num_luns;
+
+	/* Get on the disk list */ 
+	add_gendisk(&(hba[i]->gendisk));
+
+	cciss_geninit(i);
+	for(j=0; j<NWD; j++)
+		register_disk(&(hba[i]->gendisk),
+			MKDEV(MAJOR_NR+i, j <<4), 
+			MAX_PART, &cciss_fops, 
+			hba[i]->drv[j].nr_blocks);
+
+	return(1);
 }
 
-EXPORT_NO_SYMBOLS;
+static void __devexit cciss_remove_one (struct pci_dev *pdev)
+{
+	ctlr_info_t *tmp_ptr;
+	int i;
 
-/* This is a bit of a hack... */
+	if (pci_get_drvdata(pdev) == NULL)
+	{
+		printk( KERN_ERR "cciss: Unable to remove device \n");
+		return;
+	}
+	tmp_ptr = pci_get_drvdata(pdev);
+	i = tmp_ptr->ctlr;
+	if (hba[i] == NULL) 
+	{
+		printk(KERN_ERR "cciss: device appears to "
+			"already be removed \n");
+		return;
+	}
+	/* Turn board interrupts off */
+	hba[i]->access.set_intr_mask(hba[i], CCISS_INTR_OFF);
+	free_irq(hba[i]->intr, hba[i]);
+	pci_set_drvdata(pdev, NULL);
+	iounmap((void*)hba[i]->vaddr);
+	unregister_blkdev(MAJOR_NR+i, hba[i]->devname);
+	remove_proc_entry(hba[i]->devname, proc_cciss);	
+	
+
+	/* remove it from the disk list */
+	del_gendisk(&(hba[i]->gendisk));
+
+	pci_free_consistent(hba[i]->pdev, NR_CMDS * sizeof(CommandList_struct), 
+		hba[i]->cmd_pool, hba[i]->cmd_pool_dhandle);
+	pci_free_consistent(hba[i]->pdev, NR_CMDS * sizeof( ErrorInfo_struct),
+		hba[i]->errinfo_pool, hba[i]->errinfo_pool_dhandle);
+	kfree(hba[i]->cmd_pool_bits);
+	free_hba(i);
+}	
+
+static struct pci_driver cciss_pci_driver = {
+	 name:   "cciss",
+	probe:  cciss_init_one,
+	remove:  cciss_remove_one,
+	id_table:  cciss_pci_device_id, /* id_table */
+};
+
+/*
+*  This is it.  Register the PCI driver information for the cards we control
+*  the OS will call our registered routines when it finds one of our cards. 
+*/
+int __init cciss_init(void)
+{
+
+	printk(KERN_INFO DRIVER_NAME "\n");
+	/* Register for out PCI devices */
+	if (pci_register_driver(&cciss_pci_driver) > 0 )
+		return 0;
+	else 
+		return -ENODEV;
+
+ }
+
+EXPORT_NO_SYMBOLS;
 static int __init init_cciss_module(void)
 {
 
-	if (cciss_init() == 0) /* all the block dev numbers already used */
-		return -EIO;	  /* or no controllers were found */
-	return 0;
+	return ( cciss_init());
 }
 
 static void __exit cleanup_cciss_module(void)
 {
 	int i;
-	struct gendisk *g;
 
-	for(i=0; i<nr_ctlr; i++)
+	pci_unregister_driver(&cciss_pci_driver);
+	/* double check that all controller entrys have been removed */
+	for (i=0; i< MAX_CTLR; i++) 
 	{
-		/* Turn board interrupts off */ 
-		hba[i]->access.set_intr_mask(hba[i], CCISS_INTR_OFF);
-		free_irq(hba[i]->intr, hba[i]);
-		iounmap((void*)hba[i]->vaddr);
-		unregister_blkdev(MAJOR_NR+i, hba[i]->devname);
-		remove_proc_entry(hba[i]->devname, proc_cciss);	
-
-		/* remove it from the disk list */ 
-		if (gendisk_head == &(hba[i]->gendisk))
+		if (hba[i] != NULL)
 		{
-			gendisk_head = hba[i]->gendisk.next;
-		} else 
-		{
-			for(g=gendisk_head; g ; g=g->next)
-			{
-				if(g->next == &(hba[i]->gendisk))
-				{
-					g->next = hba[i]->gendisk.next;
-				}
-			}
+			printk(KERN_WARNING "cciss: had to remove"
+					" controller %d\n", i);
+			cciss_remove_one(hba[i]->pdev);
 		}
-		remove_proc_entry("driver/cciss", &proc_root);
-		kfree(hba[i]->cmd_pool);
-		kfree(hba[i]->errinfo_pool);
-                kfree(hba[i]->cmd_pool_bits);
-		kfree(hba[i]);
 	}
+	remove_proc_entry("cciss", proc_root_driver);
 }
 
 module_init(init_cciss_module);

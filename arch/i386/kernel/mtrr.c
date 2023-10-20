@@ -231,6 +231,20 @@
   v1.37
     20001109   H. Peter Anvin <hpa@zytor.com>
 	       Use the new centralized CPU feature detects.
+
+  v1.38
+    20010309   Dave Jones <davej@suse.de>
+	       Add support for Cyrix III.
+
+  v1.39
+    20010312   Dave Jones <davej@suse.de>
+               Ugh, I broke AMD support.
+	       Reworked fix by Troels Walsted Hansen <troels@thule.no>
+
+  v1.40
+    20010327   Dave Jones <davej@suse.de>
+	       Adapted Cyrix III support to include VIA C3.
+
 */
 #include <linux/types.h>
 #include <linux/errno.h>
@@ -241,7 +255,7 @@
 #include <linux/kernel.h>
 #include <linux/wait.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
 #include <linux/fs.h>
@@ -250,6 +264,7 @@
 #include <linux/devfs_fs_kernel.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/pci.h>
 #define MTRR_NEED_STRINGS
 #include <asm/mtrr.h>
 #include <linux/init.h>
@@ -269,7 +284,7 @@
 #include <asm/hardirq.h>
 #include <linux/irq.h>
 
-#define MTRR_VERSION            "1.37 (20001109)"
+#define MTRR_VERSION            "1.40 (20010327)"
 
 #define TRUE  1
 #define FALSE 0
@@ -374,21 +389,19 @@ static void set_mtrr_prepare (struct set_mtrr_context *ctxt)
 	 return;
 
     /*  Save value of CR4 and clear Page Global Enable (bit 7)  */
-    if ( test_bit(X86_FEATURE_PGE, &boot_cpu_data.x86_capability) )
-	asm volatile ("movl  %%cr4, %0\n\t"
-		      "movl  %0, %1\n\t"
-		      "andb  $0x7f, %b1\n\t"
-		      "movl  %1, %%cr4\n\t"
-		      : "=r" (ctxt->cr4val), "=q" (tmp) : : "memory");
+    if ( test_bit(X86_FEATURE_PGE, &boot_cpu_data.x86_capability) ) {
+	ctxt->cr4val = read_cr4();
+	write_cr4(ctxt->cr4val & (unsigned char) ~(1<<7));
+    }
 
     /*  Disable and flush caches. Note that wbinvd flushes the TLBs as
 	a side-effect  */
-    asm volatile ("movl  %%cr0, %0\n\t"
-		  "orl   $0x40000000, %0\n\t"
-		  "wbinvd\n\t"
-		  "movl  %0, %%cr0\n\t"
-		  "wbinvd\n\t"
-		  : "=r" (tmp) : : "memory");
+    {
+	unsigned int cr0 = read_cr0() | 0x40000000;
+	wbinvd();
+	write_cr0( cr0 );
+	wbinvd();
+    }
 
     if ( mtrr_if == MTRR_IF_INTEL ) {
 	/*  Disable MTRRs, and set the default type to uncached  */
@@ -405,15 +418,13 @@ static void set_mtrr_prepare (struct set_mtrr_context *ctxt)
 /*  Restore the processor after a set_mtrr_prepare  */
 static void set_mtrr_done (struct set_mtrr_context *ctxt)
 {
-    unsigned long tmp;
-
     if ( mtrr_if != MTRR_IF_INTEL && mtrr_if != MTRR_IF_CYRIX_ARR ) {
 	 __restore_flags (ctxt->flags);
 	 return;
     }
 
     /*  Flush caches and TLBs  */
-    asm volatile ("wbinvd" : : : "memory" );
+    wbinvd();
 
     /*  Restore MTRRdefType  */
     if ( mtrr_if == MTRR_IF_INTEL ) {
@@ -425,15 +436,11 @@ static void set_mtrr_done (struct set_mtrr_context *ctxt)
     }
 
     /*  Enable caches  */
-    asm volatile ("movl  %%cr0, %0\n\t"
-		  "andl  $0xbfffffff, %0\n\t"
-		  "movl  %0, %%cr0\n\t"
-		  : "=r" (tmp) : : "memory");
+    write_cr0( read_cr0() & 0xbfffffff );
 
     /*  Restore value of CR4  */
     if ( test_bit(X86_FEATURE_PGE, &boot_cpu_data.x86_capability) )
-	asm volatile ("movl  %0, %%cr4"
-		      : : "r" (ctxt->cr4val) : "memory");
+	write_cr4(ctxt->cr4val);
 
     /*  Re-enable interrupts locally (if enabled previously)  */
     __restore_flags (ctxt->flags);
@@ -464,6 +471,18 @@ static unsigned int get_num_var_ranges (void)
 static int have_wrcomb (void)
 {
     unsigned long config, dummy;
+    struct pci_dev *dev = NULL;
+    
+   /* ServerWorks LE chipsets have problems with write-combining 
+      Don't allow it and leave room for other chipsets to be tagged */
+
+	if ((dev = pci_find_class(PCI_CLASS_BRIDGE_HOST << 8, NULL)) != NULL) {
+		if ((dev->vendor == PCI_VENDOR_ID_SERVERWORKS) &&
+			(dev->device == PCI_DEVICE_ID_SERVERWORKS_LE)) {
+		printk (KERN_INFO "mtrr: Serverworks LE detected. Write-combining disabled.\n");
+		return 0;
+		}
+	}
 
     switch ( mtrr_if )
     {
@@ -538,7 +557,7 @@ static void cyrix_get_arr (unsigned int reg, unsigned long *base,
      * Note: shift==0xf means 4G, this is unsupported.
      */
     if (shift)
-      *size = (reg < 7 ? 0x1UL : 0x40UL) << shift;
+      *size = (reg < 7 ? 0x1UL : 0x40UL) << (shift - 1);
     else
       *size = 0;
 
@@ -571,7 +590,7 @@ static void amd_get_mtrr (unsigned int reg, unsigned long *base,
 {
     unsigned long low, high;
 
-    rdmsr (0xC0000085, low, high);
+    rdmsr (MSR_K6_UWCCR, low, high);
     /*  Upper dword is region 1, lower is region 0  */
     if (reg == 1) low = high;
     /*  The base masks off on the right alignment  */
@@ -610,12 +629,32 @@ static struct
     unsigned long low;
 } centaur_mcr[8];
 
+static u8 centaur_mcr_reserved;
+static u8 centaur_mcr_type;		/* 0 for winchip, 1 for winchip2 */
+
+/*
+ *	Report boot time MCR setups 
+ */
+ 
+void mtrr_centaur_report_mcr(int mcr, u32 lo, u32 hi)
+{
+	centaur_mcr[mcr].low = lo;
+	centaur_mcr[mcr].high = hi;
+}
+
 static void centaur_get_mcr (unsigned int reg, unsigned long *base,
 			     unsigned long *size, mtrr_type *type)
 {
     *base = centaur_mcr[reg].high >> PAGE_SHIFT;
     *size = -(centaur_mcr[reg].low & 0xfffff000) >> PAGE_SHIFT;
     *type = MTRR_TYPE_WRCOMB;	/*  If it is there, it is write-combining  */
+    if(centaur_mcr_type==1 && ((centaur_mcr[reg].low&31)&2))
+    	*type = MTRR_TYPE_UNCACHABLE;
+    if(centaur_mcr_type==1 && (centaur_mcr[reg].low&31)==25)
+    	*type = MTRR_TYPE_WRBACK;
+    if(centaur_mcr_type==0 && (centaur_mcr[reg].low&31)==31)
+    	*type = MTRR_TYPE_WRBACK;
+    
 }   /*  End Function centaur_get_mcr  */
 
 static void (*get_mtrr) (unsigned int reg, unsigned long *base,
@@ -715,7 +754,7 @@ static void amd_set_mtrr_up (unsigned int reg, unsigned long base,
     /*
      *	Low is MTRR0 , High MTRR 1
      */
-    rdmsr (0xC0000085, regs[0], regs[1]);
+    rdmsr (MSR_K6_UWCCR, regs[0], regs[1]);
     /*
      *	Blank to disable
      */
@@ -736,8 +775,8 @@ static void amd_set_mtrr_up (unsigned int reg, unsigned long base,
      *	The writeback rule is quite specific. See the manual. Its
      *	disable local interrupts, write back the cache, set the mtrr
      */
-    __asm__ __volatile__ ("wbinvd" : : : "memory");
-    wrmsr (0xC0000085, regs[0], regs[1]);
+	wbinvd();
+	wrmsr (MSR_K6_UWCCR, regs[0], regs[1]);
     if (do_safe) set_mtrr_done (&ctxt);
 }   /*  End Function amd_set_mtrr_up  */
 
@@ -758,11 +797,19 @@ static void centaur_set_mcr_up (unsigned int reg, unsigned long base,
     else
     {
 	high = base << PAGE_SHIFT;
-	low = -size << PAGE_SHIFT | 0x1f; /* only support write-combining... */
+	if(centaur_mcr_type == 0)
+		low = -size << PAGE_SHIFT | 0x1f; /* only support write-combining... */
+	else
+	{
+		if(type == MTRR_TYPE_UNCACHABLE)
+			low = -size << PAGE_SHIFT | 0x02;	/* NC */
+		else
+			low = -size << PAGE_SHIFT | 0x09;	/* WWO,WC */
+	}
     }
     centaur_mcr[reg].high = high;
     centaur_mcr[reg].low = low;
-    wrmsr (0x110 + reg, low, high);
+    wrmsr (MSR_IDT_MCR0 + reg, low, high);
     if (do_safe) set_mtrr_done( &ctxt );
 }   /*  End Function centaur_set_mtrr_up  */
 
@@ -1068,6 +1115,28 @@ static int generic_get_free_region (unsigned long base, unsigned long size)
     return -ENOSPC;
 }   /*  End Function generic_get_free_region  */
 
+static int centaur_get_free_region (unsigned long base, unsigned long size)
+/*  [SUMMARY] Get a free MTRR.
+    <base> The starting (base) address of the region.
+    <size> The size (in bytes) of the region.
+    [RETURNS] The index of the region on success, else -1 on error.
+*/
+{
+    int i, max;
+    mtrr_type ltype;
+    unsigned long lbase, lsize;
+
+    max = get_num_var_ranges ();
+    for (i = 0; i < max; ++i)
+    {
+    	if(centaur_mcr_reserved & (1<<i))
+    		continue;
+	(*get_mtrr) (i, &lbase, &lsize, &ltype);
+	if (lsize == 0) return i;
+    }
+    return -ENOSPC;
+}   /*  End Function generic_get_free_region  */
+
 static int cyrix_get_free_region (unsigned long base, unsigned long size)
 /*  [SUMMARY] Get a free ARR.
     <base> The starting (base) address of the region.
@@ -1128,9 +1197,9 @@ static int (*get_free_region) (unsigned long base,
  *
  *	The available types are
  *
- *	%MTRR_TYPE_UNCACHEABLE	-	No caching
+ *	%MTRR_TYPE_UNCACHABLE	-	No caching
  *
- *	%MTRR_TYPE_WRITEBACK	-	Write data back in bursts whenever
+ *	%MTRR_TYPE_WRBACK	-	Write data back in bursts whenever
  *
  *	%MTRR_TYPE_WRCOMB	-	Write data back soon but allow bursts
  *
@@ -1175,7 +1244,8 @@ int mtrr_add_page(unsigned long base, unsigned long size, unsigned int type, cha
 	break;
 
     case MTRR_IF_INTEL:
-	/*  For Intel PPro stepping <= 7, must be 4 MiB aligned  */
+	/*  For Intel PPro stepping <= 7, must be 4 MiB aligned 
+	    and not touch 0x70000000->0x7003FFFF */
 	if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL &&
 	     boot_cpu_data.x86 == 6 &&
 	     boot_cpu_data.x86_model == 1 &&
@@ -1186,6 +1256,12 @@ int mtrr_add_page(unsigned long base, unsigned long size, unsigned int type, cha
 		printk (KERN_WARNING "mtrr: base(0x%lx000) is not 4 MiB aligned\n", base);
 		return -EINVAL;
 	    }
+	    if (!(base + size < 0x70000000 || base > 0x7003FFFF) &&
+		 (type == MTRR_TYPE_WRCOMB || type == MTRR_TYPE_WRBACK))
+	    {
+		printk (KERN_WARNING "mtrr: writable mtrr between 0x70000000 and 0x7003FFFF may hang the CPU.\n");
+	        return -EINVAL;
+	    }
 	}
 	/* Fall through */
 	
@@ -1193,9 +1269,13 @@ int mtrr_add_page(unsigned long base, unsigned long size, unsigned int type, cha
     case MTRR_IF_CENTAUR_MCR:
         if ( mtrr_if == MTRR_IF_CENTAUR_MCR )
 	{
-	    if (type != MTRR_TYPE_WRCOMB)
+	    /*
+	     *	FIXME: Winchip2 supports uncached
+	     */
+	    if (type != MTRR_TYPE_WRCOMB && (centaur_mcr_type == 0 || type != MTRR_TYPE_UNCACHABLE))
 	    {
-		printk (KERN_WARNING "mtrr: only write-combining is supported\n");
+		printk (KERN_WARNING "mtrr: only write-combining%s supported\n",
+			centaur_mcr_type?" and uncacheable are":" is");
 		return -EINVAL;
 	    }
 	}
@@ -1312,9 +1392,9 @@ int mtrr_add_page(unsigned long base, unsigned long size, unsigned int type, cha
  *
  *	The available types are
  *
- *	%MTRR_TYPE_UNCACHEABLE	-	No caching
+ *	%MTRR_TYPE_UNCACHABLE	-	No caching
  *
- *	%MTRR_TYPE_WRITEBACK	-	Write data back in bursts whenever
+ *	%MTRR_TYPE_WRBACK	-	Write data back in bursts whenever
  *
  *	%MTRR_TYPE_WRCOMB	-	Write data back soon but allow bursts
  *
@@ -1777,7 +1857,8 @@ static void compute_ascii (void)
     }
     devfs_set_file_size (devfs_handle, ascii_buf_bytes);
 #  ifdef CONFIG_PROC_FS
-    proc_root_mtrr->size = ascii_buf_bytes;
+    if (proc_root_mtrr)
+	proc_root_mtrr->size = ascii_buf_bytes;
 #  endif  /*  CONFIG_PROC_FS  */
 }   /*  End Function compute_ascii  */
 
@@ -1906,27 +1987,101 @@ static void __init cyrix_arr_init(void)
     if ( ccrc[6] ) printk ("mtrr: ARR3 was write protected, unprotected\n");
 }   /*  End Function cyrix_arr_init  */
 
-static void __init centaur_mcr_init(void)
+/*
+ *	Initialise the later (saner) Winchip MCR variant. In this version
+ *	the BIOS can pass us the registers it has used (but not their values)
+ *	and the control register is read/write
+ */
+ 
+static void __init centaur_mcr1_init(void)
 {
     unsigned i;
-    struct set_mtrr_context ctxt;
+    u32 lo, hi;
 
-    set_mtrr_prepare (&ctxt);
     /* Unfortunately, MCR's are read-only, so there is no way to
      * find out what the bios might have done.
      */
-    /* Clear all MCR's.
+     
+    rdmsr(MSR_IDT_MCR_CTRL, lo, hi);
+    if(((lo>>17)&7)==1)		/* Type 1 Winchip2 MCR */
+    {
+    	lo&= ~0x1C0;		/* clear key */
+    	lo|= 0x040;		/* set key to 1 */
+	wrmsr(MSR_IDT_MCR_CTRL, lo, hi);	/* unlock MCR */
+    }    
+    
+    centaur_mcr_type = 1;
+    
+    /*
+     *	Clear any unconfigured MCR's.
+     */
+
+    for (i = 0; i < 8; ++i)
+    {
+    	if(centaur_mcr[i]. high == 0 && centaur_mcr[i].low == 0)
+    	{
+    		if(!(lo & (1<<(9+i))))
+			wrmsr (MSR_IDT_MCR0 + i , 0, 0);
+		else
+			/*
+			 *	If the BIOS set up an MCR we cannot see it
+			 *	but we don't wish to obliterate it
+			 */
+			centaur_mcr_reserved |= (1<<i);
+	}
+    }
+    /*  
+     *	Throw the main write-combining switch... 
+     *	However if OOSTORE is enabled then people have already done far
+     *  cleverer things and we should behave. 
+     */
+
+    lo |= 15;			/* Write combine enables */
+    wrmsr(MSR_IDT_MCR_CTRL, lo, hi);
+}   /*  End Function centaur_mcr1_init  */
+
+/*
+ *	Initialise the original winchip with read only MCR registers
+ *	no used bitmask for the BIOS to pass on and write only control
+ */
+ 
+static void __init centaur_mcr0_init(void)
+{
+    unsigned i;
+
+    /* Unfortunately, MCR's are read-only, so there is no way to
+     * find out what the bios might have done.
+     */
+     
+    /* Clear any unconfigured MCR's.
      * This way we are sure that the centaur_mcr array contains the actual
      * values. The disadvantage is that any BIOS tweaks are thus undone.
+     *
      */
     for (i = 0; i < 8; ++i)
     {
-        centaur_mcr[i].high = 0;
-	centaur_mcr[i].low = 0;
-	wrmsr (0x110 + i , 0, 0);
+    	if(centaur_mcr[i]. high == 0 && centaur_mcr[i].low == 0)
+		wrmsr (MSR_IDT_MCR0 + i , 0, 0);
     }
-    /*  Throw the main write-combining switch...  */
-    wrmsr (0x120, 0x01f0001f, 0);
+
+    wrmsr(MSR_IDT_MCR_CTRL, 0x01F0001F, 0);	/* Write only */
+}   /*  End Function centaur_mcr0_init  */
+
+/*
+ *	Initialise Winchip series MCR registers
+ */
+ 
+static void __init centaur_mcr_init(void)
+{
+    struct set_mtrr_context ctxt;
+
+    set_mtrr_prepare (&ctxt);
+
+    if(boot_cpu_data.x86_model==4)
+    	centaur_mcr0_init();
+    else if(boot_cpu_data.x86_model==8 || boot_cpu_data.x86_model == 9)
+    	centaur_mcr1_init();
+
     set_mtrr_done (&ctxt);
 }   /*  End Function centaur_mcr_init  */
 
@@ -1938,6 +2093,7 @@ static int __init mtrr_setup(void)
 	get_mtrr = intel_get_mtrr;
 	set_mtrr_up = intel_set_mtrr_up;
 	switch (boot_cpu_data.x86_vendor) {
+
 	case X86_VENDOR_AMD:
 		/* The original Athlon docs said that
 		   total addressable memory is 44 bits wide.
@@ -1956,12 +2112,25 @@ static int __init mtrr_setup(void)
 			size_and_mask = ~size_or_mask & 0xfff00000;
 			break;
 		}
+		size_or_mask  = 0xff000000; /* 36 bits */
+		size_and_mask = 0x00f00000;
+		break;
+
+	case X86_VENDOR_CENTAUR:
+		/* VIA Cyrix family have Intel style MTRRs, but don't support PAE */
+		if (boot_cpu_data.x86 == 6) {
+			size_or_mask  = 0xfff00000; /* 32 bits */
+			size_and_mask = 0;
+		}
+		break;
+
 	default:
 		/* Intel, etc. */
 		size_or_mask  = 0xff000000; /* 36 bits */
 		size_and_mask = 0x00f00000;
 		break;
 	}
+
     } else if ( test_bit(X86_FEATURE_K6_MTRR, &boot_cpu_data.x86_capability) ) {
 	/* Pre-Athlon (K6) AMD CPU MTRRs */
 	mtrr_if = MTRR_IF_AMD_K6;
@@ -1983,6 +2152,7 @@ static int __init mtrr_setup(void)
 	mtrr_if = MTRR_IF_CENTAUR_MCR;
 	get_mtrr = centaur_get_mcr;
 	set_mtrr_up = centaur_set_mcr_up;
+	get_free_region = centaur_get_free_region;
 	centaur_mcr_init();
 	size_or_mask  = 0xfff00000; /* 32 bits */
 	size_and_mask = 0;
@@ -2049,6 +2219,8 @@ void __init mtrr_init_secondary_cpu(void)
 	 */
 	cyrix_arr_init_secondary ();
 	break;
+    case MTRR_IF_NONE:
+	break;
     default:
 	/* I see no MTRRs I can support in SMP mode... */
 	printk ("mtrr: SMP support incomplete for this vendor\n");
@@ -2072,10 +2244,12 @@ int __init mtrr_init(void)
 
 #ifdef CONFIG_PROC_FS
     proc_root_mtrr = create_proc_entry ("mtrr", S_IWUSR | S_IRUGO, &proc_root);
-    proc_root_mtrr->owner = THIS_MODULE;
-    proc_root_mtrr->proc_fops = &mtrr_fops;
+    if (proc_root_mtrr) {
+	proc_root_mtrr->owner = THIS_MODULE;
+	proc_root_mtrr->proc_fops = &mtrr_fops;
+    }
 #endif
-#ifdef CONFIG_DEVFS_FS
+#ifdef USERSPACE_INTERFACE
     devfs_handle = devfs_register (NULL, "cpu/mtrr", DEVFS_FL_DEFAULT, 0, 0,
 				   S_IFREG | S_IRUGO | S_IWUSR,
 				   &mtrr_fops, NULL);

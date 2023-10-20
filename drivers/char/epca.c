@@ -60,6 +60,10 @@
 #include "epca.h"
 #include "epcaconfig.h"
 
+#if BITS_PER_LONG != 32
+#  error FIXME: this driver only works on 32-bit platforms
+#endif
+
 /* ---------------------- Begin defines ------------------------ */
 
 #define VERSION            "1.3.0.1-LK"
@@ -606,9 +610,7 @@ static void pc_close(struct tty_struct * tty, struct file * filp)
 		                      ASYNC_CALLOUT_ACTIVE | ASYNC_CLOSING);
 		wake_up_interruptible(&ch->close_wait);
 
-#ifdef MODULE
 		MOD_DEC_USE_COUNT;
-#endif
 
 		restore_flags(flags);
 
@@ -696,10 +698,8 @@ static void pc_hangup(struct tty_struct *tty)
 
 		shutdown(ch);
 
-#ifdef MODULE
 		if (ch->count)
 			MOD_DEC_USE_COUNT;
-#endif /* MODULE */
 		
 
 		ch->tty   = NULL;
@@ -769,7 +769,7 @@ static int pc_write(struct tty_struct * tty, int from_user,
 		globalwinon(ch);
 
 		/* -----------------------------------------------------------------	
-			Anding against size will wrap the pointer back to its begining 
+			Anding against size will wrap the pointer back to its beginning 
 			position if it is necessary.  This will only work if size is
 			a power of 2 which should always be the case.  Size is determined 
 			by the cards on board FEP/OS.
@@ -789,7 +789,7 @@ static int pc_write(struct tty_struct * tty, int from_user,
 			tail = bc->tout;
 
 		/* ------------------------------------------------------------------	
-			Anding against size will wrap the pointer back to its begining 
+			Anding against size will wrap the pointer back to its beginning 
 			position if it is necessary.  This will only work if size is
 			a power of 2 which should always be the case.  Size is determined 
 			by the cards on board FEP/OS.
@@ -818,7 +818,7 @@ static int pc_write(struct tty_struct * tty, int from_user,
 		                tail                               head
 
 			The above diagram shows that buffer locations 2,3,4,5 and 6 have
-			data to be transmited, while head points at the next empty
+			data to be transmitted, while head points at the next empty
 			location.  To calculate how much space is available first we have
 			to determine if the head pointer (tin) has wrapped.  To do this
 			compare the head pointer to the tail pointer,  If head is equal
@@ -827,9 +827,9 @@ static int pc_write(struct tty_struct * tty, int from_user,
 			that value from the buffers size.  A one is subtracted from the
 			new value to indicate how much space is available between the 
 			head pointer and end of buffer; as well as the space between the
-			begining of the buffer and the tail.  If the head is not greater
+			beginning of the buffer and the tail.  If the head is not greater
 			or equal to the tail this indicates that the head has wrapped
-			around to the begining of the buffer.  To calculate the space 
+			around to the beginning of the buffer.  To calculate the space 
 			available in this case simply subtract head from tail.  This new 
 			value minus one represents the space available betwwen the head 
 			and tail pointers.  In this example head (7) is greater than tail (2)
@@ -849,7 +849,7 @@ static int pc_write(struct tty_struct * tty, int from_user,
 		                head                               tail
 
 			The above diagram shows that buffer locations 7,8,9,0 and 1 have
-			data to be transmited, while head points at the next empty
+			data to be transmitted, while head points at the next empty
 			location.  To find the space available we compare head to tail.  If
 			head is not equal to, or greater than tail this indicates that head
 			has wrapped around. In this case head (2) is not equal to, or
@@ -875,6 +875,9 @@ static int pc_write(struct tty_struct * tty, int from_user,
 		bytesAvailable = MIN(dataLen, bytesAvailable);
 
 		/* First we read the data in from the file system into a temp buffer */
+
+		memoff(ch);
+		restore_flags(flags);
 
 		if (bytesAvailable) 
 		{ /* Begin bytesAvailable */
@@ -916,8 +919,6 @@ static int pc_write(struct tty_struct * tty, int from_user,
 			post_fep_init.
 		--------------------------------------------------------------------- */
 		buf = ch->tmp_buf;
-		memoff(ch);
-		restore_flags(flags);
 
 	} /* End from_user */
 
@@ -1339,7 +1340,7 @@ static int block_til_ready(struct tty_struct *tty,
 		}
 
 		/* ---------------------------------------------------------------
-			Allow someone else to be scheduled.  We will occasionaly go
+			Allow someone else to be scheduled.  We will occasionally go
 			through this loop until one of the above conditions change.
 			The below schedule call will allow other processes to enter and
 			prevent this loop from hogging the cpu.
@@ -1392,11 +1393,8 @@ static int pc_open(struct tty_struct *tty, struct file * filp)
 		return(-ENODEV);
 	}
 
-#ifdef MODULE
 
 	MOD_INC_USE_COUNT;
-
-#endif
 
 	ch = &digi_channels[line];
 	boardnum = ch->boardnum;
@@ -1574,7 +1572,8 @@ void cleanup_module()
 	cli();
 
 	if ((tty_unregister_driver(&pc_driver)) ||  
-	    (tty_unregister_driver(&pc_callout)))
+	    (tty_unregister_driver(&pc_callout)) ||
+	    (tty_unregister_driver(&pc_info)))
 	{
 		printk(KERN_WARNING "<Error> - DIGI : cleanup_module failed to un-register tty driver\n");
 		restore_flags(flags);
@@ -1685,7 +1684,7 @@ int __init pc_init(void)
 		       the boards array is correct.  This could be wrong if
 		       the card in question is PCI (And therefore has no ports 
 		       entry in the boards structure.)  The rest of the 
-		       information will be valid for PCI because the begining
+		       information will be valid for PCI because the beginning
 		       of pc_init scans for PCI and determines i/o and base
 		       memory addresses.  I am not sure if it is possible to 
 		       read the number of ports supported by the card prior to
@@ -1937,7 +1936,7 @@ static void post_fep_init(unsigned int crd)
  
 	/*  -------------------------------------------------------------
 		This call is made by the user via. the ioctl call DIGI_INIT.
-		It is resposible for setting up all the card specific stuff.
+		It is responsible for setting up all the card specific stuff.
 	---------------------------------------------------------------- */
 	bd = &boards[crd];
 
@@ -2216,7 +2215,7 @@ static void epcapoll(unsigned long ignored)
 
 	/* -------------------------------------------------------------------
 		This routine is called upon every timer interrupt.  Even though
-		the Digi series cards are capable of generating interupts this 
+		the Digi series cards are capable of generating interrupts this 
 		method of non-looping polling is more efficient.  This routine
 		checks for card generated events (Such as receive data, are transmit
 		buffer empty) and acts on those events.
@@ -4101,3 +4100,5 @@ int __init init_PCI (void)
 } /* End init_PCI */
 
 #endif /* ENABLE_PCI */
+
+MODULE_LICENSE("GPL");

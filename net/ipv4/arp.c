@@ -1,6 +1,6 @@
 /* linux/net/inet/arp.c
  *
- * Version:	$Id: arp.c,v 1.90 2000/10/04 09:20:56 anton Exp $
+ * Version:	$Id: arp.c,v 1.99 2001/08/30 22:55:42 davem Exp $
  *
  * Copyright (C) 1994 by Florian  La Roche
  *
@@ -65,19 +65,9 @@
  *					clean up the APFDDI & gen. FDDI bits.
  *		Alexey Kuznetsov:	new arp state machine;
  *					now it is in net/core/neighbour.c.
+ *		Krzysztof Halasa:	Added Frame Relay ARP support.
  */
 
-/* RFC1122 Status:
-   2.3.2.1 (ARP Cache Validation):
-     MUST provide mechanism to flush stale cache entries (OK)
-     SHOULD be able to configure cache timeout (OK)
-     MUST throttle ARP retransmits (OK)
-   2.3.2.2 (ARP Packet Queue):
-     SHOULD save at least one packet from each "conversation" with an
-       unresolved IP address.  (OK)
-   950727 -- MS
-*/
-      
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
@@ -133,69 +123,71 @@ static void arp_solicit(struct neighbour *neigh, struct sk_buff *skb);
 static void arp_error_report(struct neighbour *neigh, struct sk_buff *skb);
 static void parp_redo(struct sk_buff *skb);
 
-static struct neigh_ops arp_generic_ops =
-{
-	AF_INET,
-	NULL,
-	arp_solicit,
-	arp_error_report,
-	neigh_resolve_output,
-	neigh_connected_output,
-	dev_queue_xmit,
-	dev_queue_xmit
+static struct neigh_ops arp_generic_ops = {
+	family:			AF_INET,
+	solicit:		arp_solicit,
+	error_report:		arp_error_report,
+	output:			neigh_resolve_output,
+	connected_output:	neigh_connected_output,
+	hh_output:		dev_queue_xmit,
+	queue_xmit:		dev_queue_xmit,
 };
 
-static struct neigh_ops arp_hh_ops =
-{
-	AF_INET,
-	NULL,
-	arp_solicit,
-	arp_error_report,
-	neigh_resolve_output,
-	neigh_resolve_output,
-	dev_queue_xmit,
-	dev_queue_xmit
+static struct neigh_ops arp_hh_ops = {
+	family:			AF_INET,
+	solicit:		arp_solicit,
+	error_report:		arp_error_report,
+	output:			neigh_resolve_output,
+	connected_output:	neigh_resolve_output,
+	hh_output:		dev_queue_xmit,
+	queue_xmit:		dev_queue_xmit,
 };
 
-static struct neigh_ops arp_direct_ops =
-{
-	AF_INET,
-	NULL,
-	NULL,
-	NULL,
-	dev_queue_xmit,
-	dev_queue_xmit,
-	dev_queue_xmit,
-	dev_queue_xmit
+static struct neigh_ops arp_direct_ops = {
+	family:			AF_INET,
+	output:			dev_queue_xmit,
+	connected_output:	dev_queue_xmit,
+	hh_output:		dev_queue_xmit,
+	queue_xmit:		dev_queue_xmit,
 };
 
-struct neigh_ops arp_broken_ops =
-{
-	AF_INET,
-	NULL,
-	arp_solicit,
-	arp_error_report,
-	neigh_compat_output,
-	neigh_compat_output,
-	dev_queue_xmit,
-	dev_queue_xmit,
+struct neigh_ops arp_broken_ops = {
+	family:			AF_INET,
+	solicit:		arp_solicit,
+	error_report:		arp_error_report,
+	output:			neigh_compat_output,
+	connected_output:	neigh_compat_output,
+	hh_output:		dev_queue_xmit,
+	queue_xmit:		dev_queue_xmit,
 };
 
-struct neigh_table arp_tbl =
-{
-	NULL,
-	AF_INET,
-	sizeof(struct neighbour) + 4,
-	4,
-	arp_hash,
-	arp_constructor,
-	NULL,
-	NULL,
-	parp_redo,
-	"arp_cache",
-        { NULL, NULL, &arp_tbl, 0, NULL, NULL,
-		  30*HZ, 1*HZ, 60*HZ, 30*HZ, 5*HZ, 3, 3, 0, 3, 1*HZ, (8*HZ)/10, 64, 1*HZ },
-	30*HZ, 128, 512, 1024,
+struct neigh_table arp_tbl = {
+	family:		AF_INET,
+	entry_size:	sizeof(struct neighbour) + 4,
+	key_len:	4,
+	hash:		arp_hash,
+	constructor:	arp_constructor,
+	proxy_redo:	parp_redo,
+	id:		"arp_cache",
+	parms: {
+		tbl:			&arp_tbl,
+		base_reachable_time:	30 * HZ,
+		retrans_time:		1 * HZ,
+		gc_staletime:		60 * HZ,
+		reachable_time:		30 * HZ,
+		delay_probe_time:	5 * HZ,
+		queue_len:		3,
+		ucast_probes:		3,
+		mcast_probes:		3,
+		anycast_delay:		1 * HZ,
+		proxy_delay:		(8 * HZ) / 10,
+		proxy_qlen:		64,
+		locktime:		1 * HZ,
+	},
+	gc_interval:	30 * HZ,
+	gc_thresh1:	128,
+	gc_thresh2:	512,
+	gc_thresh3:	1024,
 };
 
 int arp_mc_map(u32 addr, u8 *haddr, struct net_device *dev, int dir)
@@ -204,10 +196,10 @@ int arp_mc_map(u32 addr, u8 *haddr, struct net_device *dev, int dir)
 	case ARPHRD_ETHER:
 	case ARPHRD_FDDI:
 	case ARPHRD_IEEE802:
-		ip_eth_mc_map(addr, haddr) ; 
-		return 0 ; 
+		ip_eth_mc_map(addr, haddr);
+		return 0; 
 	case ARPHRD_IEEE802_TR:
-		ip_tr_mc_map(addr, haddr) ; 
+		ip_tr_mc_map(addr, haddr);
 		return 0;
 	default:
 		if (dir) {
@@ -352,6 +344,22 @@ static void arp_solicit(struct neighbour *neigh, struct sk_buff *skb)
 	if (dst_ha)
 		read_unlock_bh(&neigh->lock);
 }
+
+static int arp_filter(__u32 sip, __u32 tip, struct net_device *dev)
+{
+	struct rtable *rt;
+	int flag = 0; 
+	/*unsigned long now; */
+
+	if (ip_route_output(&rt, sip, tip, 0, 0) < 0) 
+		return 1;
+	if (rt->u.dst.dev != dev) { 
+		NET_INC_STATS_BH(ArpFilter);
+		flag = 1;
+	} 
+	ip_rt_put(rt); 
+	return flag; 
+} 
 
 /* OBSOLETE FUNCTIONS */
 
@@ -552,7 +560,6 @@ void arp_send(int type, int ptype, u32 dest_ip,
 		memset(arp_ptr, 0, dev->addr_len);
 	arp_ptr+=dev->addr_len;
 	memcpy(arp_ptr, &dest_ip, 4);
-	skb->dev = dev;
 
 	dev_queue_xmit(skb);
 	return;
@@ -600,6 +607,13 @@ int arp_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
 	if ((skb = skb_share_check(skb, GFP_ATOMIC)) == NULL)
 		goto out_of_mem;
 
+	if (skb_is_nonlinear(skb)) {
+		if (skb_linearize(skb, GFP_ATOMIC) != 0)
+			goto freeskb;
+		arp = skb->nh.arph;
+		arp_ptr= (unsigned char *)(arp+1);
+	}
+
 	switch (dev_type) {
 	default:	
 		if (arp->ar_pro != __constant_htons(ETH_P_IP))
@@ -639,6 +653,20 @@ int arp_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
 		 * According to RFC 1390, FDDI devices should accept ARP hardware types
 		 * of 1 (Ethernet).  However, to be more robust, we'll accept hardware
 		 * types of either 1 (Ethernet) or 6 (IEEE 802.2).
+		 */
+		if (arp->ar_hrd != __constant_htons(ARPHRD_ETHER) &&
+		    arp->ar_hrd != __constant_htons(ARPHRD_IEEE802))
+			goto out;
+		if (arp->ar_pro != __constant_htons(ETH_P_IP))
+			goto out;
+		break;
+#endif
+#ifdef CONFIG_NET_FC
+	case ARPHRD_IEEE802:
+		/*
+		 * According to RFC 2625, Fibre Channel devices (which are IEEE
+		 * 802 devices) should accept ARP hardware types of 6 (IEEE 802)
+		 * and 1 (Ethernet).
 		 */
 		if (arp->ar_hrd != __constant_htons(ARPHRD_ETHER) &&
 		    arp->ar_hrd != __constant_htons(ARPHRD_IEEE802))
@@ -689,6 +717,12 @@ int arp_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
 		goto out;
 
 /*
+ *     Special case: We must set Frame Relay source Q.922 address
+ */
+	if (dev_type == ARPHRD_DLCI)
+		sha = dev->broadcast;
+
+/*
  *  Process entry.  The idea here is we want to send a reply if it is a
  *  request for us or if it is a request for someone else that we hold
  *  a proxy for.  We want to add an entry to our cache if it is a reply
@@ -722,7 +756,12 @@ int arp_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
 		if (addr_type == RTN_LOCAL) {
 			n = neigh_event_ns(&arp_tbl, sha, &sip, dev);
 			if (n) {
-				arp_send(ARPOP_REPLY,ETH_P_ARP,sip,dev,tip,sha,dev->dev_addr,sha);
+				int dont_send = 0;
+				if (IN_DEV_ARPFILTER(in_dev))
+					dont_send |= arp_filter(sip,tip,dev); 
+				if (!dont_send)
+					arp_send(ARPOP_REPLY,ETH_P_ARP,sip,dev,tip,sha,dev->dev_addr,sha);
+
 				neigh_release(n);
 			}
 			goto out;
@@ -786,9 +825,10 @@ int arp_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
 	}
 
 out:
-	kfree_skb(skb);
 	if (in_dev)
 		in_dev_put(in_dev);
+freeskb:
+	kfree_skb(skb);
 out_of_mem:
 	return 0;
 }
@@ -1144,13 +1184,10 @@ void arp_ifdown(struct net_device *dev)
  *	Called once on startup.
  */
 
-static struct packet_type arp_packet_type =
-{
-	__constant_htons(ETH_P_ARP),
-	NULL,		/* All devices */
-	arp_rcv,
-	(void*)1,
-	NULL
+static struct packet_type arp_packet_type = {
+	type:	__constant_htons(ETH_P_ARP),
+	func:	arp_rcv,
+	data:	(void*) 1, /* understand shared skbs */
 };
 
 void __init arp_init (void)

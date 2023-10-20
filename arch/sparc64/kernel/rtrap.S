@@ -1,4 +1,4 @@
-/* $Id: rtrap.S,v 1.53 2000/08/06 05:20:35 davem Exp $
+/* $Id: rtrap.S,v 1.56 2001/10/13 00:14:34 kanoj Exp $
  * rtrap.S: Preparing for return from trap on Sparc V9.
  *
  * Copyright (C) 1997,1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
@@ -82,15 +82,14 @@ __handle_signal:
 		 andn			%l1, %l4, %l1
 
 		.align			64
-		.globl			rtrap_clr_l6, rtrap
+		.globl			rtrap_clr_l6, rtrap, irqsz_patchme
 rtrap_clr_l6:	clr			%l6
 rtrap:		lduw			[%g6 + AOFF_task_processor], %l0
 		sethi			%hi(irq_stat), %l2	! &softirq_active
 		or			%l2, %lo(irq_stat), %l2	! &softirq_active
-		sllx			%l0, 6, %l0
-		ldx			[%l2 + %l0], %l1	! softirq_active + softirq_mask
-		srlx			%l1, 32, %l2
-		andcc			%l1, %l2, %g0
+irqsz_patchme:	sllx			%l0, 0, %l0
+		lduw			[%l2 + %l0], %l1	! softirq_pending
+		cmp			%l1, 0
 
 		bne,pn			%icc, __handle_softirq
 		 ldx			[%sp + PTREGS_OFF + PT_V9_TSTATE], %l1
@@ -192,7 +191,7 @@ to_kernel:	ldub			[%g6 + AOFF_task_thread + AOFF_thread_fpdepth], %l5
 		rd			%fprs, %g5
 
 		wr			%g5, FPRS_FEF, %fprs
-		ldub			[%o1 + %o0], %g5
+		ldx			[%o1 + %o5], %g5
 		add			%g6, AOFF_task_thread + AOFF_thread_xfsr, %o1
 		membar			#StoreLoad | #LoadLoad
 		sll			%o0, 8, %o2

@@ -53,10 +53,12 @@
  *
  * SMP-threaded, sysctl's added
  * (c) 1999 Manfred Spraul <manfreds@colorfullife.com>
+ * Enforced range limit on SEM_UNDO
+ * (c) 2001 Red Hat Inc <alan@redhat.com>
  */
 
 #include <linux/config.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/init.h>
 #include <linux/proc_fs.h>
@@ -256,8 +258,19 @@ static int try_atomic_semop (struct sem_array * sma, struct sembuf * sops,
 		curr->sempid = (curr->sempid << 16) | pid;
 		curr->semval += sem_op;
 		if (sop->sem_flg & SEM_UNDO)
-			un->semadj[sop->sem_num] -= sem_op;
-
+		{
+			int undo = un->semadj[sop->sem_num] - sem_op;
+			/*
+	 		 *	Exceeding the undo range is an error.
+			 */
+			if (undo < (-SEMAEM - 1) || undo > SEMAEM)
+			{
+				/* Don't undo the undo */
+				sop->sem_flg &= ~SEM_UNDO;
+				goto out_of_range;
+			}
+			un->semadj[sop->sem_num] = undo;
+		}
 		if (curr->semval < 0)
 			goto would_block;
 		if (curr->semval > SEMVMX)
@@ -467,7 +480,7 @@ int semctl_nolock(int semid, int semnum, int cmd, int version, union semun arg)
 		struct semid64_ds tbuf;
 		int id;
 
-		if(semid > sem_ids.size)
+		if(semid >= sem_ids.size)
 			return -EINVAL;
 
 		memset(&tbuf,0,sizeof(tbuf));
@@ -922,7 +935,7 @@ asmlinkage long sys_semop (int semid, struct sembuf *tsops, unsigned nsops)
 
 		tmp = sem_lock(semid);
 		if(tmp==NULL) {
-			if(queue.status != -EIDRM)
+			if(queue.prev != NULL)
 				BUG();
 			current->semsleeping = NULL;
 			error = -EIDRM;

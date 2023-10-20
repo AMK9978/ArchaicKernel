@@ -18,14 +18,12 @@
 #include <linux/blk.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/list.h>
+#include <linux/init.h>
 
 #include "../../scsi/scsi.h"
-
-MODULE_AUTHOR("Russell King");
-MODULE_DESCRIPTION("SCSI command queueing");
 
 #define DEBUG
 
@@ -294,13 +292,6 @@ EXPORT_SYMBOL(queue_remove_tgtluntag);
 EXPORT_SYMBOL(queue_remove_cmd);
 EXPORT_SYMBOL(queue_probetgtlun);
 
-#ifdef MODULE
-int init_module (void)
-{
-	return 0;
-}
-
-void cleanup_module (void)
-{
-}
-#endif
+MODULE_AUTHOR("Russell King");
+MODULE_DESCRIPTION("SCSI command queueing");
+MODULE_LICENSE("GPL");

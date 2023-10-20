@@ -113,7 +113,7 @@ do_page_fault(unsigned long address, unsigned long mmcsr,
 		goto vmalloc_fault;
 #endif
 
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 	vma = find_vma(mm, address);
 	if (!vma)
 		goto bad_area;
@@ -140,13 +140,14 @@ good_area:
 			goto bad_area;
 	}
 
+ survive:
 	/*
 	 * If for any reason at all we couldn't handle the fault,
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
 	fault = handle_mm_fault(mm, vma, address, cause > 0);
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
 	if (fault < 0)
 		goto out_of_memory;
@@ -160,7 +161,7 @@ good_area:
  * Fix it, but check if it's kernel or user first..
  */
 bad_area:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
 	if (user_mode(regs)) {
 		force_sig(SIGSEGV, current);
@@ -194,6 +195,12 @@ no_context:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
+	if (current->pid == 1) {
+		current->policy |= SCHED_YIELD;
+		schedule();
+		down_read(&mm->mmap_sem);
+		goto survive;
+	}
 	printk(KERN_ALERT "VM: killing process %s(%d)\n",
 	       current->comm, current->pid);
 	if (!user_mode(regs))

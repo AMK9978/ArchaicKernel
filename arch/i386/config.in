@@ -27,35 +27,40 @@ endmenu
 mainmenu_option next_comment
 comment 'Processor type and features'
 choice 'Processor family' \
-	"386				CONFIG_M386 \
-	 486				CONFIG_M486 \
-	 586/K5/5x86/6x86/6x86MX	CONFIG_M586 \
-	 Pentium-Classic		CONFIG_M586TSC \
-	 Pentium-MMX			CONFIG_M586MMX \
-	 Pentium-Pro/Celeron/Pentium-II	CONFIG_M686 \
-	 Pentium-III			CONFIG_M686FXSR \
-	 Pentium-4			CONFIG_MPENTIUM4 \
-	 K6/K6-II/K6-III		CONFIG_MK6 \
-	 Athlon/K7			CONFIG_MK7 \
-	 Crusoe				CONFIG_MCRUSOE \
-	 Winchip-C6			CONFIG_MWINCHIPC6 \
-	 Winchip-2			CONFIG_MWINCHIP2 \
-	 Winchip-2A/Winchip-3		CONFIG_MWINCHIP3D" Pentium-Pro
+	"386					CONFIG_M386 \
+	 486					CONFIG_M486 \
+	 586/K5/5x86/6x86/6x86MX		CONFIG_M586 \
+	 Pentium-Classic			CONFIG_M586TSC \
+	 Pentium-MMX				CONFIG_M586MMX \
+	 Pentium-Pro/Celeron/Pentium-II		CONFIG_M686 \
+	 Pentium-III/Celeron(Coppermine)	CONFIG_MPENTIUMIII \
+	 Pentium-4				CONFIG_MPENTIUM4 \
+	 K6/K6-II/K6-III			CONFIG_MK6 \
+	 Athlon/Duron/K7			CONFIG_MK7 \
+	 Crusoe					CONFIG_MCRUSOE \
+	 Winchip-C6				CONFIG_MWINCHIPC6 \
+	 Winchip-2				CONFIG_MWINCHIP2 \
+	 Winchip-2A/Winchip-3			CONFIG_MWINCHIP3D \
+	 CyrixIII/C3				CONFIG_MCYRIXIII" Pentium-Pro
 #
 # Define implied options from the CPU selection here
 #
 
-unset CONFIG_X86_FXSR
-
 if [ "$CONFIG_M386" = "y" ]; then
    define_bool CONFIG_X86_CMPXCHG n
+   define_bool CONFIG_X86_XADD n
    define_int  CONFIG_X86_L1_CACHE_SHIFT 4
+   define_bool CONFIG_RWSEM_GENERIC_SPINLOCK y
+   define_bool CONFIG_RWSEM_XCHGADD_ALGORITHM n
 else
    define_bool CONFIG_X86_WP_WORKS_OK y
    define_bool CONFIG_X86_INVLPG y
    define_bool CONFIG_X86_CMPXCHG y
+   define_bool CONFIG_X86_XADD y
    define_bool CONFIG_X86_BSWAP y
    define_bool CONFIG_X86_POPAD_OK y
+   define_bool CONFIG_RWSEM_GENERIC_SPINLOCK n
+   define_bool CONFIG_RWSEM_XCHGADD_ALGORITHM y
 fi
 if [ "$CONFIG_M486" = "y" ]; then
    define_int  CONFIG_X86_L1_CACHE_SHIFT 4
@@ -87,14 +92,12 @@ if [ "$CONFIG_M686" = "y" ]; then
    define_bool CONFIG_X86_PGE y
    define_bool CONFIG_X86_USE_PPRO_CHECKSUM y
 fi
-if [ "$CONFIG_M686FXSR" = "y" ]; then
+if [ "$CONFIG_MPENTIUMIII" = "y" ]; then
    define_int  CONFIG_X86_L1_CACHE_SHIFT 5
    define_bool CONFIG_X86_TSC y
    define_bool CONFIG_X86_GOOD_APIC y
    define_bool CONFIG_X86_PGE y
    define_bool CONFIG_X86_USE_PPRO_CHECKSUM y
-   define_bool CONFIG_X86_FXSR y
-   define_bool CONFIG_X86_XMM y
 fi
 if [ "$CONFIG_MPENTIUM4" = "y" ]; then
    define_int  CONFIG_X86_L1_CACHE_SHIFT 7
@@ -102,8 +105,6 @@ if [ "$CONFIG_MPENTIUM4" = "y" ]; then
    define_bool CONFIG_X86_GOOD_APIC y
    define_bool CONFIG_X86_PGE y
    define_bool CONFIG_X86_USE_PPRO_CHECKSUM y
-   define_bool CONFIG_X86_FXSR y
-   define_bool CONFIG_X86_XMM y
 fi
 if [ "$CONFIG_MK6" = "y" ]; then
    define_int  CONFIG_X86_L1_CACHE_SHIFT 5
@@ -117,6 +118,13 @@ if [ "$CONFIG_MK7" = "y" ]; then
    define_bool CONFIG_X86_GOOD_APIC y
    define_bool CONFIG_X86_USE_3DNOW y
    define_bool CONFIG_X86_PGE y
+   define_bool CONFIG_X86_USE_PPRO_CHECKSUM y
+fi
+if [ "$CONFIG_MCYRIXIII" = "y" ]; then
+   define_int  CONFIG_X86_L1_CACHE_SHIFT 5
+   define_bool CONFIG_X86_TSC y
+   define_bool CONFIG_X86_ALIGNMENT_16 y
+   define_bool CONFIG_X86_USE_3DNOW y
    define_bool CONFIG_X86_USE_PPRO_CHECKSUM y
 fi
 if [ "$CONFIG_MCRUSOE" = "y" ]; then
@@ -141,6 +149,7 @@ if [ "$CONFIG_MWINCHIP3D" = "y" ]; then
    define_bool CONFIG_X86_USE_PPRO_CHECKSUM y
 fi
 tristate 'Toshiba Laptop support' CONFIG_TOSHIBA
+tristate 'Dell Inspiron 8000 support' CONFIG_I8K
 
 tristate '/dev/cpu/microcode - Intel IA32 CPU microcode support' CONFIG_MICROCODE
 tristate '/dev/cpu/*/msr - Model-specific register support' CONFIG_X86_MSR
@@ -158,17 +167,20 @@ if [ "$CONFIG_HIGHMEM64G" = "y" ]; then
    define_bool CONFIG_X86_PAE y
 fi
 
-if [ "$CONFIG_X86_FXSR" != "y" ]; then
-   bool 'Math emulation' CONFIG_MATH_EMULATION
-fi
+bool 'Math emulation' CONFIG_MATH_EMULATION
 bool 'MTRR (Memory Type Range Register) support' CONFIG_MTRR
 bool 'Symmetric multi-processing support' CONFIG_SMP
 if [ "$CONFIG_SMP" != "y" ]; then
-   bool 'APIC and IO-APIC support on uniprocessors' CONFIG_X86_UP_IOAPIC
-   if [ "$CONFIG_X86_UP_IOAPIC" = "y" ]; then
-      define_bool CONFIG_X86_IO_APIC y
+   bool 'Local APIC support on uniprocessors' CONFIG_X86_UP_APIC
+   dep_bool 'IO-APIC support on uniprocessors' CONFIG_X86_UP_IOAPIC $CONFIG_X86_UP_APIC
+   if [ "$CONFIG_X86_UP_APIC" = "y" ]; then
       define_bool CONFIG_X86_LOCAL_APIC y
    fi
+   if [ "$CONFIG_X86_UP_IOAPIC" = "y" ]; then
+      define_bool CONFIG_X86_IO_APIC y
+   fi
+else
+   bool 'Multiquad NUMA system' CONFIG_MULTIQUAD
 fi
 
 if [ "$CONFIG_SMP" = "y" -a "$CONFIG_X86_CMPXCHG" = "y" ]; then
@@ -180,7 +192,10 @@ mainmenu_option next_comment
 comment 'General setup'
 
 bool 'Networking support' CONFIG_NET
-bool 'SGI Visual Workstation support' CONFIG_VISWS
+
+# Visual Workstation support is utterly broken.
+# If you want to see it working mail an VW540 to hch@infradead.org 8)
+#bool 'SGI Visual Workstation support' CONFIG_VISWS
 if [ "$CONFIG_VISWS" = "y" ]; then
    define_bool CONFIG_X86_VISWS_APIC y
    define_bool CONFIG_X86_LOCAL_APIC y
@@ -219,8 +234,10 @@ bool 'Support for hot-pluggable devices' CONFIG_HOTPLUG
 
 if [ "$CONFIG_HOTPLUG" = "y" ] ; then
    source drivers/pcmcia/Config.in
+   source drivers/hotplug/Config.in
 else
    define_bool CONFIG_PCMCIA n
+   define_bool CONFIG_HOTPLUG_PCI n
 fi
 
 bool 'System V IPC' CONFIG_SYSVIPC
@@ -239,6 +256,10 @@ bool 'Power Management support' CONFIG_PM
 
 if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
    dep_bool '  ACPI support' CONFIG_ACPI $CONFIG_PM
+   
+   if [ "$CONFIG_ACPI" != "n" ]; then
+      source drivers/acpi/Config.in
+   fi
 fi
 
 dep_tristate '  Advanced Power Management BIOS support' CONFIG_APM $CONFIG_PM
@@ -293,9 +314,11 @@ if [ "$CONFIG_SCSI" != "n" ]; then
 fi
 endmenu
 
+source drivers/message/fusion/Config.in
+
 source drivers/ieee1394/Config.in
 
-source drivers/i2o/Config.in
+source drivers/message/i2o/Config.in
 
 if [ "$CONFIG_NET" = "y" ]; then
    mainmenu_option next_comment
@@ -369,9 +392,21 @@ endmenu
 
 source drivers/usb/Config.in
 
+if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
+   source net/bluetooth/Config.in
+fi
+
 mainmenu_option next_comment
 comment 'Kernel hacking'
 
-#bool 'Debug kmalloc/kfree' CONFIG_DEBUG_MALLOC
-bool 'Magic SysRq key' CONFIG_MAGIC_SYSRQ
+bool 'Kernel debugging' CONFIG_DEBUG_KERNEL
+if [ "$CONFIG_DEBUG_KERNEL" != "n" ]; then
+   bool '  Debug high memory support' CONFIG_DEBUG_HIGHMEM
+   bool '  Debug memory allocations' CONFIG_DEBUG_SLAB
+   bool '  Memory mapped I/O debugging' CONFIG_DEBUG_IOVIRT
+   bool '  Magic SysRq key' CONFIG_MAGIC_SYSRQ
+   bool '  Spinlock debugging' CONFIG_DEBUG_SPINLOCK
+   bool '  Verbose BUG() reporting (adds 70K)' CONFIG_DEBUG_BUGVERBOSE
+fi
+
 endmenu

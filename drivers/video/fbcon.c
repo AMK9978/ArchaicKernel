@@ -31,6 +31,8 @@
  *
  *  Random hacking by Martin Mares <mj@ucw.cz>
  *
+ *	2001 - Documented with DocBook
+ *	- Brad Douglas <brad@neruo.com>
  *
  *  The low level operations for the various display memory organizations are
  *  now in separate source files.
@@ -67,7 +69,7 @@
 #include <linux/console.h>
 #include <linux/string.h>
 #include <linux/kd.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/fb.h>
 #include <linux/vt_kern.h>
 #include <linux/selection.h>
@@ -239,6 +241,20 @@ static void cursor_timer_handler(unsigned long dev_addr)
       add_timer(&cursor_timer);
 }
 
+
+/**
+ *	PROC_CONSOLE - find the attached tty or visible console
+ *	@info: frame buffer info structure
+ *
+ *	Finds the tty attached to the process or visible console if
+ *	the process is not directly attached to a tty (e.g. remote
+ *	user) for device @info.
+ *
+ *	Returns -1 errno on error, or tty/visible console number
+ *	on success.
+ *
+ */
+
 int PROC_CONSOLE(const struct fb_info *info)
 {
         int fgc;
@@ -261,6 +277,21 @@ int PROC_CONSOLE(const struct fb_info *info)
         return MINOR(current->tty->device) - 1;
 }
 
+
+/**
+ *	set_all_vcs - set all virtual consoles to match
+ *	@fbidx: frame buffer index (e.g. fb0, fb1, ...)
+ *	@fb: frame buffer ops structure
+ *	@var: frame buffer screen structure to set
+ *	@info: frame buffer info structure
+ *
+ *	Set all virtual consoles to match screen info set in @var
+ *	for device @info.
+ *
+ *	Returns negative errno on error, or zero on success.
+ *
+ */
+
 int set_all_vcs(int fbidx, struct fb_ops *fb, struct fb_var_screeninfo *var,
                 struct fb_info *info)
 {
@@ -276,6 +307,17 @@ int set_all_vcs(int fbidx, struct fb_ops *fb, struct fb_var_screeninfo *var,
                     fb->fb_set_var(var, unit, info);
     return 0;
 }
+
+
+/**
+ *	set_con2fb_map - map console to frame buffer device
+ *	@unit: virtual console number to map
+ *	@newidx: frame buffer index to map virtual console to
+ *
+ *	Maps a virtual console @unit to a frame buffer device
+ *	@newidx.
+ *
+ */
 
 void set_con2fb_map(int unit, int newidx)
 {
@@ -622,7 +664,7 @@ static void fbcon_setup(int con, int init, int logo)
     	    	scr_memsetw(save, conp->vc_video_erase_char, logo_lines * nr_cols * 2);
     	    	r = q - step;
     	    	for (cnt = 0; cnt < logo_lines; cnt++, r += i)
-    	    		scr_memcpyw_from(save + cnt * nr_cols, r, 2 * i);
+    	    		scr_memcpyw(save + cnt * nr_cols, r, 2 * i);
     	    	r = q;
     	    }
     	}
@@ -640,7 +682,7 @@ static void fbcon_setup(int con, int init, int logo)
     	}
     	scr_memsetw((unsigned short *)conp->vc_origin,
 		    conp->vc_video_erase_char, 
-    		conp->vc_size_row * logo_lines);
+		    conp->vc_size_row * logo_lines);
     }
     
     /*
@@ -1108,11 +1150,13 @@ static void fbcon_redraw(struct vc_data *conp, struct display *p,
 	    	}
 	    }
 	    scr_writew(c, d);
+	    console_conditional_schedule();
 	    s++;
 	    d++;
 	} while (s < le);
 	if (s > start)
 	    p->dispsw->putcs(conp, p, start, s - start, real_y(p, line), x);
+	console_conditional_schedule();
 	if (offset > 0)
 		line++;
 	else {
@@ -1124,6 +1168,20 @@ static void fbcon_redraw(struct vc_data *conp, struct display *p,
     }
 }
 
+/**
+ *	fbcon_redraw_clear - clear area of the screen
+ *	@conp: stucture pointing to current active virtual console
+ *	@p: display structure
+ *	@sy: starting Y coordinate
+ *	@sx: starting X coordinate
+ *	@height: height of area to clear
+ *	@width: width of area to clear
+ *
+ *	Clears a specified area of the screen.  All dimensions are in
+ *	pixels.
+ *
+ */
+
 void fbcon_redraw_clear(struct vc_data *conp, struct display *p, int sy, int sx,
 		     int height, int width)
 {
@@ -1133,7 +1191,25 @@ void fbcon_redraw_clear(struct vc_data *conp, struct display *p, int sy, int sx,
 	    fbcon_putc(conp, ' ', sy+y, sx+x);
 }
 
-/* This cannot be used together with ypan or ywrap */
+
+/**
+ *	fbcon_redraw_bmove - copy area of screen to another area
+ *	@p: display structure
+ *	@sy: origin Y coordinate
+ *	@sx: origin X coordinate
+ *	@dy: destination Y coordinate
+ *	@dx: destination X coordinate
+ *	@h: height of area to copy
+ *	@w: width of area to copy
+ *
+ *	Copies an area of the screen to another area of the same screen.
+ *	All dimensions are in pixels.
+ *
+ *	Note that this function cannot be used together with ypan or
+ *	ywrap.
+ *
+ */
+
 void fbcon_redraw_bmove(struct display *p, int sy, int sx, int dy, int dx, int h, int w)
 {
     if (sy != dy)
@@ -1934,17 +2010,14 @@ static unsigned long fbcon_getxy(struct vc_data *conp, unsigned long pos, int *p
 static void fbcon_invert_region(struct vc_data *conp, u16 *p, int cnt)
 {
     while (cnt--) {
+	u16 a = scr_readw(p);
 	if (!conp->vc_can_do_color)
-	    *p++ ^= 0x0800;
-	else if (conp->vc_hi_font_mask == 0x100) {
-	    u16 a = *p;
+	    a ^= 0x0800;
+	else if (conp->vc_hi_font_mask == 0x100)
 	    a = ((a) & 0x11ff) | (((a) & 0xe000) >> 4) | (((a) & 0x0e00) << 4);
-	    *p++ = a;
-	} else {
-	    u16 a = *p;
+	else
 	    a = ((a) & 0x88ff) | (((a) & 0x7000) >> 4) | (((a) & 0x0700) << 4);
-	    *p++ = a;
-	}
+	scr_writew(a, p++);
 	if (p == (u16 *)softback_end)
 	    p = (u16 *)softback_buf;
 	if (p == (u16 *)softback_in)
@@ -2060,44 +2133,32 @@ static int __init fbcon_show_logo( void )
     if (!fb)
 	return 0;
 	
-    /* Set colors if visual is PSEUDOCOLOR and we have enough colors, or for
-     * DIRECTCOLOR */
-    if ((p->visual == FB_VISUAL_PSEUDOCOLOR && depth >= 4) ||
-	p->visual == FB_VISUAL_DIRECTCOLOR) {
-	int is_truecolor = (p->visual == FB_VISUAL_DIRECTCOLOR);
-	int use_256 = (!is_truecolor && depth >= 8) ||
-		      (is_truecolor && depth >= 24);
-	int first_col = use_256 ? 32 : depth > 4 ? 16 : 0;
-	int num_cols = use_256 ? LINUX_LOGO_COLORS : 16;
-	unsigned char *red, *green, *blue;
-	
-	if (use_256) {
-	    red   = linux_logo_red;
-	    green = linux_logo_green;
-	    blue  = linux_logo_blue;
-	}
-	else {
-	    red   = linux_logo16_red;
-	    green = linux_logo16_green;
-	    blue  = linux_logo16_blue;
-	}
-
-	for( i = 0; i < num_cols; i += n ) {
-	    n = num_cols - i;
+    /*
+     * Set colors if visual is PSEUDOCOLOR and we have enough colors, or for
+     * DIRECTCOLOR
+     * We don't have to set the colors for the 16-color logo, since that logo
+     * uses the standard VGA text console palette
+     */
+    if ((p->visual == FB_VISUAL_PSEUDOCOLOR && depth >= 8) ||
+	(p->visual == FB_VISUAL_DIRECTCOLOR && depth >= 24))
+	for (i = 0; i < LINUX_LOGO_COLORS; i += n) {
+	    n = LINUX_LOGO_COLORS - i;
 	    if (n > 16)
 		/* palette_cmap provides space for only 16 colors at once */
 		n = 16;
-	    palette_cmap.start = first_col + i;
+	    palette_cmap.start = 32 + i;
 	    palette_cmap.len   = n;
 	    for( j = 0; j < n; ++j ) {
-		palette_cmap.red[j]   = (red[i+j] << 8) | red[i+j];
-		palette_cmap.green[j] = (green[i+j] << 8) | green[i+j];
-		palette_cmap.blue[j]  = (blue[i+j] << 8) | blue[i+j];
+		palette_cmap.red[j]   = (linux_logo_red[i+j] << 8) |
+					linux_logo_red[i+j];
+		palette_cmap.green[j] = (linux_logo_green[i+j] << 8) |
+					linux_logo_green[i+j];
+		palette_cmap.blue[j]  = (linux_logo_blue[i+j] << 8) |
+					linux_logo_blue[i+j];
 	    }
 	    p->fb_info->fbops->fb_set_cmap(&palette_cmap, 1, fg_console,
 					   p->fb_info);
 	}
-    }
 	
     if (depth >= 8) {
 	logo = linux_logo;
@@ -2144,6 +2205,10 @@ static int __init fbcon_show_logo( void )
 			    /* Some cards require 32bit access */
 			    fb_writel (val, dst);
 			    dst += 4;
+			} else if (bdepth == 2 && !((long)dst & 1)) {
+			    /* others require 16bit access */
+			    fb_writew (val,dst);
+			    dst +=2;
 			} else {
 #ifdef __LITTLE_ENDIAN
 			    for( i = 0; i < bdepth; ++i )
@@ -2155,15 +2220,15 @@ static int __init fbcon_show_logo( void )
 		    }
 		}
 	    }
-	    else if (depth >= 15 && depth <= 23) {
-	        /* have 5..7 bits per color, using 16 color image */
+	    else if (depth >= 12 && depth <= 23) {
+	        /* have 4..7 bits per color, using 16 color image */
 		unsigned int pix;
 		src = linux_logo16;
 		bdepth = (depth+7)/8;
 		for( y1 = 0; y1 < LOGO_H; y1++ ) {
 		    dst = fb + y1*line + x*bdepth;
 		    for( x1 = 0; x1 < LOGO_W/2; x1++, src++ ) {
-			pix = (*src >> 4) | 0x10; /* upper nibble */
+			pix = *src >> 4; /* upper nibble */
 			val = (pix << redshift) |
 			      (pix << greenshift) |
 			      (pix << blueshift);
@@ -2173,7 +2238,7 @@ static int __init fbcon_show_logo( void )
 			for( i = bdepth-1; i >= 0; --i )
 #endif
 			    fb_writeb (val >> (i*8), dst++);
-			pix = (*src & 0x0f) | 0x10; /* lower nibble */
+			pix = *src & 0x0f; /* lower nibble */
 			val = (pix << redshift) |
 			      (pix << greenshift) |
 			      (pix << blueshift);
@@ -2218,6 +2283,10 @@ static int __init fbcon_show_logo( void )
 			/* Some cards require 32bit access */
 			fb_writel (val, dst);
 			dst += 4;
+		    } else if (bdepth == 2 && !((long)dst & 1)) {
+			/* others require 16bit access */
+			fb_writew (val,dst);
+			dst +=2;
 		    } else {
 #ifdef __LITTLE_ENDIAN
 			for( i = 0; i < bdepth; ++i )
@@ -2297,16 +2366,13 @@ static int __init fbcon_show_logo( void )
 		}
 	    }
 	
-	    /* fill remaining planes
-	     * special case for logo_depth == 4: we used color registers 16..31,
-	     * so fill plane 4 with 1 bits instead of 0 */
+	    /* fill remaining planes */
 	    if (depth > logo_depth) {
 		for( y1 = 0; y1 < LOGO_H; y1++ ) {
 		    for( x1 = 0; x1 < LOGO_LINE; x1++ ) {
 			dst = fb + y1*line + MAP_X(x/8+x1) + logo_depth*plane;
 			for( i = logo_depth; i < depth; i++, dst += plane )
-			    *dst = (i == logo_depth && logo_depth == 4)
-				   ? 0xff : 0x00;
+			    *dst = 0x00;
 		    }
 		}
 	    }
@@ -2434,3 +2500,5 @@ EXPORT_SYMBOL(fbcon_redraw_bmove);
 EXPORT_SYMBOL(fbcon_redraw_clear);
 EXPORT_SYMBOL(fbcon_dummy);
 EXPORT_SYMBOL(fb_con);
+
+MODULE_LICENSE("GPL");

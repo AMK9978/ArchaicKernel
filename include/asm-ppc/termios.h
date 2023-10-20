@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.termios.h 1.8 05/17/01 18:14:26 cort
+ */
 #ifndef _PPC_TERMIOS_H
 #define _PPC_TERMIOS_H
 
@@ -43,6 +46,7 @@ struct ltchars {
 #define FIONBIO		_IOW('f', 126, int)
 #define FIONREAD	_IOR('f', 127, int)
 #define TIOCINQ		FIONREAD
+#define FIOQSIZE	_IOR('f', 128, loff_t)
 
 #define TIOCGETP	_IOR('t', 8, struct sgttyb)
 #define TIOCSETP	_IOW('t', 9, struct sgttyb)
@@ -185,10 +189,11 @@ struct termio {
 #define N_MASC		8	/* Reserved for Mobitex module <kaz@cafe.net> */
 #define N_R3964		9	/* Reserved for Simatic R3964 module */
 #define N_PROFIBUS_FDL	10	/* Reserved for Profibus <Dave@mvhi.com> */
-#define N_IRDA		11	/* Linux IrDa - http://www.cs.uit.no/~dagb/irda/irda.html */
+#define N_IRDA		11	/* Linux IrDa - http://irda.sourceforge.net/ */
 #define N_SMSBLOCK	12	/* SMS block mode - for talking to GSM data cards about SMS messages */
 #define N_HDLC		13	/* synchronous HDLC */
 #define N_SYNC_PPP	14
+#define N_HCI		15  /* Bluetooth HCI UART */
 
 #ifdef __KERNEL__
 

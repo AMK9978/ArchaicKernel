@@ -26,6 +26,7 @@
 #include <asm/uaccess.h>
 #include <asm/atomic.h>
 #include <asm/poll.h>
+#include <asm/ioctls.h>
 
 #if defined(CONFIG_ATM_LANE) || defined(CONFIG_ATM_LANE_MODULE)
 #include <linux/atmlec.h>
@@ -55,6 +56,11 @@ EXPORT_SYMBOL(atm_lane_ops);
 struct atm_tcp_ops atm_tcp_ops;
 EXPORT_SYMBOL(atm_tcp_ops);
 #endif
+#endif
+
+#if defined(CONFIG_PPPOATM) || defined(CONFIG_PPPOATM_MODULE)
+int (*pppoatm_ioctl_hook)(struct atm_vcc *, unsigned int, unsigned long);
+EXPORT_SYMBOL(pppoatm_ioctl_hook);
 #endif
 
 #include "resources.h"		/* atm_find_dev */
@@ -376,6 +382,8 @@ int atm_recvmsg(struct socket *sock,struct msghdr *m,int total_len,
 	if (error <= 0) return error;
 	vcc->timestamp = skb->stamp;
 	eff_len = skb->len > size ? size : skb->len;
+	if (skb->len > size) /* Not fit ?  Report it... */
+		m->msg_flags |= MSG_TRUNC;
 	if (vcc->dev->ops->feedback)
 		vcc->dev->ops->feedback(vcc,skb,(unsigned long) skb->data,
 		    (unsigned long) buff,eff_len);
@@ -541,7 +549,7 @@ int atm_ioctl(struct socket *sock,unsigned int cmd,unsigned long arg)
 {
 	struct atm_dev *dev;
 	struct atm_vcc *vcc;
-	int *tmp_buf;
+	int *tmp_buf, *tmp_p;
 	void *buf;
 	int error,len,size,number, ret_val;
 
@@ -595,14 +603,13 @@ int atm_ioctl(struct socket *sock,unsigned int cmd,unsigned long arg)
 				ret_val = -ENOMEM;
 				goto done;
 			}
+			tmp_p = tmp_buf;
 			for (dev = atm_devs; dev; dev = dev->next)
-				*tmp_buf++ = dev->number;
-			if (copy_to_user(buf,(char *) tmp_buf-size,size)) {
-				ret_val = -EFAULT;
-				goto done;
-			}
-		        ret_val = put_user(size,
-			    &((struct atm_iobuf *) arg)->length) ? -EFAULT : 0;
+				*tmp_p++ = dev->number;
+		        ret_val = ((copy_to_user(buf, tmp_buf, size)) ||
+			    put_user(size, &((struct atm_iobuf *) arg)->length)
+			    ) ? -EFAULT : 0;
+			kfree(tmp_buf);
 			goto done;
 		case SIOCGSTAMP: /* borrowed from IP */
 			if (!vcc->timestamp.tv_sec) {
@@ -771,6 +778,13 @@ int atm_ioctl(struct socket *sock,unsigned int cmd,unsigned long arg)
 		default:
 			break;
 	}
+#if defined(CONFIG_PPPOATM) || defined(CONFIG_PPPOATM_MODULE)
+	if (pppoatm_ioctl_hook) {
+		ret_val = pppoatm_ioctl_hook(vcc, cmd, arg);
+		if (ret_val != -ENOIOCTLCMD)
+			goto done;
+	}
+#endif
 	if (get_user(buf,&((struct atmif_sioc *) arg)->arg)) {
 		ret_val = -EFAULT;
 		goto done;
@@ -864,7 +878,7 @@ int atm_ioctl(struct socket *sock,unsigned int cmd,unsigned long arg)
 				ret_val = -EPERM;
 				goto done;
 			}
-			reset_addr(dev);
+			atm_reset_addr(dev);
 			break;
 		case ATM_ADDADDR:
 		case ATM_DELADDR:
@@ -880,13 +894,13 @@ int atm_ioctl(struct socket *sock,unsigned int cmd,unsigned long arg)
 					goto done;
 				}
 				if (cmd == ATM_ADDADDR)
-					ret_val = add_addr(dev,&addr);
+					ret_val = atm_add_addr(dev,&addr);
 				else
-					ret_val = del_addr(dev,&addr);
+					ret_val = atm_del_addr(dev,&addr);
 				goto done;
 			}
 		case ATM_GETADDR:
-			size = get_addr(dev,buf,len);
+			size = atm_get_addr(dev,buf,len);
 			if (size < 0)
 				ret_val = size;
 			else
@@ -928,6 +942,8 @@ int atm_ioctl(struct socket *sock,unsigned int cmd,unsigned long arg)
 	if (size)
 		ret_val =  put_user(size,&((struct atmif_sioc *) arg)->length) ?
 			-EFAULT : 0;
+	else
+		ret_val = 0;
 
  done:
 	spin_unlock (&atm_dev_lock); 

@@ -39,6 +39,7 @@ int fs_overflowgid = DEFAULT_FS_OVERFLOWUID;
  */
 
 int C_A_D = 1;
+int cad_pid = 1;
 
 
 /*
@@ -330,6 +331,12 @@ asmlinkage long sys_reboot(int magic1, int magic2, unsigned int cmd, void * arg)
 	return 0;
 }
 
+static void deferred_cad(void *dummy)
+{
+	notifier_call_chain(&reboot_notifier_list, SYS_RESTART, NULL);
+	machine_restart(NULL);
+}
+
 /*
  * This function gets called by ctrl-alt-del - ie the keyboard interrupt.
  * As it's called within an interrupt, it may NOT sync: the only choice
@@ -337,11 +344,14 @@ asmlinkage long sys_reboot(int magic1, int magic2, unsigned int cmd, void * arg)
  */
 void ctrl_alt_del(void)
 {
-	if (C_A_D) {
-		notifier_call_chain(&reboot_notifier_list, SYS_RESTART, NULL);
-		machine_restart(NULL);
-	} else
-		kill_proc(1, SIGINT, 1);
+	static struct tq_struct cad_tq = {
+		routine: deferred_cad,
+	};
+
+	if (C_A_D)
+		schedule_task(&cad_tq);
+	else
+		kill_proc(cad_pid, SIGINT, 1);
 }
 	
 
@@ -367,12 +377,14 @@ asmlinkage long sys_setregid(gid_t rgid, gid_t egid)
 {
 	int old_rgid = current->gid;
 	int old_egid = current->egid;
+	int new_rgid = old_rgid;
+	int new_egid = old_egid;
 
 	if (rgid != (gid_t) -1) {
 		if ((old_rgid == rgid) ||
 		    (current->egid==rgid) ||
 		    capable(CAP_SETGID))
-			current->gid = rgid;
+			new_rgid = rgid;
 		else
 			return -EPERM;
 	}
@@ -381,18 +393,22 @@ asmlinkage long sys_setregid(gid_t rgid, gid_t egid)
 		    (current->egid == egid) ||
 		    (current->sgid == egid) ||
 		    capable(CAP_SETGID))
-			current->fsgid = current->egid = egid;
+			new_egid = egid;
 		else {
-			current->gid = old_rgid;
 			return -EPERM;
 		}
 	}
+	if (new_egid != old_egid)
+	{
+		current->mm->dumpable = 0;
+		wmb();
+	}
 	if (rgid != (gid_t) -1 ||
 	    (egid != (gid_t) -1 && egid != old_rgid))
-		current->sgid = current->egid;
-	current->fsgid = current->egid;
-	if (current->egid != old_egid)
-		current->dumpable = 0;
+		current->sgid = new_egid;
+	current->fsgid = new_egid;
+	current->egid = new_egid;
+	current->gid = new_rgid;
 	return 0;
 }
 
@@ -406,14 +422,25 @@ asmlinkage long sys_setgid(gid_t gid)
 	int old_egid = current->egid;
 
 	if (capable(CAP_SETGID))
+	{
+		if(old_egid != gid)
+		{
+			current->mm->dumpable=0;
+			wmb();
+		}
 		current->gid = current->egid = current->sgid = current->fsgid = gid;
+	}
 	else if ((gid == current->gid) || (gid == current->sgid))
+	{
+		if(old_egid != gid)
+		{
+			current->mm->dumpable=0;
+			wmb();
+		}
 		current->egid = current->fsgid = gid;
+	}
 	else
 		return -EPERM;
-
-	if (current->egid != old_egid)
-		current->dumpable = 0;
 	return 0;
 }
   
@@ -446,7 +473,7 @@ asmlinkage long sys_setgid(gid_t gid)
  * files..
  * Thanks to Olaf Kirch and Peter Benie for spotting this.
  */
-extern inline void cap_emulate_setxuid(int old_ruid, int old_euid, 
+static inline void cap_emulate_setxuid(int old_ruid, int old_euid, 
 				       int old_suid)
 {
 	if ((old_ruid == 0 || old_euid == 0 || old_suid == 0) &&
@@ -463,7 +490,7 @@ extern inline void cap_emulate_setxuid(int old_ruid, int old_euid,
 	}
 }
 
-static int set_user(uid_t new_ruid)
+static int set_user(uid_t new_ruid, int dumpclear)
 {
 	struct user_struct *new_user, *old_user;
 
@@ -479,6 +506,11 @@ static int set_user(uid_t new_ruid)
 	atomic_dec(&old_user->processes);
 	atomic_inc(&new_user->processes);
 
+	if(dumpclear)
+	{
+		current->mm->dumpable = 0;
+		wmb();
+	}
 	current->uid = new_ruid;
 	current->user = new_user;
 	free_uid(old_user);
@@ -525,16 +557,19 @@ asmlinkage long sys_setreuid(uid_t ruid, uid_t euid)
 			return -EPERM;
 	}
 
-	if (new_ruid != old_ruid && set_user(new_ruid) < 0)
+	if (new_ruid != old_ruid && set_user(new_ruid, new_euid != old_euid) < 0)
 		return -EAGAIN;
 
+	if (new_euid != old_euid)
+	{
+		current->mm->dumpable=0;
+		wmb();
+	}
 	current->fsuid = current->euid = new_euid;
 	if (ruid != (uid_t) -1 ||
 	    (euid != (uid_t) -1 && euid != old_ruid))
 		current->suid = current->euid;
 	current->fsuid = current->euid;
-	if (current->euid != old_euid)
-		current->dumpable = 0;
 
 	if (!issecure(SECURE_NO_SETUID_FIXUP)) {
 		cap_emulate_setxuid(old_ruid, old_euid, old_suid);
@@ -559,21 +594,26 @@ asmlinkage long sys_setreuid(uid_t ruid, uid_t euid)
 asmlinkage long sys_setuid(uid_t uid)
 {
 	int old_euid = current->euid;
-	int old_ruid, old_suid, new_ruid;
+	int old_ruid, old_suid, new_ruid, new_suid;
 
 	old_ruid = new_ruid = current->uid;
 	old_suid = current->suid;
+	new_suid = old_suid;
+	
 	if (capable(CAP_SETUID)) {
-		if (uid != old_ruid && set_user(uid) < 0)
+		if (uid != old_ruid && set_user(uid, old_euid != uid) < 0)
 			return -EAGAIN;
-		current->suid = uid;
-	} else if ((uid != current->uid) && (uid != current->suid))
+		new_suid = uid;
+	} else if ((uid != current->uid) && (uid != new_suid))
 		return -EPERM;
 
-	current->fsuid = current->euid = uid;
-
 	if (old_euid != uid)
-		current->dumpable = 0;
+	{
+		current->mm->dumpable = 0;
+		wmb();
+	}
+	current->fsuid = current->euid = uid;
+	current->suid = new_suid;
 
 	if (!issecure(SECURE_NO_SETUID_FIXUP)) {
 		cap_emulate_setxuid(old_ruid, old_euid, old_suid);
@@ -605,12 +645,15 @@ asmlinkage long sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 			return -EPERM;
 	}
 	if (ruid != (uid_t) -1) {
-		if (ruid != current->uid && set_user(ruid) < 0)
+		if (ruid != current->uid && set_user(ruid, euid != current->euid) < 0)
 			return -EAGAIN;
 	}
 	if (euid != (uid_t) -1) {
 		if (euid != current->euid)
-			current->dumpable = 0;
+		{
+			current->mm->dumpable = 0;
+			wmb();
+		}
 		current->euid = euid;
 		current->fsuid = euid;
 	}
@@ -640,7 +683,7 @@ asmlinkage long sys_getresuid(uid_t *ruid, uid_t *euid, uid_t *suid)
  */
 asmlinkage long sys_setresgid(gid_t rgid, gid_t egid, gid_t sgid)
 {
-       if (!capable(CAP_SETGID)) {
+	if (!capable(CAP_SETGID)) {
 		if ((rgid != (gid_t) -1) && (rgid != current->gid) &&
 		    (rgid != current->egid) && (rgid != current->sgid))
 			return -EPERM;
@@ -651,14 +694,17 @@ asmlinkage long sys_setresgid(gid_t rgid, gid_t egid, gid_t sgid)
 		    (sgid != current->egid) && (sgid != current->sgid))
 			return -EPERM;
 	}
-	if (rgid != (gid_t) -1)
-		current->gid = rgid;
 	if (egid != (gid_t) -1) {
 		if (egid != current->egid)
-			current->dumpable = 0;
+		{
+			current->mm->dumpable = 0;
+			wmb();
+		}
 		current->egid = egid;
 		current->fsgid = egid;
 	}
+	if (rgid != (gid_t) -1)
+		current->gid = rgid;
 	if (sgid != (gid_t) -1)
 		current->sgid = sgid;
 	return 0;
@@ -690,9 +736,14 @@ asmlinkage long sys_setfsuid(uid_t uid)
 	if (uid == current->uid || uid == current->euid ||
 	    uid == current->suid || uid == current->fsuid || 
 	    capable(CAP_SETUID))
+	{
+		if (uid != old_fsuid)
+		{
+			current->mm->dumpable = 0;
+			wmb();
+		}
 		current->fsuid = uid;
-	if (current->fsuid != old_fsuid)
-		current->dumpable = 0;
+	}
 
 	/* We emulate fsuid by essentially doing a scaled-down version
 	 * of what we did in setresuid and friends. However, we only
@@ -727,10 +778,14 @@ asmlinkage long sys_setfsgid(gid_t gid)
 	if (gid == current->gid || gid == current->egid ||
 	    gid == current->sgid || gid == current->fsgid || 
 	    capable(CAP_SETGID))
+	{
+		if (gid != old_fsgid)
+		{
+			current->mm->dumpable = 0;
+			wmb();
+		}
 		current->fsgid = gid;
-	if (current->fsgid != old_fsgid)
-		current->dumpable = 0;
-
+	}
 	return old_fsgid;
 }
 
@@ -1035,7 +1090,7 @@ asmlinkage long sys_getrlimit(unsigned int resource, struct rlimit *rlim)
 			? -EFAULT : 0;
 }
 
-#if !defined(__ia64__) && !defined(__s390__)
+#if !defined(__ia64__) 
 
 /*
  *	Back compatibility for getrlimit. Needed for some apps.
@@ -1065,8 +1120,6 @@ asmlinkage long sys_setrlimit(unsigned int resource, struct rlimit *rlim)
 		return -EINVAL;
 	if(copy_from_user(&new_rlim, rlim, sizeof(*rlim)))
 		return -EFAULT;
-	if (new_rlim.rlim_cur < 0 || new_rlim.rlim_max < 0)
-		return -EINVAL;
 	old_rlim = current->rlim + resource;
 	if (((new_rlim.rlim_cur > old_rlim->rlim_max) ||
 	     (new_rlim.rlim_max > old_rlim->rlim_max)) &&
@@ -1156,7 +1209,7 @@ asmlinkage long sys_prctl(int option, unsigned long arg2, unsigned long arg3,
 	switch (option) {
 		case PR_SET_PDEATHSIG:
 			sig = arg2;
-			if (sig > _NSIG) {
+			if (sig < 0 || sig > _NSIG) {
 				error = -EINVAL;
 				break;
 			}
@@ -1166,7 +1219,7 @@ asmlinkage long sys_prctl(int option, unsigned long arg2, unsigned long arg3,
 			error = put_user(current->pdeath_signal, (int *)arg2);
 			break;
 		case PR_GET_DUMPABLE:
-			if (current->dumpable)
+			if (current->mm->dumpable)
 				error = 1;
 			break;
 		case PR_SET_DUMPABLE:
@@ -1174,7 +1227,7 @@ asmlinkage long sys_prctl(int option, unsigned long arg2, unsigned long arg3,
 				error = -EINVAL;
 				break;
 			}
-			current->dumpable = arg2;
+			current->mm->dumpable = arg2;
 			break;
 	        case PR_SET_UNALIGN:
 #ifdef SET_UNALIGN_CTL

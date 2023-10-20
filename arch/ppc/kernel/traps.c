@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.traps.c 1.22 10/11/01 10:33:09 paulus
+ */
+/*
  *  linux/arch/ppc/kernel/traps.c
  *
  *  Copyright (C) 1995-1996  Gary Thomas (gdt@linuxppc.org)
@@ -23,7 +26,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/interrupt.h>
@@ -37,7 +40,7 @@
 #include <asm/processor.h>
 
 extern int fix_alignment(struct pt_regs *);
-extern void bad_page_fault(struct pt_regs *, unsigned long);
+extern void bad_page_fault(struct pt_regs *, unsigned long, int sig);
 
 #ifdef CONFIG_XMON
 extern void xmon(struct pt_regs *regs);
@@ -65,21 +68,36 @@ int (*debugger_dabr_match)(struct pt_regs *regs);
 void (*debugger_fault_handler)(struct pt_regs *regs);
 #endif
 #endif
+
 /*
  * Trap & Exception support
  */
+
+
+spinlock_t oops_lock = SPIN_LOCK_UNLOCKED;
+
+void die(const char * str, struct pt_regs * fp, long err)
+{
+	console_verbose();
+	spin_lock_irq(&oops_lock);
+	printk("Oops: %s, sig: %ld\n", str, err);
+	show_regs(fp);
+	spin_unlock_irq(&oops_lock);
+	/* do_exit() should take care of panic'ing from an interrupt
+	 * context so we don't handle it here
+	 */
+	do_exit(err);
+}
 
 void
 _exception(int signr, struct pt_regs *regs)
 {
 	if (!user_mode(regs))
 	{
-		show_regs(regs);
 #if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
 		debugger(regs);
 #endif
-		print_backtrace((unsigned long *)regs->gpr[1]);
-		panic("Exception in kernel pc %lx signal %d",regs->nip,signr);
+		die("Exception in kernel mode", regs, signr);
 	}
 	force_sig(signr, current);
 }
@@ -90,6 +108,7 @@ MachineCheckException(struct pt_regs *regs)
 #ifdef CONFIG_ALL_PPC
 	unsigned long fixup;
 #endif /* CONFIG_ALL_PPC */
+	unsigned long msr = regs->msr;
 
 	if (user_mode(regs)) {
 		_exception(SIGSEGV, regs);	
@@ -98,7 +117,7 @@ MachineCheckException(struct pt_regs *regs)
 
 #if defined(CONFIG_8xx) && defined(CONFIG_PCI)
 	/* the qspan pci read routines can cause machine checks -- Cort */
-	bad_page_fault(regs, regs->dar);
+	bad_page_fault(regs, regs->dar, SIGBUS);
 	return;
 #endif
 #if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
@@ -114,31 +133,47 @@ MachineCheckException(struct pt_regs *regs)
 	 * Check if the NIP corresponds to the address of a sync
 	 * instruction for which there is an entry in the exception
 	 * table.
+	 * Note that the 601 only takes a machine check on TEA
+	 * (transfer error ack) signal assertion, and does not
+	 * set of the top 16 bits of SRR1.
+	 *  -- paulus.
 	 */
-	if (regs->msr & (0x80000 | 0x40000)
+	if (((msr & 0xffff0000) == 0 || (msr & (0x80000 | 0x40000)))
 	    && (fixup = search_exception_table(regs->nip)) != 0) {
 		/*
-		 * Check that it's a sync instruction.
+		 * Check that it's a sync instruction, or somewhere
+		 * in the twi; isync; nop sequence that inb/inw/inl uses.
 		 * As the address is in the exception table
 		 * we should be able to read the instr there.
+		 * For the debug message, we look at the preceding
+		 * load or store.
 		 */
-		if (*(unsigned int *)regs->nip == 0x7c0004ac) {
-			unsigned int lsi = ((unsigned int *)regs->nip)[-1];
-			int rb = (lsi >> 11) & 0x1f;
-			printk(KERN_DEBUG "%s bad port %lx at %lx\n",
-			       (lsi & 0x100)? "OUT to": "IN from",
-			       regs->gpr[rb] - _IO_BASE, regs->nip);
+		unsigned int *nip = (unsigned int *)regs->nip;
+		if (*nip == 0x60000000)		/* nop */
+			nip -= 2;
+		else if (*nip == 0x4c00012c)	/* isync */
+			--nip;
+		if (*nip == 0x7c0004ac || (*nip >> 26) == 3) {
+			/* sync or twi */
+			unsigned int rb;
+
+			--nip;
+			rb = (*nip >> 11) & 0x1f;
+			printk(KERN_DEBUG "%s bad port %lx at %p\n",
+			       (*nip & 0x100)? "OUT to": "IN from",
+			       regs->gpr[rb] - _IO_BASE, nip);
 			regs->nip = fixup;
 			return;
 		}
 	}
 #endif /* CONFIG_ALL_PPC */
 	printk("Machine check in kernel mode.\n");
-	printk("Caused by (from SRR1=%lx): ", regs->msr);
-	switch (regs->msr & 0xF0000) {
+	printk("Caused by (from SRR1=%lx): ", msr);
+	switch (msr & 0xF0000) {
 	case 0x80000:
 		printk("Machine check signal\n");
 		break;
+	case 0:		/* for 601 */
 	case 0x40000:
 		printk("Transfer error ack signal\n");
 		break;
@@ -151,12 +186,10 @@ MachineCheckException(struct pt_regs *regs)
 	default:
 		printk("Unknown values in msr\n");
 	}
-	show_regs(regs);
 #if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
 	debugger(regs);
 #endif
-	print_backtrace((unsigned long *)regs->gpr[1]);
-	panic("machine check");
+	die("machine check", regs, SIGBUS);
 }
 
 void
@@ -169,15 +202,14 @@ SMIException(struct pt_regs *regs)
 	}
 #endif
 	show_regs(regs);
-	print_backtrace((unsigned long *)regs->gpr[1]);
 	panic("System Management Interrupt");
 }
 
 void
 UnknownException(struct pt_regs *regs)
 {
-	printk("Bad trap at PC: %lx, SR: %lx, vector=%lx\n",
-	       regs->nip, regs->msr, regs->trap);
+	printk("Bad trap at PC: %lx, SR: %lx, vector=%lx    %s\n",
+	       regs->nip, regs->msr, regs->trap, print_tainted());
 	_exception(SIGTRAP, regs);	
 }
 
@@ -217,19 +249,19 @@ emulate_instruction(struct pt_regs *regs)
 	uint    rd;
 	uint    retval;
 
-	retval = EFAULT;
+	retval = EINVAL;
 
 	if (!user_mode(regs))
 		return retval;
 
 	if (get_user(instword, (uint *)(regs->nip)))
-		return retval;
+		return -EFAULT;
 
 	/* Emulate the mfspr rD, PVR.
 	 */
 	if ((instword & INST_MFSPR_PVR_MASK) == INST_MFSPR_PVR) {
 		rd = (instword >> 21) & 0x1f;
-		regs->gpr[rd] = _get_PVR();
+		regs->gpr[rd] = mfspr(PVR);
 		retval = 0;
 	}
 	if (retval == 0)
@@ -267,7 +299,7 @@ ProgramCheckException(struct pt_regs *regs)
 		/* Try to emulate it if we should. */
 		int errcode;
 		if ((errcode = emulate_instruction(regs))) {
-			if (errcode == EFAULT)
+			if (errcode == -EFAULT)
 				_exception(SIGBUS, regs);
 			else
 				_exception(SIGILL, regs);
@@ -302,7 +334,7 @@ AlignmentException(struct pt_regs *regs)
 		if (user_mode(regs))
 			force_sig(SIGSEGV, current);
 		else
-			bad_page_fault(regs, regs->dar);
+			bad_page_fault(regs, regs->dar, SIGSEGV);
 		return;
 	}
 	_exception(SIGBUS, regs);	
@@ -317,16 +349,15 @@ StackOverflow(struct pt_regs *regs)
 	debugger(regs);
 #endif
 	show_regs(regs);
-	print_backtrace((unsigned long *)regs->gpr[1]);
 	panic("kernel stack overflow");
 }
 
 void
 trace_syscall(struct pt_regs *regs)
 {
-	printk("Task: %p(%d), PC: %08lX/%08lX, Syscall: %3ld, Result: %s%ld\n",
+	printk("Task: %p(%d), PC: %08lX/%08lX, Syscall: %3ld, Result: %s%ld    %s\n",
 	       current, current->pid, regs->nip, regs->link, regs->gpr[0],
-	       regs->ccr&0x10000000?"Error=":"", regs->gpr[3]);
+	       regs->ccr&0x10000000?"Error=":"", regs->gpr[3], print_tainted());
 }
 
 #ifdef CONFIG_8xx
@@ -337,12 +368,10 @@ SoftwareEmulation(struct pt_regs *regs)
 	int errcode;
 
 	if (!user_mode(regs)) {
-		show_regs(regs);
 #if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
 		debugger(regs);
 #endif
-		print_backtrace((unsigned long *)regs->gpr[1]);
-		panic("Kernel Mode Software FPU Emulation");
+		die("Kernel Mode Software FPU Emulation", regs, SIGFPE);
 	}
 
 #ifdef CONFIG_MATH_EMULATION
@@ -360,12 +389,14 @@ SoftwareEmulation(struct pt_regs *regs)
 }
 #endif
 
+#if !defined(CONFIG_TAU_INT)
 void
 TAUException(struct pt_regs *regs)
 {
-	printk("TAU trap at PC: %lx, SR: %lx, vector=%lx\n",
-	       regs->nip, regs->msr, regs->trap);
+	printk("TAU trap at PC: %lx, SR: %lx, vector=%lx    %s\n",
+	       regs->nip, regs->msr, regs->trap, print_tainted());
 }
+#endif /* CONFIG_INT_TAU */
 
 void __init trap_init(void)
 {

@@ -41,7 +41,7 @@ struct cpuinfo_S390
         cpuid_t  cpu_id;
         __u16    cpu_addr;
         __u16    cpu_nr;
-        unsigned long loops_per_sec;
+        unsigned long loops_per_jiffy;
         unsigned long *pgd_quick;
         unsigned long *pte_quick;
         unsigned long pgtable_cache_sz;
@@ -87,13 +87,13 @@ struct thread_struct
         /* perform syscall argument validation (get/set_fs) */
         mm_segment_t fs;
         per_struct per_info;/* Must be aligned on an 4 byte boundary*/
+	/* Used to give failing instruction back to user for ieee exceptions */
+	addr_t  ieee_instruction_pointer; 
+        /* pfault_wait is used to block the process on a pfault event */
+	addr_t  pfault_wait;
 };
 
 typedef struct thread_struct thread_struct;
-
-#define INIT_MMAP \
-{ &init_mm, 0, 0, NULL, PAGE_SHARED, \
-VM_READ | VM_WRITE | VM_EXEC, 1, NULL, &init_mm.mmap }
 
 #define INIT_THREAD { (struct pt_regs *) 0,                       \
                     { 0,{{0},{0},{0},{0},{0},{0},{0},{0},{0},{0}, \
@@ -103,17 +103,14 @@ VM_READ | VM_WRITE | VM_EXEC, 1, NULL, &init_mm.mmap }
               (__pa((__u32) &swapper_pg_dir[0]) + _SEGMENT_TABLE),\
                      0,0,0,                                       \
                      (mm_segment_t) { 0,1},                       \
-                     (per_struct) {{{{0,}}},0,0,0,0,{{0,}}}       \
+                     (per_struct) {{{{0,}}},0,0,0,0,{{0,}}},      \
+                     0, 0                                         \
 }
 
 /* need to define ... */
 #define start_thread(regs, new_psw, new_stackp) do {            \
-        unsigned long *u_stack = new_stackp;                    \
         regs->psw.mask  = _USER_PSW_MASK;                       \
-        regs->psw.addr  = new_psw | 0x80000000 ;                \
-        get_user(regs->gprs[2],u_stack);                        \
-        get_user(regs->gprs[3],u_stack+1);                      \
-        get_user(regs->gprs[4],u_stack+2);                      \
+        regs->psw.addr  = new_psw | 0x80000000;                 \
         regs->gprs[15]  = new_stackp ;                          \
 } while (0)
 
@@ -152,6 +149,8 @@ unsigned long get_wchan(struct task_struct *p);
 #define init_task       (init_task_union.task)
 #define init_stack      (init_task_union.stack)
 
+#define cpu_relax()	do { } while (0)
+
 /*
  * Set of msr bits that gdb can change on behalf of a process.
  */
@@ -172,13 +171,33 @@ unsigned long get_wchan(struct task_struct *p);
 static inline void disabled_wait(unsigned long code)
 {
         char psw_buffer[2*sizeof(psw_t)];
+        char ctl_buf[4];
         psw_t *dw_psw = (psw_t *)(((unsigned long) &psw_buffer+sizeof(psw_t)-1)
                                   & -sizeof(psw_t));
 
         dw_psw->mask = 0x000a0000;
         dw_psw->addr = code;
-        /* load disabled wait psw, the processor is dead afterwards */
-        asm volatile ("lpsw 0(%0)" : : "a" (dw_psw));
+        /* 
+         * Store status and then load disabled wait psw,
+         * the processor is dead afterwards
+         */
+
+        asm volatile ("    stctl 0,0,0(%1)\n"
+                      "    ni    0(%1),0xef\n" /* switch off protection */
+                      "    lctl  0,0,0(%1)\n"
+                      "    stpt  0xd8\n"       /* store timer */
+                      "    stckc 0xe0\n"       /* store clock comparator */
+                      "    stpx  0x108\n"      /* store prefix register */
+                      "    stam  0,15,0x120\n" /* store access registers */
+                      "    std   0,0x160\n"    /* store f0 */
+                      "    std   2,0x168\n"    /* store f2 */
+                      "    std   4,0x170\n"    /* store f4 */
+                      "    std   6,0x178\n"    /* store f6 */
+                      "    stm   0,15,0x180\n" /* store general registers */
+                      "    stctl 0,15,0x1c0\n" /* store control registers */
+                      "    oi    0(%1),0x10\n" /* fake protection bit */
+                      "    lpsw 0(%0)"
+                      : : "a" (dw_psw), "a" (&ctl_buf) : "cc" );
 }
 
 #endif                                 /* __ASM_S390_PROCESSOR_H           */

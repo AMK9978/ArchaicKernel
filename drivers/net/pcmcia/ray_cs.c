@@ -34,7 +34,7 @@
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/init.h>
@@ -82,7 +82,7 @@ typedef u_char	mac_addr[ETH_ALEN];	/* Hardware address */
 #define PCMCIA_DEBUG RAYLINK_DEBUG
 #endif
 #ifdef PCMCIA_DEBUG
-static int ray_debug = 0;
+static int ray_debug;
 static int pc_debug = PCMCIA_DEBUG;
 MODULE_PARM(pc_debug, "i");
 /* #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args); */
@@ -172,19 +172,19 @@ static int hop_dwell = 128;
 static int beacon_period = 256;
 
 /* power save mode (0 = off, 1 = save power) */
-static int psm = 0;
+static int psm;
 
 /* String for network's Extended Service Set ID. 32 Characters max */
-static char *essid = NULL;
+static char *essid;
 
 /* Default to encapsulation unless translation requested */
 static int translate = 1;
 
 static int country = USA;
 
-static int sniffer = 0;
+static int sniffer;
 
-static int bc = 0;
+static int bc;
 
 /* 48 bit physical card address if overriding card's real physical
  * address is required.  Since IEEE 802.11 addresses are 48 bits
@@ -221,6 +221,8 @@ static unsigned int ray_mem_speed = 500;
 
 MODULE_AUTHOR("Corey Thomas <corey@world.std.com>");
 MODULE_DESCRIPTION("Raylink/WebGear wireless LAN driver");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(irq_mask,"i");
 MODULE_PARM(net_type,"i");
 MODULE_PARM(hop_dwell,"i");
@@ -1332,8 +1334,14 @@ static int ray_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 	  struct iw_range	range;
 	  memset((char *) &range, 0, sizeof(struct iw_range));
 
-	  /* Set the length (useless : its constant...) */
+	  /* Set the length (very important for backward compatibility) */
 	  wrq->u.data.length = sizeof(struct iw_range);
+
+#if WIRELESS_EXT > 10
+	  /* Set the Wireless Extension versions */
+	  range.we_version_compiled = WIRELESS_EXT;
+	  range.we_version_source = 9;
+#endif /* WIRELESS_EXT > 10 */
 
 	  /* Set information in the range struct */
 	  range.throughput = 1.1 * 1000 * 1000;	/* Put the right number here */
@@ -1443,9 +1451,12 @@ static int ray_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 #endif	/* WIRELESS_SPY */
 
       /* ------------------ PRIVATE IOCTL ------------------ */
-#define SIOCSIPFRAMING	SIOCDEVPRIVATE		/* Set framing mode */
-#define SIOCGIPFRAMING	SIOCDEVPRIVATE + 1	/* Get framing mode */
-#define SIOCGIPCOUNTRY	SIOCDEVPRIVATE + 3	/* Get country code */
+#ifndef SIOCIWFIRSTPRIV
+#define SIOCIWFIRSTPRIV	SIOCDEVPRIVATE
+#endif /* SIOCIWFIRSTPRIV */
+#define SIOCSIPFRAMING	SIOCIWFIRSTPRIV		/* Set framing mode */
+#define SIOCGIPFRAMING	SIOCIWFIRSTPRIV + 1	/* Get framing mode */
+#define SIOCGIPCOUNTRY	SIOCIWFIRSTPRIV + 3	/* Get country code */
     case SIOCSIPFRAMING:
       if(!capable(CAP_NET_ADMIN))	/* For private IOCTLs, we need to check permissions */
 	{
@@ -2219,9 +2230,9 @@ static void rx_data(struct net_device *dev, struct rcs *prcs, unsigned int pkt_a
 
     skb->protocol = eth_type_trans(skb,dev);
     netif_rx(skb);
-
+    dev->last_rx = jiffies;
     local->stats.rx_packets++;
-    local->stats.rx_bytes += skb->len;
+    local->stats.rx_bytes += total_len;
 
     /* Gather signal strength per address */
 #ifdef WIRELESS_SPY

@@ -5,7 +5,7 @@
  *	Authors:
  *	Pedro Roque		<roque@di.fc.ul.pt>	
  *
- *	$Id: mcast.c,v 1.33 2000/09/18 05:59:48 davem Exp $
+ *	$Id: mcast.c,v 1.38 2001/08/15 07:36:31 davem Exp $
  *
  *	Based on linux/ipv4/igmp.c and linux/ipv4/ip_sockglue.c 
  *
@@ -13,6 +13,11 @@
  *      modify it under the terms of the GNU General Public License
  *      as published by the Free Software Foundation; either version
  *      2 of the License, or (at your option) any later version.
+ */
+
+/* Changes:
+ *
+ *	yoshfuji	: fix format of router-alert option
  */
 
 #define __NO_VERSION__
@@ -85,7 +90,6 @@ int ipv6_sock_mc_join(struct sock *sk, int ifindex, struct in6_addr *addr)
 
 	mc_lst->next = NULL;
 	memcpy(&mc_lst->addr, addr, sizeof(struct in6_addr));
-	mc_lst->ifindex = ifindex;
 
 	if (ifindex == 0) {
 		struct rt6_info *rt;
@@ -102,6 +106,8 @@ int ipv6_sock_mc_join(struct sock *sk, int ifindex, struct in6_addr *addr)
 		sock_kfree_s(sk, mc_lst, sizeof(*mc_lst));
 		return -ENODEV;
 	}
+
+	mc_lst->ifindex = dev->ifindex;
 
 	/*
 	 *	now add/increase the group membership on the device
@@ -392,16 +398,18 @@ static void igmp6_group_queried(struct ifmcaddr6 *ma, unsigned long resptime)
 	spin_unlock(&ma->mca_lock);
 }
 
-int igmp6_event_query(struct sk_buff *skb, struct icmp6hdr *hdr, int len)
+int igmp6_event_query(struct sk_buff *skb)
 {
 	struct ifmcaddr6 *ma;
 	struct in6_addr *addrp;
 	unsigned long resptime;
 	struct inet6_dev *idev;
+	struct icmp6hdr *hdr;
 
-
-	if (len < sizeof(struct icmp6hdr) + sizeof(struct in6_addr))
+	if (!pskb_may_pull(skb, sizeof(struct in6_addr)))
 		return -EINVAL;
+
+	hdr = (struct icmp6hdr*) skb->h.raw;
 
 	/* Drop queries with not link local source */
 	if (!(ipv6_addr_type(&skb->nh.ipv6h->saddr)&IPV6_ADDR_LINKLOCAL))
@@ -437,18 +445,21 @@ int igmp6_event_query(struct sk_buff *skb, struct icmp6hdr *hdr, int len)
 }
 
 
-int igmp6_event_report(struct sk_buff *skb, struct icmp6hdr *hdr, int len)
+int igmp6_event_report(struct sk_buff *skb)
 {
 	struct ifmcaddr6 *ma;
 	struct in6_addr *addrp;
 	struct inet6_dev *idev;
+	struct icmp6hdr *hdr;
 
 	/* Our own report looped back. Ignore it. */
 	if (skb->pkt_type == PACKET_LOOPBACK)
 		return 0;
 
-	if (len < sizeof(struct icmp6hdr) + sizeof(struct in6_addr))
+	if (!pskb_may_pull(skb, sizeof(struct in6_addr)))
 		return -EINVAL;
+
+	hdr = (struct icmp6hdr*) skb->h.raw;
 
 	/* Drop reports with not link local source */
 	if (!(ipv6_addr_type(&skb->nh.ipv6h->saddr)&IPV6_ADDR_LINKLOCAL))
@@ -491,7 +502,7 @@ void igmp6_send(struct in6_addr *addr, struct net_device *dev, int type)
 	struct in6_addr all_routers;
 	int err, len, payload_len, full_len;
 	u8 ra[8] = { IPPROTO_ICMPV6, 0,
-		     IPV6_TLV_ROUTERALERT, 0, 0, 0,
+		     IPV6_TLV_ROUTERALERT, 2, 0, 0,
 		     IPV6_TLV_PADN, 0 };
 
 	snd_addr = addr;
@@ -504,7 +515,7 @@ void igmp6_send(struct in6_addr *addr, struct net_device *dev, int type)
 	payload_len = len + sizeof(ra);
 	full_len = sizeof(struct ipv6hdr) + payload_len;
 
-	skb = sock_alloc_send_skb(sk, dev->hard_header_len + full_len + 15, 0, 0, &err);
+	skb = sock_alloc_send_skb(sk, dev->hard_header_len + full_len + 15, 0, &err);
 
 	if (skb == NULL)
 		return;
@@ -614,7 +625,6 @@ void igmp6_timer_handler(unsigned long data)
 void ipv6_mc_down(struct inet6_dev *idev)
 {
 	struct ifmcaddr6 *i;
-	struct in6_addr maddr;
 
 	/* Withdraw multicast list */
 
@@ -622,24 +632,14 @@ void ipv6_mc_down(struct inet6_dev *idev)
 	for (i = idev->mc_list; i; i=i->next)
 		igmp6_group_dropped(i);
 	read_unlock_bh(&idev->lock);
-
-	/* Delete all-nodes address. */
-
-	ipv6_addr_all_nodes(&maddr);
-	ipv6_dev_mc_dec(idev->dev, &maddr);
 }
+
 
 /* Device going up */
 
 void ipv6_mc_up(struct inet6_dev *idev)
 {
 	struct ifmcaddr6 *i;
-	struct in6_addr maddr;
-
-	/* Add all-nodes address. */
-
-	ipv6_addr_all_nodes(&maddr);
-	ipv6_dev_mc_inc(idev->dev, &maddr);
 
 	/* Install multicast list, except for all-nodes (already installed) */
 
@@ -649,6 +649,17 @@ void ipv6_mc_up(struct inet6_dev *idev)
 	read_unlock_bh(&idev->lock);
 }
 
+/* IPv6 device initialization. */
+
+void ipv6_mc_init_dev(struct inet6_dev *idev)
+{
+	struct in6_addr maddr;
+
+	/* Add all-nodes address. */
+	ipv6_addr_all_nodes(&maddr);
+	ipv6_dev_mc_inc(idev->dev, &maddr);
+}
+
 /*
  *	Device is about to be destroyed: clean up.
  */
@@ -656,6 +667,11 @@ void ipv6_mc_up(struct inet6_dev *idev)
 void ipv6_mc_destroy_dev(struct inet6_dev *idev)
 {
 	struct ifmcaddr6 *i;
+	struct in6_addr maddr;
+
+	/* Delete all-nodes address. */
+	ipv6_addr_all_nodes(&maddr);
+	ipv6_dev_mc_dec(idev->dev, &maddr);
 
 	write_lock_bh(&idev->lock);
 	while ((i = idev->mc_list) != NULL) {

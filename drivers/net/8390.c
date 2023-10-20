@@ -6,11 +6,13 @@
 	Director, National Security Agency.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
-	The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-	Center of Excellence in Space Data and Information Sciences
-	   Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
+
   
   This is the chip-specific code for many 8390-based ethernet adaptors.
   This is not a complete driver, it must be combined with board-specific
@@ -45,7 +47,7 @@
 
   */
 
-static const char *version =
+static const char version[] =
     "8390.c:v1.10cvs 9/23/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 #include <linux/module.h>
@@ -453,6 +455,8 @@ void ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	{
 		if (!netif_running(dev)) {
 			printk(KERN_WARNING "%s: interrupt from stopped card\n", dev->name);
+			/* rmk - acknowledge the interrupts */
+			outb_p(interrupts, e8390_base + EN0_ISR);
 			interrupts = 0;
 			break;
 		}
@@ -742,6 +746,7 @@ static void ei_receive(struct net_device *dev)
 				ei_block_input(dev, pkt_len, skb, current_offset + sizeof(rx_frame));
 				skb->protocol=eth_type_trans(skb,dev);
 				netif_rx(skb);
+				dev->last_rx = jiffies;
 				ei_local->stat.rx_packets++;
 				ei_local->stat.rx_bytes += pkt_len;
 				if (pkt_stat & ENRSR_PHY)
@@ -1151,6 +1156,8 @@ void cleanup_module(void)
 }
 
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
+
 
 /*
  * Local variables:

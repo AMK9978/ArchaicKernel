@@ -1,7 +1,4 @@
-#ifndef __PPC_SEGMENT_H
-#define __PPC_SEGMENT_H
-
-/* Only here because we have some old header files that expect it.. */
-
-#endif
+/*
+ * BK Id: SCCS/s.segment.h 1.7 05/17/01 18:14:25 cort
+ */
 #include <asm/uaccess.h>

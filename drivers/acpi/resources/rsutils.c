@@ -1,12 +1,12 @@
 /*******************************************************************************
  *
  * Module Name: rsutils - Utilities for the resource manager
- *              $Revision: 12 $
+ *              $Revision: 23 $
  *
  ******************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -29,7 +29,7 @@
 #include "acresrc.h"
 
 
-#define _COMPONENT          RESOURCE_MANAGER
+#define _COMPONENT          ACPI_RESOURCES
 	 MODULE_NAME         ("rsutils")
 
 
@@ -41,7 +41,7 @@
  *              Ret_buffer      - a pointer to a buffer structure for the
  *                                  results
  *
- * RETURN:      Status          - the status of the call
+ * RETURN:      Status
  *
  * DESCRIPTION: This function is called to get the _PRT value of an object
  *              contained in an object specified by the handle passed in
@@ -51,14 +51,17 @@
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_rs_get_prt_method_data (
-	ACPI_HANDLE             handle,
-	ACPI_BUFFER             *ret_buffer)
+	acpi_handle             handle,
+	acpi_buffer             *ret_buffer)
 {
-	ACPI_OPERAND_OBJECT     *ret_obj;
-	ACPI_STATUS             status;
+	acpi_operand_object     *ret_obj;
+	acpi_status             status;
 	u32                     buffer_space_needed;
+
+
+	FUNCTION_TRACE ("Rs_get_prt_method_data");
 
 
 	/* already validated params, so we won't repeat here */
@@ -70,13 +73,14 @@ acpi_rs_get_prt_method_data (
 	 */
 	status = acpi_ns_evaluate_relative (handle, "_PRT", NULL, &ret_obj);
 	if (ACPI_FAILURE (status)) {
-		return (status);
+		return_ACPI_STATUS (status);
 	}
 
 	if (!ret_obj) {
 		/* Return object is required */
 
-		return (AE_TYPE);
+		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "No object was returned from _PRT\n"));
+		return_ACPI_STATUS (AE_TYPE);
 	}
 
 
@@ -96,8 +100,7 @@ acpi_rs_get_prt_method_data (
 	 *  byte stream buffer that comes back from the _CRS method
 	 *  execution.
 	 */
-	status = acpi_rs_create_pci_routing_table (ret_obj,
-			  ret_buffer->pointer,
+	status = acpi_rs_create_pci_routing_table (ret_obj, ret_buffer->pointer,
 			  &buffer_space_needed);
 
 	/*
@@ -111,9 +114,8 @@ acpi_rs_get_prt_method_data (
 
 cleanup:
 
-	acpi_cm_remove_reference (ret_obj);
-
-	return (status);
+	acpi_ut_remove_reference (ret_obj);
+	return_ACPI_STATUS (status);
 }
 
 
@@ -125,7 +127,7 @@ cleanup:
  *              Ret_buffer      - a pointer to a buffer structure for the
  *                                  results
  *
- * RETURN:      Status          - the status of the call
+ * RETURN:      Status
  *
  * DESCRIPTION: This function is called to get the _CRS value of an object
  *              contained in an object specified by the handle passed in
@@ -135,14 +137,17 @@ cleanup:
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_rs_get_crs_method_data (
-	ACPI_HANDLE             handle,
-	ACPI_BUFFER             *ret_buffer)
+	acpi_handle             handle,
+	acpi_buffer             *ret_buffer)
 {
-	ACPI_OPERAND_OBJECT     *ret_obj;
-	ACPI_STATUS             status;
+	acpi_operand_object     *ret_obj;
+	acpi_status             status;
 	u32                     buffer_space_needed = ret_buffer->length;
+
+
+	FUNCTION_TRACE ("Rs_get_crs_method_data");
 
 
 	/* already validated params, so we won't repeat here */
@@ -152,13 +157,14 @@ acpi_rs_get_crs_method_data (
 	 */
 	status = acpi_ns_evaluate_relative (handle, "_CRS", NULL, &ret_obj);
 	if (ACPI_FAILURE (status)) {
-		return (status);
+		return_ACPI_STATUS (status);
 	}
 
 	if (!ret_obj) {
 		/* Return object is required */
 
-		return (AE_TYPE);
+		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "No object was returned from _CRS\n"));
+		return_ACPI_STATUS (AE_TYPE);
 	}
 
 	/*
@@ -177,10 +183,8 @@ acpi_rs_get_crs_method_data (
 	 *  byte stream buffer that comes back from the _CRS method
 	 *  execution.
 	 */
-	status = acpi_rs_create_resource_list (ret_obj,
-			  ret_buffer->pointer,
-			  &buffer_space_needed);
-
+	status = acpi_rs_create_resource_list (ret_obj, ret_buffer->pointer,
+			 &buffer_space_needed);
 
 
 	/*
@@ -194,9 +198,8 @@ acpi_rs_get_crs_method_data (
 
 cleanup:
 
-	acpi_cm_remove_reference (ret_obj);
-
-	return (status);
+	acpi_ut_remove_reference (ret_obj);
+	return_ACPI_STATUS (status);
 }
 
 
@@ -208,7 +211,7 @@ cleanup:
  *              Ret_buffer      - a pointer to a buffer structure for the
  *                                  results
  *
- * RETURN:      Status          - the status of the call
+ * RETURN:      Status
  *
  * DESCRIPTION: This function is called to get the _PRS value of an object
  *              contained in an object specified by the handle passed in
@@ -218,14 +221,17 @@ cleanup:
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_rs_get_prs_method_data (
-	ACPI_HANDLE             handle,
-	ACPI_BUFFER             *ret_buffer)
+	acpi_handle             handle,
+	acpi_buffer             *ret_buffer)
 {
-	ACPI_OPERAND_OBJECT     *ret_obj;
-	ACPI_STATUS             status;
+	acpi_operand_object     *ret_obj;
+	acpi_status             status;
 	u32                     buffer_space_needed = ret_buffer->length;
+
+
+	FUNCTION_TRACE ("Rs_get_prs_method_data");
 
 
 	/* already validated params, so we won't repeat here */
@@ -235,13 +241,14 @@ acpi_rs_get_prs_method_data (
 	 */
 	status = acpi_ns_evaluate_relative (handle, "_PRS", NULL, &ret_obj);
 	if (ACPI_FAILURE (status)) {
-		return (status);
+		return_ACPI_STATUS (status);
 	}
 
 	if (!ret_obj) {
 		/* Return object is required */
 
-		return (AE_TYPE);
+		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "No object was returned from _PRS\n"));
+		return_ACPI_STATUS (AE_TYPE);
 	}
 
 	/*
@@ -260,9 +267,8 @@ acpi_rs_get_prs_method_data (
 	 *  byte stream buffer that comes back from the _CRS method
 	 *  execution.
 	 */
-	status = acpi_rs_create_resource_list (ret_obj,
-			  ret_buffer->pointer,
-			  &buffer_space_needed);
+	status = acpi_rs_create_resource_list (ret_obj, ret_buffer->pointer,
+			 &buffer_space_needed);
 
 	/*
 	 * Tell the user how much of the buffer we have used or is needed
@@ -275,9 +281,8 @@ acpi_rs_get_prs_method_data (
 
 cleanup:
 
-	acpi_cm_remove_reference (ret_obj);
-
-	return (status);
+	acpi_ut_remove_reference (ret_obj);
+	return_ACPI_STATUS (status);
 }
 
 
@@ -289,7 +294,7 @@ cleanup:
  *              In_buffer       - a pointer to a buffer structure of the
  *                                  parameter
  *
- * RETURN:      Status          - the status of the call
+ * RETURN:      Status
  *
  * DESCRIPTION: This function is called to set the _SRS of an object contained
  *              in an object specified by the handle passed in
@@ -299,89 +304,86 @@ cleanup:
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_rs_set_srs_method_data (
-	ACPI_HANDLE             handle,
-	ACPI_BUFFER             *in_buffer)
+	acpi_handle             handle,
+	acpi_buffer             *in_buffer)
 {
-	ACPI_OPERAND_OBJECT     *params[2];
-	ACPI_OPERAND_OBJECT     param_obj;
-	ACPI_STATUS             status;
+	acpi_operand_object     *params[2];
+	acpi_status             status;
 	u8                      *byte_stream = NULL;
 	u32                     buffer_size_needed = 0;
+
+
+	FUNCTION_TRACE ("Rs_set_srs_method_data");
 
 
 	/* already validated params, so we won't repeat here */
 
 	/*
 	 * The In_buffer parameter will point to a linked list of
-	 *  resource parameters.  It needs to be formatted into a
-	 *  byte stream to be sent in as an input parameter.
+	 * resource parameters.  It needs to be formatted into a
+	 * byte stream to be sent in as an input parameter.
 	 */
 	buffer_size_needed = 0;
 
 	/*
 	 * First call is to get the buffer size needed
 	 */
-	status = acpi_rs_create_byte_stream (in_buffer->pointer,
-			   byte_stream,
-			   &buffer_size_needed);
+	status = acpi_rs_create_byte_stream (in_buffer->pointer, byte_stream,
+			 &buffer_size_needed);
 	/*
 	 * We expect a return of AE_BUFFER_OVERFLOW
-	 *  if not, exit with the error
+	 * if not, exit with the error
 	 */
 	if (AE_BUFFER_OVERFLOW != status) {
-		return (status);
+		return_ACPI_STATUS (status);
 	}
 
 	/*
 	 * Allocate the buffer needed
 	 */
-	byte_stream = acpi_cm_callocate(buffer_size_needed);
+	byte_stream = ACPI_MEM_CALLOCATE (buffer_size_needed);
 	if (NULL == byte_stream) {
-		return (AE_NO_MEMORY);
+		return_ACPI_STATUS (AE_NO_MEMORY);
 	}
 
 	/*
 	 * Now call to convert the linked list into a byte stream
 	 */
-	status = acpi_rs_create_byte_stream (in_buffer->pointer,
-			   byte_stream,
-			   &buffer_size_needed);
+	status = acpi_rs_create_byte_stream (in_buffer->pointer, byte_stream,
+			 &buffer_size_needed);
 	if (ACPI_FAILURE (status)) {
 		goto cleanup;
 	}
 
 	/*
-	 *  Init the param object
+	 * Init the param object
 	 */
-	acpi_cm_init_static_object (&param_obj);
-
-	/*
-	 *  Method requires one parameter.  Set it up
-	 */
-	params [0] = &param_obj;
+	params[0] = acpi_ut_create_internal_object (ACPI_TYPE_BUFFER);
+	if (!params[0]) {
+		status = AE_NO_MEMORY;
+		goto cleanup;
+	}
 	params [1] = NULL;
 
 	/*
 	 *  Set up the parameter object
 	 */
-	param_obj.common.type   = ACPI_TYPE_BUFFER;
-	param_obj.buffer.length = buffer_size_needed;
-	param_obj.buffer.pointer = byte_stream;
+	params[0]->buffer.length  = buffer_size_needed;
+	params[0]->buffer.pointer = byte_stream;
 
 	/*
-	 *  Execute the method, no return value
+	 * Execute the method, no return value
 	 */
 	status = acpi_ns_evaluate_relative (handle, "_SRS", params, NULL);
+	acpi_ut_remove_reference (params[0]);
 
 	/*
-	 *  Clean up and return the status from Acpi_ns_evaluate_relative
+	 * Clean up and return the status from Acpi_ns_evaluate_relative
 	 */
-
 cleanup:
 
-	acpi_cm_free (byte_stream);
-	return (status);
+	return_ACPI_STATUS (status);
 }
 

@@ -48,7 +48,7 @@
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <asm/system.h>
@@ -187,7 +187,7 @@ static u_int  scramble_key = 0x0;
  * This timing should be provided by the HBA. If it becomes a 
  * problem, try setting mem_speed to 400. 
  */
-static int mem_speed = 0;
+static int mem_speed;
 
 /* Bit map of interrupts to choose from */
 /* This means pick from 15, 14, 12, 11, 10, 9, 7, 5, 4, and 3 */
@@ -250,7 +250,7 @@ static void set_multicast_list(struct net_device *dev);
    memory card driver uses an array of dev_link_t pointers, where minor
    device numbers are used to derive the corresponding array index.
 */
-static dev_link_t *dev_list = NULL;
+static dev_link_t *dev_list;
 
 /*
    A dev_link_t structure has fields for most things that are needed
@@ -269,8 +269,15 @@ static dev_link_t *dev_list = NULL;
    because they generally can't be allocated dynamically.
 */
 
-#define SIOCGIPSNAP	SIOCDEVPRIVATE		/* Site Survey Snapshot */
-/*#define SIOCGIPQTHR	SIOCDEVPRIVATE + 1*/
+/* Wireless Extension Backward compatibility - Jean II
+ * If the new wireless device private ioctl range is not defined,
+ * default to standard device private ioctl range */
+#ifndef SIOCIWFIRSTPRIV
+#define SIOCIWFIRSTPRIV	SIOCDEVPRIVATE
+#endif /* SIOCIWFIRSTPRIV */
+
+#define SIOCGIPSNAP	SIOCIWFIRSTPRIV		/* Site Survey Snapshot */
+/*#define SIOCGIPQTHR	SIOCIWFIRSTPRIV + 1*/
 
 #define MAX_ESA 10
 
@@ -710,8 +717,17 @@ static int netwave_ioctl(struct net_device *dev, /* ioctl device */
        if(wrq->u.data.pointer != (caddr_t) 0) {
 	   struct iw_range	range;
 		   
-	   /* Set the length (useless : its constant...) */
+	   /* Set the length (very important for backward compatibility) */
 	   wrq->u.data.length = sizeof(struct iw_range);
+
+	   /* Set all the info we don't care or don't know about to zero */
+	   memset(&range, 0, sizeof(range));
+
+#if WIRELESS_EXT > 10
+	   /* Set the Wireless Extension versions */
+	   range.we_version_compiled = WIRELESS_EXT;
+	   range.we_version_source = 9;	/* Nothing for us in v10 and v11 */
+#endif /* WIRELESS_EXT > 10 */
 		   
 	   /* Set information in the range struct */
 	   range.throughput = 450 * 1000;	/* don't argue on this ! */
@@ -1218,7 +1234,7 @@ static int netwave_start_xmit(struct sk_buff *skb, struct net_device *dev) {
  *    This function is the interrupt handler for the Netwave card. This
  *    routine will be called whenever: 
  *	  1. A packet is received.
- *	  2. A packet has successfully been transfered and the unit is
+ *	  2. A packet has successfully been transferred and the unit is
  *	     ready to transmit another packet.
  *	  3. A command has completed execution.
  */
@@ -1350,7 +1366,7 @@ static void netwave_watchdog(struct net_device *dev) {
     DEBUG(1, "%s: netwave_watchdog: watchdog timer expired\n", dev->name);
     netwave_reset(dev);
     dev->trans_start = jiffies;
-    netif_start_queue(dev);
+    netif_wake_queue(dev);
 } /* netwave_watchdog */
 
 static struct net_device_stats *netwave_get_stats(struct net_device *dev) {
@@ -1463,16 +1479,16 @@ static int netwave_rx(struct net_device *dev) {
 	skb->protocol = eth_type_trans(skb,dev);
 	/* Queue packet for network layer */
 	netif_rx(skb);
-		
+
+	dev->last_rx = jiffies;
+	priv->stats.rx_packets++;
+	priv->stats.rx_bytes += rcvLen;
+
 	/* Got the packet, tell the adapter to skip it */
 	wait_WOC(iobase);
 	writeb(NETWAVE_CMD_SRP, ramBase + NETWAVE_EREG_CB + 0);
 	writeb(NETWAVE_CMD_EOC, ramBase + NETWAVE_EREG_CB + 1);
 	DEBUG(3, "Packet reception ok\n");
-		
-	priv->stats.rx_packets++;
-
-	priv->stats.rx_bytes += skb->len;
     }
     return 0;
 }
@@ -1554,7 +1570,7 @@ static void set_multicast_list(struct net_device *dev)
    
 #ifdef PCMCIA_DEBUG
     if (pc_debug > 2) {
-	static int old = 0;
+	static int old;
 	if (old != dev->mc_count) {
 	    old = dev->mc_count;
 	    DEBUG(0, "%s: setting Rx mode to %d addresses.\n",
@@ -1581,3 +1597,4 @@ static void set_multicast_list(struct net_device *dev)
     writeb(rcvMode, ramBase + NETWAVE_EREG_CB + 1);
     writeb(NETWAVE_CMD_EOC, ramBase + NETWAVE_EREG_CB + 2);
 }
+MODULE_LICENSE("GPL");

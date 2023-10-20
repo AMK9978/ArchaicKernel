@@ -1,5 +1,4 @@
-/* $Id: shmiq.c,v 1.19 2000/02/23 00:41:21 ralf Exp $
- *
+/*
  * shmiq.c: shared memory input queue driver
  * written 1997 Miguel de Icaza (miguel@nuclecu.unam.mx)
  *
@@ -42,7 +41,6 @@
  * Until then, I just allow for 1 qcntl device.
  *
  */
-
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
 #include <linux/sched.h>
@@ -52,6 +50,7 @@
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 #include <linux/major.h>
+#include <linux/module.h>
 #include <linux/smp_lock.h>
 #include <linux/devfs_fs_kernel.h>
 
@@ -286,11 +285,11 @@ qcntl_ioctl (struct inode *inode, struct file *filp, unsigned int cmd, unsigned 
 			s = req.arg * sizeof (struct shmqevent) +
 			    sizeof (struct sharedMemoryInputQueue);
 			v = sys_munmap (vaddr, s);
-			down(&current->mm->mmap_sem);
+			down_write(&current->mm->mmap_sem);
 			do_munmap(current->mm, vaddr, s);
 			do_mmap(filp, vaddr, s, PROT_READ | PROT_WRITE,
 			        MAP_PRIVATE|MAP_FIXED, 0);
-			up(&current->mm->mmap_sem);
+			up_write(&current->mm->mmap_sem);
 			shmiqs[minor].events = req.arg;
 			shmiqs[minor].mapped = 1;
 
@@ -470,3 +469,5 @@ shmiq_init (void)
 			       S_IFCHR | S_IRUSR | S_IWUSR,
 			       &shmiq_fops, NULL);
 }
+
+EXPORT_SYMBOL(shmiq_init);

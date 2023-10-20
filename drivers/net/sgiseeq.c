@@ -11,7 +11,7 @@
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 
@@ -149,7 +149,7 @@ static inline void seeq_load_eaddr(struct net_device *dev,
 #define RCNTCFG_INIT  (HPCDMA_OWN | HPCDMA_EORP | HPCDMA_XIE)
 #define RCNTINFO_INIT (RCNTCFG_INIT | (PKT_BUF_SZ & HPCDMA_BCNT))
 
-static void seeq_init_ring(struct net_device *dev)
+static int seeq_init_ring(struct net_device *dev)
 {
 	struct sgiseeq_private *sp = (struct sgiseeq_private *) dev->priv;
 	volatile struct sgiseeq_init_block *ib = &sp->srings;
@@ -173,6 +173,8 @@ static void seeq_init_ring(struct net_device *dev)
 			unsigned long buffer;
 
 			buffer = (unsigned long) kmalloc(PKT_BUF_SZ, GFP_KERNEL);
+			if (!buffer)
+				return -ENOMEM;
 			ib->tx_desc[i].buf_vaddr = KSEG1ADDR(buffer);
 			ib->tx_desc[i].tdma.pbuf = PHYSADDR(buffer);
 //			flush_cache_all();
@@ -186,6 +188,8 @@ static void seeq_init_ring(struct net_device *dev)
 			unsigned long buffer;
 
 			buffer = (unsigned long) kmalloc(PKT_BUF_SZ, GFP_KERNEL);
+			if (!buffer)
+				return -ENOMEM;
 			ib->rx_desc[i].buf_vaddr = KSEG1ADDR(buffer);
 			ib->rx_desc[i].rdma.pbuf = PHYSADDR(buffer);
 //			flush_cache_all();
@@ -193,6 +197,7 @@ static void seeq_init_ring(struct net_device *dev)
 		ib->rx_desc[i].rdma.cntinfo = (RCNTINFO_INIT);
 	}
 	ib->rx_desc[i - 1].rdma.cntinfo |= (HPCDMA_EOR);
+	return 0;
 }
 
 #ifdef DEBUG
@@ -201,7 +206,7 @@ static struct net_device *gdev;
 
 void sgiseeq_dump_rings(void)
 {
-	static int once = 0;
+	static int once;
 	struct sgiseeq_rx_desc *r = gpriv->srings.rx_desc;
 	struct sgiseeq_tx_desc *t = gpriv->srings.tx_desc;
 	volatile struct hpc3_ethregs *hregs = gpriv->hregs;
@@ -242,13 +247,16 @@ void sgiseeq_dump_rings(void)
 #define TSTAT_INIT_EDLC ((TSTAT_INIT_SEEQ) | SEEQ_TCMD_RB2)
 #define RDMACFG_INIT    (HPC3_ERXDCFG_FRXDC | HPC3_ERXDCFG_FEOP | HPC3_ERXDCFG_FIRQ)
 
-static void init_seeq(struct net_device *dev, struct sgiseeq_private *sp,
+static int init_seeq(struct net_device *dev, struct sgiseeq_private *sp,
 		      volatile struct sgiseeq_regs *sregs)
 {
 	volatile struct hpc3_ethregs *hregs = sp->hregs;
+	int err;
 
 	reset_hpc3_and_seeq(hregs, sregs);
-	seeq_init_ring(dev);
+	err = seeq_init_ring(dev);
+	if (err)
+		return err;
 
 	/* Setup to field the proper interrupt types. */
 	if (sp->is_edlc) {
@@ -265,6 +273,7 @@ static void init_seeq(struct net_device *dev, struct sgiseeq_private *sp,
 	hregs->tx_ndptr = PHYSADDR(&sp->srings.tx_desc[0]);
 
 	seeq_go(sp, hregs, sregs);
+	return 0;
 }
 
 static inline void record_rx_errors(struct sgiseeq_private *sp,
@@ -325,6 +334,7 @@ static inline void sgiseeq_rx(struct net_device *dev, struct sgiseeq_private *sp
 				eth_copy_and_sum(skb, pkt_pointer + 2, len, 0);
 				skb->protocol = eth_type_trans(skb, dev);
 				netif_rx(skb);
+				dev->last_rx = jiffies;
 				sp->stats.rx_packets++;
 				sp->stats.rx_bytes += len;
 			} else {
@@ -439,6 +449,7 @@ static int sgiseeq_open(struct net_device *dev)
 	struct sgiseeq_private *sp = (struct sgiseeq_private *)dev->priv;
 	volatile struct sgiseeq_regs *sregs = sp->sregs;
 	unsigned long flags;
+	int err;
 
 	save_flags(flags); cli();
 	if (request_irq(dev->irq, sgiseeq_interrupt, 0, sgiseeqstr, (void *) dev)) {
@@ -447,7 +458,9 @@ static int sgiseeq_open(struct net_device *dev)
 		return -EAGAIN;
 	}
 
-	init_seeq(dev, sp, sregs);
+	err = init_seeq(dev, sp, sregs);
+	if (err)
+		return err;
 
 	netif_start_queue(dev);
 	restore_flags(flags);
@@ -473,8 +486,11 @@ static inline int sgiseeq_reset(struct net_device *dev)
 {
 	struct sgiseeq_private *sp = (struct sgiseeq_private *) dev->priv;
 	volatile struct sgiseeq_regs *sregs = sp->sregs;
+	int err;
 
-	init_seeq(dev, sp, sregs);
+	err = init_seeq(dev, sp, sregs);
+	if (err)
+		return err;
 
 	dev->trans_start = jiffies;
 	netif_wake_queue(dev);
@@ -595,7 +611,7 @@ static char onboard_eth_addr[6];
 int sgiseeq_init(struct net_device *dev, struct sgiseeq_regs *sregs,
 		 struct hpc3_ethregs *hregs, int irq)
 {
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 	int i;
 	struct sgiseeq_private *sp;
 
@@ -688,7 +704,7 @@ static inline void str2eaddr(unsigned char *ea, unsigned char *str)
 
 int sgiseeq_probe(struct net_device *dev)
 {
-	static int initialized = 0;
+	static int initialized;
 	char *ep;
 
 	if (initialized)	/* Already initialized? */

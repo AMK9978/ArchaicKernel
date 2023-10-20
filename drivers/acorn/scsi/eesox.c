@@ -33,6 +33,7 @@
 #include <linux/stat.h>
 #include <linux/delay.h>
 #include <linux/pci.h>
+#include <linux/init.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -42,7 +43,9 @@
 
 #include "../../scsi/sd.h"
 #include "../../scsi/hosts.h"
-#include "eesox.h"
+#include "fas216.h"
+
+#include <scsi/scsicam.h>
 
 /* Configuration */
 #define EESOX_XTALFREQ		40
@@ -77,15 +80,26 @@
 
 static struct expansion_card *ecs[MAX_ECARDS];
 
-MODULE_AUTHOR("Russell King");
-MODULE_DESCRIPTION("EESOX SCSI driver");
-MODULE_PARM(term, "1-8i");
-MODULE_PARM_DESC(term, "SCSI bus termination");
-
 /*
  * Use term=0,1,0,0,0 to turn terminators on/off
  */
-int term[MAX_ECARDS] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+static int term[MAX_ECARDS] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+
+#define NR_SG	256
+
+struct control {
+	unsigned int	io_port;
+	unsigned int	control;
+};
+
+typedef struct {
+	FAS216_Info info;
+
+	struct control control;
+
+	unsigned int	dmaarea;	/* Pseudo DMA area	*/
+	struct scatterlist sg[NR_SG];	/* Scatter DMA list	*/
+} EESOXScsi_Info;
 
 /* Prototype: void eesoxscsi_irqenable(ec, irqnr)
  * Purpose  : Enable interrupts on EESOX SCSI card
@@ -185,7 +199,8 @@ eesoxscsi_dma_setup(struct Scsi_Host *host, Scsi_Pointer *SCp,
 			memcpy(info->sg + 1, SCp->buffer + 1,
 				sizeof(struct scatterlist) * bufs);
 		info->sg[0].address = SCp->ptr;
-		info->sg[0].length = SCp->this_residual;
+		info->sg[0].page    = NULL;
+		info->sg[0].length  = SCp->this_residual;
 
 		if (direction == DMA_OUT)
 			pci_dir = PCI_DMA_TODEVICE,
@@ -543,8 +558,49 @@ int eesoxscsi_proc_info(char *buffer, char **start, off_t offset,
 	return pos;
 }
 
-#ifdef MODULE
-Scsi_Host_Template driver_template = EESOXSCSI;
+static Scsi_Host_Template eesox_template = {
+	module:				THIS_MODULE,
+	proc_info:			eesoxscsi_proc_info,
+	name:				"EESOX SCSI",
+	detect:				eesoxscsi_detect,
+	release:			eesoxscsi_release,
+	info:				eesoxscsi_info,
+	bios_param:			scsicam_bios_param,
+	can_queue:			1,
+	this_id:			7,
+	sg_tablesize:			SG_ALL,
+	cmd_per_lun:			1,
+	use_clustering:			DISABLE_CLUSTERING,
+	command:			fas216_command,
+	queuecommand:			fas216_queue_command,
+	eh_host_reset_handler:		fas216_eh_host_reset,
+	eh_bus_reset_handler:		fas216_eh_bus_reset,
+	eh_device_reset_handler:	fas216_eh_device_reset,
+	eh_abort_handler:		fas216_eh_abort,
+	use_new_eh_code:		1
+};
 
-#include "../../scsi/scsi_module.c"
-#endif
+static int __init eesox_init(void)
+{
+	scsi_register_module(MODULE_SCSI_HA, &eesox_template);
+	if (eesox_template.present)
+		return 0;
+
+	scsi_unregister_module(MODULE_SCSI_HA, &eesox_template);
+	return -ENODEV;
+}
+
+static void __exit eesox_exit(void)
+{
+	scsi_unregister_module(MODULE_SCSI_HA, &eesox_template);
+}
+
+module_init(eesox_init);
+module_exit(eesox_exit);
+
+MODULE_AUTHOR("Russell King");
+MODULE_DESCRIPTION("EESOX 'Fast' SCSI driver for Acorn machines");
+MODULE_PARM(term, "1-8i");
+MODULE_PARM_DESC(term, "SCSI bus termination");
+MODULE_LICENSE("GPL");
+EXPORT_NO_SYMBOLS;

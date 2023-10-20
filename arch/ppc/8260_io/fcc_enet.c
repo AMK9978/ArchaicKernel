@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.fcc_enet.c 1.7 05/17/01 18:14:20 cort
+ */
+/*
  * Fast Ethernet Controller (FCC) driver for Motorola MPC8260.
  * Copyright (c) 2000 MontaVista Software, Inc.   Dan Malek (dmalek@jlc.net)
  *
@@ -23,7 +26,7 @@
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/init.h>
@@ -46,7 +49,7 @@
 #define TX_TIMEOUT	(2*HZ)
 
 /* The number of Tx and Rx buffers.  These are allocated from the page
- * pool.  The code may assume these are power of two, so it it best
+ * pool.  The code may assume these are power of two, so it is best
  * to keep them that size.
  * We don't need to allocate pages for the transmitter.  We just use
  * the skbuffer directly.
@@ -1082,6 +1085,9 @@ int __init fec_enet_init(void)
 		*/
 		cep = (struct fcc_enet_private *)
 					kmalloc(sizeof(*cep), GFP_KERNEL);
+		if (cep == NULL)
+			return -ENOMEM;
+
 		__clear_user(cep,sizeof(*cep));
 		spin_lock_init(&cep->lock);
 		cep->fip = fip;

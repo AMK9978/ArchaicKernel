@@ -49,6 +49,18 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long write,
 	unsigned long fixup;
 	siginfo_t info;
 
+	/*
+	 * We fault-in kernel-space virtual memory on-demand. The
+	 * 'reference' page table is init_mm.pgd.
+	 *
+	 * NOTE! We MUST NOT take any locks for this case. We may
+	 * be in an interrupt or a critical region, and should
+	 * only copy the information from the master page table,
+	 * nothing more.
+	 */
+	if (address >= TASK_SIZE)
+		goto vmalloc_fault;
+
 	info.si_code = SEGV_MAPERR;
 	/*
 	 * If we're in an interrupt or have no user
@@ -60,7 +72,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long write,
 	printk("[%s:%d:%08lx:%ld:%08lx]\n", current->comm, current->pid,
 	       address, write, regs->cp0_epc);
 #endif
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 	vma = find_vma(mm, address);
 	if (!vma)
 		goto bad_area;
@@ -103,7 +115,7 @@ good_area:
 		goto out_of_memory;
 	}
 
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	return;
 
 /*
@@ -111,8 +123,10 @@ good_area:
  * Fix it, but check if it's kernel or user first..
  */
 bad_area:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
+bad_area_nosemaphore:
+	/* User mode accesses just cause a SIGSEGV */
 	if (user_mode(regs)) {
 		tsk->thread.cp0_badvaddr = address;
 		tsk->thread.error_code = write;
@@ -163,14 +177,14 @@ no_context:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	printk("VM: killing process %s\n", tsk->comm);
 	if (user_mode(regs))
 		do_exit(SIGKILL);
 	goto no_context;
 
 do_sigbus:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
 	/*
 	 * Send a sigbus, regardless of whether we were in kernel
@@ -186,4 +200,34 @@ do_sigbus:
 	/* Kernel mode? Handle exceptions or die */
 	if (!user_mode(regs))
 		goto no_context;
+
+	return;
+
+vmalloc_fault:
+	{
+		/*
+		 * Synchronize this task's top level page-table
+		 * with the 'reference' page table.
+		 */
+		int offset = pgd_index(address);
+		pgd_t *pgd, *pgd_k;
+		pmd_t *pmd, *pmd_k;
+
+		pgd = tsk->active_mm->pgd + offset;
+		pgd_k = init_mm.pgd + offset;
+
+		if (!pgd_present(*pgd)) {
+			if (!pgd_present(*pgd_k))
+				goto bad_area_nosemaphore;
+			set_pgd(pgd, *pgd_k);
+			return;
+		}
+
+		pmd = pmd_offset(pgd, address);
+		pmd_k = pmd_offset(pgd_k, address);
+
+		if (pmd_present(*pmd) || !pmd_present(*pmd_k))
+			goto bad_area_nosemaphore;
+		set_pmd(pmd, *pmd_k);
+	}
 }

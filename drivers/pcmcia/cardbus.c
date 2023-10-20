@@ -19,7 +19,7 @@
     are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
 
     Alternatively, the contents of this file may be used under the
-    terms of the GNU Public License version 2 (the "GPL"), in which
+    terms of the GNU General Public License version 2 (the "GPL"), in which
     case the provisions of the GPL are applicable instead of the
     above.  If you wish to allow the use of your version of this file
     only under the terms of the GPL and not to allow others to use
@@ -51,7 +51,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
@@ -66,7 +66,6 @@
 #include <pcmcia/bulkmem.h>
 #include <pcmcia/cistpl.h>
 #include "cs_internal.h"
-#include "rsrc_mgr.h"
 
 #ifdef PCMCIA_DEBUG
 static int pc_debug = PCMCIA_DEBUG;
@@ -288,7 +287,6 @@ int cb_alloc(socket_info_t * s)
 			if (res->flags)
 				pci_assign_resource(dev, r);
 		}
-		pci_enable_device(dev); /* XXX check return */
 
 		/* Does this function have an interrupt at all? */
 		pci_readb(dev, PCI_INTERRUPT_PIN, &irq_pin);
@@ -297,6 +295,7 @@ int cb_alloc(socket_info_t * s)
 			pci_writeb(dev, PCI_INTERRUPT_LINE, irq);
 		}
 
+		pci_enable_device(dev); /* XXX check return */
 		pci_insert_device(dev, bus);
 	}
 

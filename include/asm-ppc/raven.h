@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.raven.h 1.7 05/17/01 18:14:25 cort
+ */
+/*
  *  asm-ppc/raven.h -- Raven MPIC chip.
  *
  *  Copyright (C) 1998 Johnnie Peters
@@ -31,5 +34,5 @@
 extern struct hw_interrupt_type raven_pic;
 
 extern int raven_init(void);
-#endif _ASMPPC_RAVEN_H
+#endif /* _ASMPPC_RAVEN_H */
 #endif /* __KERNEL__ */

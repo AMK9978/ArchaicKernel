@@ -17,7 +17,7 @@
 #include <linux/msg.h>
 #include <linux/smp_lock.h>
 #include <linux/vmalloc.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/highuid.h>
 
 #if defined(CONFIG_SYSVIPC)
@@ -75,7 +75,7 @@ void __init ipc_init_ids(struct ipc_ids* ids, int size)
 		ids->size = 0;
 	}
 	ids->ary = SPIN_LOCK_UNLOCKED;
-	for(i=0;i<size;i++)
+	for(i=0;i<ids->size;i++)
 		ids->entries[i].p = NULL;
 }
 
@@ -185,7 +185,7 @@ struct kern_ipc_perm* ipc_rmid(struct ipc_ids* ids, int id)
 {
 	struct kern_ipc_perm* p;
 	int lid = id % SEQ_MULTIPLIER;
-	if(lid > ids->size)
+	if(lid >= ids->size)
 		BUG();
 	p = ids->entries[lid].p;
 	ids->entries[lid].p = NULL;

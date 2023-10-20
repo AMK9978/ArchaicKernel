@@ -1,7 +1,7 @@
 /*
  *	Low-Level PCI Support for PC -- Routing of Interrupts
  *
- *	(c) 1999--2000 Martin Mares <mj@suse.cz>
+ *	(c) 1999--2000 Martin Mares <mj@ucw.cz>
  */
 
 #include <linux/config.h>
@@ -9,7 +9,7 @@
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/init.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 
@@ -105,7 +105,7 @@ static void __init pirq_peer_trick(void)
 		 *  known (ascending bus order) and therefore pci_scan_bus returns immediately.
 		 */
 		if (busmap[i] && pci_scan_bus(i, pci_root_bus->ops, NULL))
-			printk("PCI: Discovered primary peer bus %02x [IRQ]\n", i);
+			printk(KERN_INFO "PCI: Discovered primary peer bus %02x [IRQ]\n", i);
 	pcibios_last_bus = -1;
 }
 
@@ -234,22 +234,107 @@ static int pirq_cyrix_set(struct pci_dev *router, struct pci_dev *dev, int pirq,
 	return 1;
 }
 
+/*
+ *	PIRQ routing for SiS 85C503 router used in several SiS chipsets
+ *	According to the SiS 5595 datasheet (preliminary V1.0, 12/24/1997)
+ *	the related registers work as follows:
+ *	
+ *	general: one byte per re-routable IRQ,
+ *		 bit 7      IRQ mapping enabled (0) or disabled (1)
+ *		 bits [6:4] reserved
+ *		 bits [3:0] IRQ to map to
+ *		     allowed: 3-7, 9-12, 14-15
+ *		     reserved: 0, 1, 2, 8, 13
+ *
+ *	individual registers in device config space:
+ *
+ *	0x41/0x42/0x43/0x44:	PCI INT A/B/C/D - bits as in general case
+ *
+ *	0x61:			IDEIRQ: bits as in general case - but:
+ *				bits [6:5] must be written 01
+ *				bit 4 channel-select primary (0), secondary (1)
+ *
+ *	0x62:			USBIRQ: bits as in general case - but:
+ *				bit 4 OHCI function disabled (0), enabled (1)
+ *	
+ *	0x6a:			ACPI/SCI IRQ - bits as in general case
+ *
+ *	0x7e:			Data Acq. Module IRQ - bits as in general case
+ *
+ *	Apparently there are systems implementing PCI routing table using both
+ *	link values 0x01-0x04 and 0x41-0x44 for PCI INTA..D, but register offsets
+ *	like 0x62 as link values for USBIRQ e.g. So there is no simple
+ *	"register = offset + pirq" relation.
+ *	Currently we support PCI INTA..D and USBIRQ and try our best to handle
+ *	both link mappings.
+ *	IDE/ACPI/DAQ mapping is currently unsupported (left untouched as set by BIOS).
+ */
+
 static int pirq_sis_get(struct pci_dev *router, struct pci_dev *dev, int pirq)
 {
 	u8 x;
-	int reg = 0x41 + (pirq - 'A') ;
+	int reg = pirq;
 
-	pci_read_config_byte(router, reg, &x);
+	switch(pirq) {
+		case 0x01:
+		case 0x02:
+		case 0x03:
+		case 0x04:
+			reg += 0x40;
+		case 0x41:
+		case 0x42:
+		case 0x43:
+		case 0x44:
+		case 0x62:
+			pci_read_config_byte(router, reg, &x);
+			if (reg != 0x62)
+				break;
+			if (!(x & 0x40))
+				return 0;
+			break;
+		case 0x61:
+		case 0x6a:
+		case 0x7e:
+			printk(KERN_INFO "SiS pirq: advanced IDE/ACPI/DAQ mapping not yet implemented\n");
+			return 0;
+		default:			
+			printk(KERN_INFO "SiS router pirq escape (%d)\n", pirq);
+			return 0;
+	}
 	return (x & 0x80) ? 0 : (x & 0x0f);
 }
 
 static int pirq_sis_set(struct pci_dev *router, struct pci_dev *dev, int pirq, int irq)
 {
 	u8 x;
-	int reg = 0x41 + (pirq - 'A') ;
+	int reg = pirq;
 
-	pci_read_config_byte(router, reg, &x);
-	x = (pirq & 0x20) ? 0 : (irq & 0x0f);
+	switch(pirq) {
+		case 0x01:
+		case 0x02:
+		case 0x03:
+		case 0x04:
+			reg += 0x40;
+		case 0x41:
+		case 0x42:
+		case 0x43:
+		case 0x44:
+		case 0x62:
+			x = (irq&0x0f) ? (irq&0x0f) : 0x80;
+			if (reg != 0x62)
+				break;
+			/* always mark OHCI enabled, as nothing else knows about this */
+			x |= 0x40;
+			break;
+		case 0x61:
+		case 0x6a:
+		case 0x7e:
+			printk(KERN_INFO "advanced SiS pirq mapping not yet implemented\n");
+			return 0;
+		default:			
+			printk(KERN_INFO "SiS router pirq escape (%d)\n", pirq);
+			return 0;
+	}
 	pci_write_config_byte(router, reg, x);
 
 	return 1;
@@ -266,7 +351,7 @@ static int pirq_sis_set(struct pci_dev *router, struct pci_dev *dev, int pirq, i
 static int pirq_vlsi_get(struct pci_dev *router, struct pci_dev *dev, int pirq)
 {
 	if (pirq > 8) {
-		printk("VLSI router pirq escape (%d)\n", pirq);
+		printk(KERN_INFO "VLSI router pirq escape (%d)\n", pirq);
 		return 0;
 	}
 	return read_config_nybble(router, 0x74, pirq-1);
@@ -275,7 +360,7 @@ static int pirq_vlsi_get(struct pci_dev *router, struct pci_dev *dev, int pirq)
 static int pirq_vlsi_set(struct pci_dev *router, struct pci_dev *dev, int pirq, int irq)
 {
 	if (pirq > 8) {
-		printk("VLSI router pirq escape (%d)\n", pirq);
+		printk(KERN_INFO "VLSI router pirq escape (%d)\n", pirq);
 		return 0;
 	}
 	write_config_nybble(router, 0x74, pirq-1, irq);
@@ -306,6 +391,38 @@ static int pirq_serverworks_set(struct pci_dev *router, struct pci_dev *dev, int
 	return 1;
 }
 
+/* Support for AMD756 PCI IRQ Routing
+ * Jhon H. Caicedo <jhcaiced@osso.org.co>
+ * Jun/21/2001 0.2.0 Release, fixed to use "nybble" functions... (jhcaiced)
+ * Jun/19/2001 Alpha Release 0.1.0 (jhcaiced)
+ * The AMD756 pirq rules are nibble-based
+ * offset 0x56 0-3 PIRQA  4-7  PIRQB
+ * offset 0x57 0-3 PIRQC  4-7  PIRQD
+ */
+static int pirq_amd756_get(struct pci_dev *router, struct pci_dev *dev, int pirq)
+{
+	u8 irq;
+	irq = 0;
+	if (pirq <= 4)
+	{
+		irq = read_config_nybble(router, 0x56, pirq - 1);
+	}
+	printk(KERN_INFO "AMD756: dev %04x:%04x, router pirq : %d get irq : %2d\n",
+		dev->vendor, dev->device, pirq, irq);
+	return irq;
+}
+
+static int pirq_amd756_set(struct pci_dev *router, struct pci_dev *dev, int pirq, int irq)
+{
+	printk(KERN_INFO "AMD756: dev %04x:%04x, router pirq : %d SET irq : %2d\n", 
+		dev->vendor, dev->device, pirq, irq);
+	if (pirq <= 4)
+	{
+		write_config_nybble(router, 0x56, pirq - 1, irq);
+	}
+	return 1;
+}
+
 #ifdef CONFIG_PCI_BIOS
 
 static int pirq_bios_set(struct pci_dev *router, struct pci_dev *dev, int pirq, int irq)
@@ -326,6 +443,7 @@ static struct irq_router pirq_routers[] = {
 	{ "PIIX", PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82371AB_0, pirq_piix_get, pirq_piix_set },
 	{ "PIIX", PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82371MX,   pirq_piix_get, pirq_piix_set },
 	{ "PIIX", PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82443MX_0, pirq_piix_get, pirq_piix_set },
+	{ "PIIX", PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801BA_0, pirq_piix_get, pirq_piix_set },
 
 	{ "ALI", PCI_VENDOR_ID_AL, PCI_DEVICE_ID_AL_M1533, pirq_ali_get, pirq_ali_set },
 
@@ -340,6 +458,10 @@ static struct irq_router pirq_routers[] = {
 	{ "VLSI 82C534", PCI_VENDOR_ID_VLSI, PCI_DEVICE_ID_VLSI_82C534, pirq_vlsi_get, pirq_vlsi_set },
 	{ "ServerWorks", PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_OSB4,
 	  pirq_serverworks_get, pirq_serverworks_set },
+	{ "ServerWorks", PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_CSB5,
+	  pirq_serverworks_get, pirq_serverworks_set },
+	{ "AMD756 VIPER", PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_VIPER_740B,
+		pirq_amd756_get, pirq_amd756_set },
 
 	{ "default", 0, 0, NULL, NULL }
 };
@@ -354,13 +476,17 @@ static void __init pirq_find_router(void)
 
 #ifdef CONFIG_PCI_BIOS
 	if (!rt->signature) {
-		printk("PCI: Using BIOS for IRQ routing\n");
+		printk(KERN_INFO "PCI: Using BIOS for IRQ routing\n");
 		pirq_router = &pirq_bios_router;
 		return;
 	}
 #endif
+
+	DBG("PCI: Attempting to find IRQ router for %04x:%04x\n",
+	    rt->rtr_vendor, rt->rtr_device);
+
 	/* fall back to default router if nothing else found */
-	pirq_router = pirq_routers + sizeof(pirq_routers) / sizeof(pirq_routers[0]) - 1;
+	pirq_router = &pirq_routers[ARRAY_SIZE(pirq_routers) - 1];
 
 	pirq_router_dev = pci_find_slot(rt->rtr_bus, rt->rtr_devfn);
 	if (!pirq_router_dev) {
@@ -379,7 +505,7 @@ static void __init pirq_find_router(void)
 			pirq_router = r;
 		}
 	}
-	printk("PCI: Using IRQ router %s [%04x/%04x] at %s\n",
+	printk(KERN_INFO "PCI: Using IRQ router %s [%04x/%04x] at %s\n",
 		pirq_router->name,
 		pirq_router_dev->vendor,
 		pirq_router_dev->device,
@@ -462,18 +588,9 @@ static int pcibios_lookup_irq(struct pci_dev *dev, int assign)
 		irq = pirq & 0xf;
 		DBG(" -> hardcoded IRQ %d\n", irq);
 		msg = "Hardcoded";
-		if (dev->irq && dev->irq != irq) {
-			printk("IRQ routing conflict in pirq table! Try 'pci=autoirq'\n");
-			return 0;
-		}
 	} else if (r->get && (irq = r->get(pirq_router_dev, dev, pirq))) {
 		DBG(" -> got IRQ %d\n", irq);
 		msg = "Found";
-		/* We refuse to override the dev->irq information. Give a warning! */
-	    	if (dev->irq && dev->irq != irq) {
-	    		printk("IRQ routing conflict in pirq table! Try 'pci=autoirq'\n");
-	    		return 0;
-	    	}
 	} else if (newirq && r->set && (dev->class >> 8) != PCI_CLASS_DISPLAY_VGA) {
 		DBG(" -> assigning IRQ %d", newirq);
 		if (r->set(pirq_router_dev, dev, pirq, newirq)) {
@@ -492,7 +609,7 @@ static int pcibios_lookup_irq(struct pci_dev *dev, int assign)
 		} else
 			return 0;
 	}
-	printk("PCI: %s IRQ %d for device %s\n", msg, irq, dev->slot_name);
+	printk(KERN_INFO "PCI: %s IRQ %d for device %s\n", msg, irq, dev->slot_name);
 
 	/* Update IRQ for all devices with the same pirq value */
 	pci_for_each_dev(dev2) {
@@ -504,10 +621,16 @@ static int pcibios_lookup_irq(struct pci_dev *dev, int assign)
 		if (!info)
 			continue;
 		if (info->irq[pin].link == pirq) {
+			/* We refuse to override the dev->irq information. Give a warning! */
+		    	if (dev2->irq && dev2->irq != irq) {
+		    		printk(KERN_INFO "IRQ routing conflict for %s, have irq %d, want irq %d\n",
+				       dev2->slot_name, dev2->irq, irq);
+		    		continue;
+		    	}
 			dev2->irq = irq;
 			pirq_penalty[irq]++;
 			if (dev != dev2)
-				printk("PCI: The same IRQ used for device %s\n", dev2->slot_name);
+				printk(KERN_INFO "PCI: Sharing IRQ %d with %s\n", irq, dev2->slot_name);
 		}
 	}
 	return 1;
@@ -570,10 +693,12 @@ void __init pcibios_fixup_irqs(void)
 			if (pin) {
 				pin--;		/* interrupt pins are numbered starting from 1 */
 				irq = IO_APIC_get_PCI_irq_vector(dev->bus->number, PCI_SLOT(dev->devfn), pin);
-/*
- * Will be removed completely if things work out well with fuzzy parsing
- */
-#if 0
+	/*
+	 * Busses behind bridges are typically not listed in the MP-table.
+	 * In this case we have to look up the IRQ based on the parent bus,
+	 * parent slot, and pin number. The SMP code detects such bridged
+	 * busses itself so we should get into this branch reliably.
+	 */
 				if (irq < 0 && dev->bus->parent) { /* go back to the bridge */
 					struct pci_dev * bridge = dev->bus->self;
 
@@ -584,9 +709,8 @@ void __init pcibios_fixup_irqs(void)
 						printk(KERN_WARNING "PCI: using PPB(B%d,I%d,P%d) to get irq %d\n", 
 							bridge->bus->number, PCI_SLOT(bridge->devfn), pin, irq);
 				}
-#endif
 				if (irq >= 0) {
-					printk("PCI->APIC IRQ transform: (B%d,I%d,P%d) -> %d\n",
+					printk(KERN_INFO "PCI->APIC IRQ transform: (B%d,I%d,P%d) -> %d\n",
 						dev->bus->number, PCI_SLOT(dev->devfn), pin, irq);
 					dev->irq = irq;
 				}

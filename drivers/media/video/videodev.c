@@ -30,6 +30,7 @@
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
+#include <asm/semaphore.h>
 
 #include <linux/kmod.h>
 
@@ -61,35 +62,6 @@ LIST_HEAD(videodev_proc_list);
 
 #endif /* CONFIG_PROC_FS && CONFIG_VIDEO_PROC_FS */
 
-
-#ifdef CONFIG_VIDEO_BWQCAM
-extern int init_bw_qcams(struct video_init *);
-#endif
-#ifdef CONFIG_VIDEO_CPIA
-extern int cpia_init(struct video_init *);
-#endif
-#ifdef CONFIG_VIDEO_PLANB
-extern int init_planbs(struct video_init *);
-#endif
-#ifdef CONFIG_VIDEO_ZORAN
-extern int init_zoran_cards(struct video_init *);
-#endif
-
-static struct video_init video_init_list[]={
-#ifdef CONFIG_VIDEO_BWQCAM
-	{"bw-qcam", init_bw_qcams},
-#endif	
-#ifdef CONFIG_VIDEO_CPIA
-	{"cpia", cpia_init},
-#endif	
-#ifdef CONFIG_VIDEO_PLANB
-	{"planb", init_planbs},
-#endif
-#ifdef CONFIG_VIDEO_ZORAN
-	{"zoran", init_zoran_cards},
-#endif	
-	{"end", NULL}
-};
 
 /*
  *	Read will do some smarts later on. Buffer pin etc.
@@ -123,7 +95,7 @@ static ssize_t video_write(struct file *file, const char *buf,
 
 /*
  *	Poll to see if we're readable, can probably be used for timing on incoming
- *  frames, etc..
+ *	frames, etc..
  */
 
 static unsigned int video_poll(struct file *file, poll_table * wait)
@@ -166,7 +138,9 @@ static int video_open(struct inode *inode, struct file *file)
 		goto error_out;
 	}
 	vfl->busy=1;		/* In case vfl->open sleeps */
-	unlock_kernel();
+	
+	if(vfl->owner)
+		__MOD_INC_USE_COUNT(vfl->owner);
 	
 	if(vfl->open)
 	{
@@ -174,9 +148,14 @@ static int video_open(struct inode *inode, struct file *file)
 		if(err)
 		{
 			vfl->busy=0;
+			if(vfl->owner)
+				__MOD_DEC_USE_COUNT(vfl->owner);
+			
+			unlock_kernel();
 			return err;
 		}
 	}
+	unlock_kernel();
 	return 0;
 error_out:
 	unlock_kernel();
@@ -195,19 +174,10 @@ static int video_release(struct inode *inode, struct file *file)
 	if(vfl->close)
 		vfl->close(vfl);
 	vfl->busy=0;
+	if(vfl->owner)
+		__MOD_DEC_USE_COUNT(vfl->owner);
 	unlock_kernel();
 	return 0;
-}
-
-/*
- *	Question: Should we be able to capture and then seek around the
- *	image ?
- */
- 
-static long long video_lseek(struct file * file,
-			  long long offset, int origin)
-{
-	return -ESPIPE;
 }
 
 static int video_ioctl(struct inode *inode, struct file *file,
@@ -229,8 +199,7 @@ static int video_ioctl(struct inode *inode, struct file *file,
 /*
  *	We need to do MMAP support
  */
- 
- 
+  
 int video_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	int ret = -EINVAL;
@@ -364,6 +333,8 @@ static void videodev_proc_create_dev (struct video_device *vfd, char *name)
 		return;
 
 	p = create_proc_entry(name, S_IFREG|S_IRUGO|S_IWUSR, video_dev_proc_entry);
+	if (!p)
+		return;
 	p->data = vfd;
 	p->read_proc = videodev_proc_read;
 
@@ -386,7 +357,7 @@ static void videodev_proc_destroy_dev (struct video_device *vfd)
 		if (vfd == d->vdev) {
 			remove_proc_entry(d->name, video_dev_proc_entry);
 			list_del (&d->proc_list);
-			kfree (d);
+			kfree(d);
 			break;
 		}
 	}
@@ -398,9 +369,10 @@ extern struct file_operations video_fops;
 
 /**
  *	video_register_device - register video4linux devices
- *	@vfd: video device structure we want to register
+ *	@vfd:  video device structure we want to register
  *	@type: type of device to register
- *	FIXME: needs a semaphore on 2.3.x
+ *	@nr:   which device number (0 == /dev/video0, 1 == /dev/video1, ...
+ *             -1 == first free)
  *	
  *	The registration code assigns minor numbers based on the type
  *	requested. -ENFILE is returned in all the device slots for this
@@ -419,14 +391,17 @@ extern struct file_operations video_fops;
  *
  *	%VFL_TYPE_RADIO - A radio card	
  */
- 
-int video_register_device(struct video_device *vfd, int type)
+
+static DECLARE_MUTEX(videodev_register_lock);
+
+int video_register_device(struct video_device *vfd, int type, int nr)
 {
 	int i=0;
 	int base;
 	int err;
 	int end;
 	char *name_base;
+	char name[16];
 	
 	switch(type)
 	{
@@ -453,49 +428,58 @@ int video_register_device(struct video_device *vfd, int type)
 		default:
 			return -1;
 	}
-	
-	for(i=base;i<end;i++)
-	{
-		if(video_device[i]==NULL)
-		{
-			char name[16];
 
-			video_device[i]=vfd;
-			vfd->minor=i;
-			/* The init call may sleep so we book the slot out
-			   then call */
-			MOD_INC_USE_COUNT;
-			if(vfd->initialize)
-			{
-				err=vfd->initialize(vfd);
-				if(err<0)
-				{
-					video_device[i]=NULL;
-					MOD_DEC_USE_COUNT;
-					return err;
-				}
-			}
-			sprintf (name, "v4l/%s%d", name_base, i - base);
-			/*
-			 *	Start the device root only. Anything else
-			 *	has serious privacy issues.
-			 */
-			vfd->devfs_handle =
-			    devfs_register (NULL, name, DEVFS_FL_DEFAULT,
-					    VIDEO_MAJOR, vfd->minor,
-					    S_IFCHR | S_IRUSR | S_IWUSR,
-					    &video_fops, NULL);
-
-#if defined(CONFIG_PROC_FS) && defined(CONFIG_VIDEO_PROC_FS)
-			sprintf (name, "%s%d", name_base, i - base);
-			videodev_proc_create_dev (vfd, name);
-#endif
-			
-
-			return 0;
+	/* pick a minor number */
+	down(&videodev_register_lock);
+	if (-1 == nr) {
+		/* use first free */
+		for(i=base;i<end;i++)
+			if (NULL == video_device[i])
+				break;
+		if (i == end) {
+			up(&videodev_register_lock);
+			return -ENFILE;
+		}
+	} else {
+		/* use the one the driver asked for */
+		i = base+nr;
+		if (NULL != video_device[i]) {
+			up(&videodev_register_lock);
+			return -ENFILE;
 		}
 	}
-	return -ENFILE;
+	video_device[i]=vfd;
+	vfd->minor=i;
+	up(&videodev_register_lock);
+
+	/* The init call may sleep so we book the slot out
+	   then call */
+	MOD_INC_USE_COUNT;
+	if(vfd->initialize) {
+		err=vfd->initialize(vfd);
+		if(err<0) {
+			video_device[i]=NULL;
+			MOD_DEC_USE_COUNT;
+			return err;
+		}
+	}
+	sprintf (name, "v4l/%s%d", name_base, i - base);
+	/*
+	 *	Start the device root only. Anything else
+	 *	has serious privacy issues.
+	 */
+	vfd->devfs_handle =
+		devfs_register (NULL, name, DEVFS_FL_DEFAULT,
+				VIDEO_MAJOR, vfd->minor,
+				S_IFCHR | S_IRUSR | S_IWUSR,
+				&video_fops,
+				NULL);
+	
+#if defined(CONFIG_PROC_FS) && defined(CONFIG_VIDEO_PROC_FS)
+	sprintf (name, "%s%d", name_base, i - base);
+	videodev_proc_create_dev (vfd, name);
+#endif
+	return 0;
 }
 
 /**
@@ -524,7 +508,7 @@ void video_unregister_device(struct video_device *vfd)
 static struct file_operations video_fops=
 {
 	owner:		THIS_MODULE,
-	llseek:		video_lseek,
+	llseek:		no_llseek,
 	read:		video_read,
 	write:		video_write,
 	ioctl:		video_ioctl,
@@ -538,10 +522,8 @@ static struct file_operations video_fops=
  *	Initialise video for linux
  */
  
-int __init videodev_init(void)
+static int __init videodev_init(void)
 {
-	struct video_init *vfli = video_init_list;
-	
 	printk(KERN_INFO "Linux video capture interface: v1.00\n");
 	if(devfs_register_chrdev(VIDEO_MAJOR,"video_capture", &video_fops))
 	{
@@ -549,41 +531,37 @@ int __init videodev_init(void)
 		return -EIO;
 	}
 
-	/*
-	 *	Init kernel installed video drivers
-	 */
-	 	
 #if defined(CONFIG_PROC_FS) && defined(CONFIG_VIDEO_PROC_FS)
 	videodev_proc_create ();
 #endif
 	
-	while(vfli->init!=NULL)
-	{
-		vfli->init(vfli);
-		vfli++;
-	}
 	return 0;
 }
 
+static void __exit videodev_exit(void)
+{
 #ifdef MODULE		
-int init_module(void)
-{
-	return videodev_init();
-}
-
-void cleanup_module(void)
-{
 #if defined(CONFIG_PROC_FS) && defined(CONFIG_VIDEO_PROC_FS)
 	videodev_proc_destroy ();
+#endif
 #endif
 	
 	devfs_unregister_chrdev(VIDEO_MAJOR, "video_capture");
 }
 
-#endif
+module_init(videodev_init)
+module_exit(videodev_exit)
 
 EXPORT_SYMBOL(video_register_device);
 EXPORT_SYMBOL(video_unregister_device);
 
 MODULE_AUTHOR("Alan Cox");
 MODULE_DESCRIPTION("Device registrar for Video4Linux drivers");
+MODULE_LICENSE("GPL");
+
+
+/*
+ * Local variables:
+ * c-basic-offset: 8
+ * End:
+ */

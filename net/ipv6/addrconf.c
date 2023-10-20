@@ -6,7 +6,7 @@
  *	Pedro Roque		<roque@di.fc.ul.pt>	
  *	Alexey Kuznetsov	<kuznet@ms2.inr.ac.ru>
  *
- *	$Id: addrconf.c,v 1.59 2000/11/28 11:39:43 davem Exp $
+ *	$Id: addrconf.c,v 1.68 2001/09/01 00:31:50 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -22,6 +22,10 @@
  *	Andi Kleen			:	kill doube kfree on module
  *						unload.
  *	Maciej W. Rozycki		:	FDDI support
+ *	sekiya@USAGI			:	Don't send too many RS
+ *						packets.
+ *	yoshfuji@USAGI			:       Fixed interval between DAD
+ *						packets.
  */
 
 #include <linux/config.h>
@@ -41,6 +45,7 @@
 #include <linux/sysctl.h>
 #endif
 #include <linux/delay.h>
+#include <linux/notifier.h>
 
 #include <linux/proc_fs.h>
 #include <net/sock.h>
@@ -94,6 +99,8 @@ static void addrconf_dad_timer(unsigned long data);
 static void addrconf_dad_completed(struct inet6_ifaddr *ifp);
 static void addrconf_rs_timer(unsigned long data);
 static void ipv6_ifa_notify(int event, struct inet6_ifaddr *ifa);
+
+static struct notifier_block *inet6addr_chain;
 
 struct ipv6_devconf ipv6_devconf =
 {
@@ -266,6 +273,8 @@ static struct inet6_dev * ipv6_add_dev(struct net_device *dev)
 		in6_dev_hold(ndev);
 		write_unlock_bh(&addrconf_lock);
 
+		ipv6_mc_init_dev(ndev);
+
 #ifdef CONFIG_SYSCTL
 		neigh_sysctl_register(dev, ndev->nd_parms, NET_IPV6, NET_IPV6_NEIGH, "ipv6");
 		addrconf_sysctl_register(ndev, &ndev->cnf);
@@ -283,9 +292,9 @@ static struct inet6_dev * ipv6_find_idev(struct net_device *dev)
 	if ((idev = __in6_dev_get(dev)) == NULL) {
 		if ((idev = ipv6_add_dev(dev)) == NULL)
 			return NULL;
-		if (dev->flags&IFF_UP)
-			ipv6_mc_up(idev);
 	}
+	if (dev->flags&IFF_UP)
+		ipv6_mc_up(idev);
 	return idev;
 }
 
@@ -313,7 +322,9 @@ void inet6_ifa_finish_destroy(struct inet6_ifaddr *ifp)
 {
 	BUG_TRAP(ifp->if_next==NULL);
 	BUG_TRAP(ifp->lst_next==NULL);
+#ifdef NET_REFCNT_DEBUG
 	printk(KERN_DEBUG "inet6_ifa_finish_destroy\n");
+#endif
 
 	in6_dev_put(ifp->idev);
 
@@ -384,6 +395,8 @@ ipv6_add_addr(struct inet6_dev *idev, struct in6_addr *addr, int pfxlen,
 	write_unlock_bh(&idev->lock);
 	read_unlock(&addrconf_lock);
 
+	notifier_call_chain(&inet6addr_chain,NETDEV_UP,ifa);
+
 	return ifa;
 }
 
@@ -425,6 +438,7 @@ static void ipv6_del_addr(struct inet6_ifaddr *ifp)
 
 	ipv6_ifa_notify(RTM_DELADDR, ifp);
 
+	notifier_call_chain(&inet6addr_chain,NETDEV_DOWN,ifp);
 
 	addrconf_del_timer(ifp);
 
@@ -614,7 +628,8 @@ struct inet6_ifaddr * ipv6_get_ifaddr(struct in6_addr *addr, struct net_device *
 
 void addrconf_dad_failure(struct inet6_ifaddr *ifp)
 {
-	printk(KERN_INFO "%s: duplicate address detected!\n", ifp->idev->dev->name);
+	if (net_ratelimit())
+		printk(KERN_INFO "%s: duplicate address detected!\n", ifp->idev->dev->name);
 	if (ifp->flags&IFA_F_PERMANENT) {
 		spin_lock_bh(&ifp->lock);
 		addrconf_del_timer(ifp);
@@ -635,14 +650,8 @@ static void addrconf_join_solict(struct net_device *dev, struct in6_addr *addr)
 	if (dev->flags&(IFF_LOOPBACK|IFF_NOARP))
 		return;
 
-#ifndef CONFIG_IPV6_NO_PB
-	addrconf_addr_solict_mult_old(addr, &maddr);
+	addrconf_addr_solict_mult(addr, &maddr);
 	ipv6_dev_mc_inc(dev, &maddr);
-#endif
-#ifdef CONFIG_IPV6_EUI64
-	addrconf_addr_solict_mult_new(addr, &maddr);
-	ipv6_dev_mc_inc(dev, &maddr);
-#endif
 }
 
 static void addrconf_leave_solict(struct net_device *dev, struct in6_addr *addr)
@@ -652,18 +661,11 @@ static void addrconf_leave_solict(struct net_device *dev, struct in6_addr *addr)
 	if (dev->flags&(IFF_LOOPBACK|IFF_NOARP))
 		return;
 
-#ifndef CONFIG_IPV6_NO_PB
-	addrconf_addr_solict_mult_old(addr, &maddr);
+	addrconf_addr_solict_mult(addr, &maddr);
 	ipv6_dev_mc_dec(dev, &maddr);
-#endif
-#ifdef CONFIG_IPV6_EUI64
-	addrconf_addr_solict_mult_new(addr, &maddr);
-	ipv6_dev_mc_dec(dev, &maddr);
-#endif
 }
 
 
-#ifdef CONFIG_IPV6_EUI64
 static int ipv6_generate_eui64(u8 *eui, struct net_device *dev)
 {
 	switch (dev->type) {
@@ -698,7 +700,6 @@ static int ipv6_inherit_eui64(u8 *eui, struct inet6_dev *idev)
 	read_unlock_bh(&idev->lock);
 	return err;
 }
-#endif
 
 /*
  *	Add prefix route.
@@ -818,14 +819,16 @@ void addrconf_prefix_rcv(struct net_device *dev, u8 *opt, int len)
 	prefered_lft = ntohl(pinfo->prefered);
 
 	if (prefered_lft > valid_lft) {
-		printk(KERN_WARNING "addrconf: prefix option has invalid lifetime\n");
+		if (net_ratelimit())
+			printk(KERN_WARNING "addrconf: prefix option has invalid lifetime\n");
 		return;
 	}
 
 	in6_dev = in6_dev_get(dev);
 
 	if (in6_dev == NULL) {
-		printk(KERN_DEBUG "addrconf: device %s not configured\n", dev->name);
+		if (net_ratelimit())
+			printk(KERN_DEBUG "addrconf: device %s not configured\n", dev->name);
 		return;
 	}
 
@@ -872,7 +875,6 @@ void addrconf_prefix_rcv(struct net_device *dev, u8 *opt, int len)
 
 		plen = pinfo->prefix_len >> 3;
 
-#ifdef CONFIG_IPV6_EUI64
 		if (pinfo->prefix_len == 64) {
 			memcpy(&addr, &pinfo->prefix, 8);
 			if (ipv6_generate_eui64(addr.s6_addr + 8, dev) &&
@@ -882,16 +884,9 @@ void addrconf_prefix_rcv(struct net_device *dev, u8 *opt, int len)
 			}
 			goto ok;
 		}
-#endif
-#ifndef CONFIG_IPV6_NO_PB
-		if (pinfo->prefix_len == ((sizeof(struct in6_addr) - dev->addr_len)<<3)) {
-			memcpy(&addr, &pinfo->prefix, plen);
-			memcpy(addr.s6_addr + plen, dev->dev_addr,
-			       dev->addr_len);
-			goto ok;
-		}
-#endif
-		printk(KERN_DEBUG "IPv6 addrconf: prefix with wrong length %d\n", pinfo->prefix_len);
+		if (net_ratelimit())
+			printk(KERN_DEBUG "IPv6 addrconf: prefix with wrong length %d\n",
+			       pinfo->prefix_len);
 		in6_dev_put(in6_dev);
 		return;
 
@@ -1220,7 +1215,6 @@ static void addrconf_dev_config(struct net_device *dev)
 	if (idev == NULL)
 		return;
 
-#ifdef CONFIG_IPV6_EUI64
 	memset(&addr, 0, sizeof(struct in6_addr));
 
 	addr.s6_addr[0] = 0xFE;
@@ -1228,18 +1222,6 @@ static void addrconf_dev_config(struct net_device *dev)
 
 	if (ipv6_generate_eui64(addr.s6_addr + 8, dev) == 0)
 		addrconf_add_linklocal(idev, &addr);
-#endif
-
-#ifndef CONFIG_IPV6_NO_PB
-	memset(&addr, 0, sizeof(struct in6_addr));
-
-	addr.s6_addr[0] = 0xFE;
-	addr.s6_addr[1] = 0x80;
-
-	memcpy(addr.s6_addr + (sizeof(struct in6_addr) - dev->addr_len), 
-	       dev->dev_addr, dev->addr_len);
-	addrconf_add_linklocal(idev, &addr);
-#endif
 }
 
 static void addrconf_sit_config(struct net_device *dev)
@@ -1415,10 +1397,13 @@ static void addrconf_rs_timer(unsigned long data)
 	}
 
 	spin_lock(&ifp->lock);
-	if (ifp->probes++ <= ifp->idev->cnf.rtr_solicits) {
+	if (ifp->probes++ < ifp->idev->cnf.rtr_solicits) {
 		struct in6_addr all_routers;
 
+		/* The wait after the last probe can be shorter */
 		addrconf_mod_timer(ifp, AC_RS,
+				   (ifp->probes == ifp->idev->cnf.rtr_solicits) ?
+				   ifp->idev->cnf.rtr_solicit_delay :
 				   ifp->idev->cnf.rtr_solicit_interval);
 		spin_unlock(&ifp->lock);
 
@@ -1505,19 +1490,13 @@ static void addrconf_dad_timer(unsigned long data)
 	}
 
 	ifp->probes--;
-	addrconf_mod_timer(ifp, AC_DAD, ifp->idev->cnf.rtr_solicit_interval);
+	addrconf_mod_timer(ifp, AC_DAD, ifp->idev->nd_parms->retrans_time);
 	spin_unlock_bh(&ifp->lock);
 
 	/* send a neighbour solicitation for our addr */
 	memset(&unspec, 0, sizeof(unspec));
-#ifdef CONFIG_IPV6_EUI64
-	addrconf_addr_solict_mult_new(&ifp->addr, &mcaddr);
+	addrconf_addr_solict_mult(&ifp->addr, &mcaddr);
 	ndisc_send_ns(ifp->idev->dev, NULL, &ifp->addr, &mcaddr, &unspec);
-#endif
-#ifndef CONFIG_IPV6_NO_PB
-	addrconf_addr_solict_mult_old(&ifp->addr, &mcaddr);
-	ndisc_send_ns(ifp->idev->dev, NULL, &ifp->addr, &mcaddr, &unspec);
-#endif
 
 	in6_ifa_put(ifp);
 }
@@ -1990,6 +1969,20 @@ static void addrconf_sysctl_unregister(struct ipv6_devconf *p)
 
 
 #endif
+
+/*
+ *      Device notifier
+ */
+
+int register_inet6addr_notifier(struct notifier_block *nb)
+{
+        return notifier_chain_register(&inet6addr_chain, nb);
+}
+
+int unregister_inet6addr_notifier(struct notifier_block *nb)
+{
+        return notifier_chain_unregister(&inet6addr_chain,nb);
+}
 
 /*
  *	Init / cleanup code

@@ -54,17 +54,6 @@
  * Note that several drives may have the same major.
  */
 
-/* a linear search, superfluous when dev is a pointer */
-static struct gendisk *get_gendisk(kdev_t dev) {
-	struct gendisk *g;
-	int m = MAJOR(dev);
-
-	for (g = gendisk_head; g; g = g->next)
-		if (g->major == m)
-			break;
-	return g;
-}
-
 /*
  * Add a partition.
  *
@@ -157,8 +146,7 @@ int del_partition(kdev_t dev, struct blkpg_partition *p) {
 
 	/* partition in use? Incomplete check for now. */
 	devp = MKDEV(MAJOR(dev), minor);
-	if (get_super(devp) ||		/* mounted? */
-	    is_swap_partition(devp))
+	if (is_mounted(devp) || is_swap_partition(devp))
 		return -EBUSY;
 
 	/* all seems OK */
@@ -207,7 +195,12 @@ int blkpg_ioctl(kdev_t dev, struct blkpg_ioctl_arg *arg)
 
 int blk_ioctl(kdev_t dev, unsigned int cmd, unsigned long arg)
 {
+	struct gendisk *g;
+	u64 ullval = 0;
 	int intval;
+
+	if (!dev)
+		return -EINVAL;
 
 	switch (cmd) {
 		case BLKROSET:
@@ -224,7 +217,7 @@ int blk_ioctl(kdev_t dev, unsigned int cmd, unsigned long arg)
 		case BLKRASET:
 			if(!capable(CAP_SYS_ADMIN))
 				return -EACCES;
-			if(!dev || arg > 0xff)
+			if(arg > 0xff)
 				return -EINVAL;
 			read_ahead[MAJOR(dev)] = arg;
 			return 0;
@@ -236,8 +229,6 @@ int blk_ioctl(kdev_t dev, unsigned int cmd, unsigned long arg)
 		case BLKFLSBUF:
 			if(!capable(CAP_SYS_ADMIN))
 				return -EACCES;
-			if (!dev)
-				return -EINVAL;
 			fsync_dev(dev);
 			invalidate_buffers(dev);
 			return 0;
@@ -247,17 +238,16 @@ int blk_ioctl(kdev_t dev, unsigned int cmd, unsigned long arg)
 			intval = get_hardsect_size(dev);
 			return put_user(intval, (int *) arg);
 
-#if 0
 		case BLKGETSIZE:
-			/* Today get_gendisk() requires a linear scan;
-			   add this when dev has pointer type. */
+		case BLKGETSIZE64:
 			g = get_gendisk(dev);
-			if (!g)
-				longval = 0;
+			if (g)
+				ullval = g->part[MINOR(dev)].nr_sects;
+
+			if (cmd == BLKGETSIZE)
+				return put_user((unsigned long)ullval, (unsigned long *)arg);
 			else
-				longval = g->part[MINOR(dev)].nr_sects;
-			return put_user(longval, (long *) arg);
-#endif
+				return put_user(ullval, (u64 *)arg);
 #if 0
 		case BLKRRPART: /* Re-read partition tables */
 			if (!capable(CAP_SYS_ADMIN)) 
@@ -274,6 +264,29 @@ int blk_ioctl(kdev_t dev, unsigned int cmd, unsigned long arg)
 		case BLKELVSET:
 			return blkelvset_ioctl(&blk_get_queue(dev)->elevator,
 					       (blkelv_ioctl_arg_t *) arg);
+
+		case BLKBSZGET:
+			/* get the logical block size (cf. BLKSSZGET) */
+			intval = BLOCK_SIZE;
+			if (blksize_size[MAJOR(dev)])
+				intval = blksize_size[MAJOR(dev)][MINOR(dev)];
+			return put_user (intval, (int *) arg);
+
+		case BLKBSZSET:
+			/* set the logical block size */
+			if (!capable (CAP_SYS_ADMIN))
+				return -EACCES;
+			if (!dev || !arg)
+				return -EINVAL;
+			if (get_user (intval, (int *) arg))
+				return -EFAULT;
+			if (intval > PAGE_SIZE || intval < 512 ||
+			    (intval & (intval - 1)))
+				return -EINVAL;
+			if (is_mounted (dev) || is_swap_partition (dev))
+				return -EBUSY;
+			set_blocksize (dev, intval);
+			return 0;
 
 		default:
 			return -EINVAL;

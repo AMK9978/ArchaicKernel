@@ -1,7 +1,7 @@
 /*
  * linux/include/asm-arm/arch-shark/memory.h
  *
- * by Alexander.Schulz@stud.uni-karlsruhe.de
+ * by Alexander Schulz
  *
  * derived from:
  * linux/include/asm-arm/arch-ebsa110/memory.h
@@ -37,5 +37,7 @@
 #define __virt_to_bus(x)	__virt_to_phys(x)
 #define __bus_to_virt__is_a_macro
 #define __bus_to_virt(x)	__phys_to_virt(x)
+
+#define PHYS_TO_NID(addr)	(0)
 
 #endif

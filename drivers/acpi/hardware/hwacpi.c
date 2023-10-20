@@ -1,12 +1,13 @@
+
 /******************************************************************************
  *
- * Module Name: hwacpi - ACPI hardware functions - mode and timer
- *              $Revision: 34 $
+ * Module Name: hwacpi - ACPI Hardware Initialization/Mode Interface
+ *              $Revision: 46 $
  *
  *****************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -28,7 +29,7 @@
 #include "achware.h"
 
 
-#define _COMPONENT          HARDWARE
+#define _COMPONENT          ACPI_HARDWARE
 	 MODULE_NAME         ("hwacpi")
 
 
@@ -44,12 +45,15 @@
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_hw_initialize (
 	void)
 {
-	ACPI_STATUS             status = AE_OK;
+	acpi_status             status = AE_OK;
 	u32                     index;
+
+
+	FUNCTION_TRACE ("Hw_initialize");
 
 
 	/* We must have the ACPI tables by the time we get here */
@@ -57,33 +61,26 @@ acpi_hw_initialize (
 	if (!acpi_gbl_FADT) {
 		acpi_gbl_restore_acpi_chipset = FALSE;
 
-		return (AE_NO_ACPI_TABLES);
+		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "No FADT!\n"));
+
+		return_ACPI_STATUS (AE_NO_ACPI_TABLES);
 	}
 
-	/* Must support *some* mode! */
-/*
-	if (!(System_flags & SYS_MODES_MASK)) {
-		Restore_acpi_chipset = FALSE;
+	/* Identify current ACPI/legacy mode   */
 
-		return (AE_ERROR);
-	}
-
-*/
-
-
-	switch (acpi_gbl_system_flags & SYS_MODES_MASK)
-	{
-		/* Identify current ACPI/legacy mode   */
-
+	switch (acpi_gbl_system_flags & SYS_MODES_MASK) {
 	case (SYS_MODE_ACPI):
 
 		acpi_gbl_original_mode = SYS_MODE_ACPI;
+		ACPI_DEBUG_PRINT ((ACPI_DB_INFO, "System supports ACPI mode only.\n"));
 		break;
 
 
 	case (SYS_MODE_LEGACY):
 
 		acpi_gbl_original_mode = SYS_MODE_LEGACY;
+		ACPI_DEBUG_PRINT ((ACPI_DB_INFO,
+			"Tables loaded from buffer, hardware assumed to support LEGACY mode only.\n"));
 		break;
 
 
@@ -96,6 +93,12 @@ acpi_hw_initialize (
 			acpi_gbl_original_mode = SYS_MODE_LEGACY;
 		}
 
+		ACPI_DEBUG_PRINT ((ACPI_DB_INFO,
+			"System supports both ACPI and LEGACY modes.\n"));
+
+		ACPI_DEBUG_PRINT ((ACPI_DB_INFO,
+			"System is currently in %s mode.\n",
+			(acpi_gbl_original_mode == SYS_MODE_ACPI) ? "ACPI" : "LEGACY"));
 		break;
 	}
 
@@ -117,24 +120,22 @@ acpi_hw_initialize (
 		 * coded here. If this changes in the spec, this code will need to
 		 * be modified. The PM1b_evt_blk behaves as expected.
 		 */
-
-		acpi_gbl_pm1_enable_register_save = (u16) acpi_hw_register_read (ACPI_MTX_LOCK, PM1_EN);
+		acpi_gbl_pm1_enable_register_save = (u16) acpi_hw_register_read (
+				   ACPI_MTX_LOCK, PM1_EN);
 
 
 		/*
 		 * The GPEs behave similarly, except that the length of the register
 		 * block is not fixed, so the buffer must be allocated with malloc
 		 */
-
 		if (ACPI_VALID_ADDRESS (acpi_gbl_FADT->Xgpe0blk.address) &&
-			acpi_gbl_FADT->gpe0blk_len)
-		{
+			acpi_gbl_FADT->gpe0blk_len) {
 			/* GPE0 specified in FADT  */
 
-			acpi_gbl_gpe0enable_register_save =
-				acpi_cm_allocate (DIV_2 (acpi_gbl_FADT->gpe0blk_len));
+			acpi_gbl_gpe0enable_register_save = ACPI_MEM_ALLOCATE (
+					   DIV_2 (acpi_gbl_FADT->gpe0blk_len));
 			if (!acpi_gbl_gpe0enable_register_save) {
-				return (AE_NO_MEMORY);
+				return_ACPI_STATUS (AE_NO_MEMORY);
 			}
 
 			/* Save state of GPE0 enable bits */
@@ -150,14 +151,13 @@ acpi_hw_initialize (
 		}
 
 		if (ACPI_VALID_ADDRESS (acpi_gbl_FADT->Xgpe1_blk.address) &&
-			acpi_gbl_FADT->gpe1_blk_len)
-		{
+			acpi_gbl_FADT->gpe1_blk_len) {
 			/* GPE1 defined */
 
-			acpi_gbl_gpe1_enable_register_save =
-				acpi_cm_allocate (DIV_2 (acpi_gbl_FADT->gpe1_blk_len));
+			acpi_gbl_gpe1_enable_register_save = ACPI_MEM_ALLOCATE (
+					   DIV_2 (acpi_gbl_FADT->gpe1_blk_len));
 			if (!acpi_gbl_gpe1_enable_register_save) {
-				return (AE_NO_MEMORY);
+				return_ACPI_STATUS (AE_NO_MEMORY);
 			}
 
 			/* save state of GPE1 enable bits */
@@ -173,7 +173,7 @@ acpi_hw_initialize (
 		}
 	}
 
-	return (status);
+	return_ACPI_STATUS (status);
 }
 
 
@@ -190,18 +190,22 @@ acpi_hw_initialize (
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_hw_set_mode (
 	u32                     mode)
 {
 
-	ACPI_STATUS             status = AE_ERROR;
+	acpi_status             status = AE_NO_HARDWARE_RESPONSE;
+
+
+	FUNCTION_TRACE ("Hw_set_mode");
 
 
 	if (mode == SYS_MODE_ACPI) {
 		/* BIOS should have disabled ALL fixed and GP events */
 
-		acpi_os_out8 (acpi_gbl_FADT->smi_cmd, acpi_gbl_FADT->acpi_enable);
+		acpi_os_write_port (acpi_gbl_FADT->smi_cmd, acpi_gbl_FADT->acpi_enable, 8);
+		ACPI_DEBUG_PRINT ((ACPI_DB_INFO, "Attempting to enable ACPI mode\n"));
 	}
 
 	else if (mode == SYS_MODE_LEGACY) {
@@ -209,15 +213,21 @@ acpi_hw_set_mode (
 		 * BIOS should clear all fixed status bits and restore fixed event
 		 * enable bits to default
 		 */
-
-		acpi_os_out8 (acpi_gbl_FADT->smi_cmd, acpi_gbl_FADT->acpi_disable);
+		acpi_os_write_port (acpi_gbl_FADT->smi_cmd, acpi_gbl_FADT->acpi_disable, 8);
+		ACPI_DEBUG_PRINT ((ACPI_DB_INFO,
+				 "Attempting to enable Legacy (non-ACPI) mode\n"));
 	}
 
+	/* Give the platform some time to react */
+
+	acpi_os_stall (20000);
+
 	if (acpi_hw_get_mode () == mode) {
+		ACPI_DEBUG_PRINT ((ACPI_DB_INFO, "Mode %X successfully enabled\n", mode));
 		status = AE_OK;
 	}
 
-	return (status);
+	return_ACPI_STATUS (status);
 }
 
 
@@ -238,14 +248,17 @@ u32
 acpi_hw_get_mode (void)
 {
 
+	FUNCTION_TRACE ("Hw_get_mode");
+
 
 	if (acpi_hw_register_bit_access (ACPI_READ, ACPI_MTX_LOCK, SCI_EN)) {
-		return (SYS_MODE_ACPI);
+		return_VALUE (SYS_MODE_ACPI);
 	}
 	else {
-		return (SYS_MODE_LEGACY);
+		return_VALUE (SYS_MODE_LEGACY);
 	}
 }
+
 
 /******************************************************************************
  *
@@ -264,6 +277,8 @@ u32
 acpi_hw_get_mode_capabilities (void)
 {
 
+	FUNCTION_TRACE ("Hw_get_mode_capabilities");
+
 
 	if (!(acpi_gbl_system_flags & SYS_MODES_MASK)) {
 		if (acpi_hw_get_mode () == SYS_MODE_LEGACY) {
@@ -273,7 +288,6 @@ acpi_hw_get_mode_capabilities (void)
 			 * tables.  Therefore since we're in SYS_MODE_LEGACY, the system
 			 * must support both modes
 			 */
-
 			acpi_gbl_system_flags |= (SYS_MODE_ACPI | SYS_MODE_LEGACY);
 		}
 
@@ -300,52 +314,7 @@ acpi_hw_get_mode_capabilities (void)
 		}
 	}
 
-	return (acpi_gbl_system_flags & SYS_MODES_MASK);
+	return_VALUE (acpi_gbl_system_flags & SYS_MODES_MASK);
 }
 
-
-/******************************************************************************
- *
- * FUNCTION:    Acpi_hw_pmt_ticks
- *
- * PARAMETERS:  none
- *
- * RETURN:      Current value of the ACPI PMT (timer)
- *
- * DESCRIPTION: Obtains current value of ACPI PMT
- *
- ******************************************************************************/
-
-u32
-acpi_hw_pmt_ticks (void)
-{
-	u32                      ticks;
-
-	ticks = acpi_os_in32 ((ACPI_IO_ADDRESS) ACPI_GET_ADDRESS (acpi_gbl_FADT->Xpm_tmr_blk.address));
-
-	return (ticks);
-}
-
-
-/******************************************************************************
- *
- * FUNCTION:    Acpi_hw_pmt_resolution
- *
- * PARAMETERS:  none
- *
- * RETURN:      Number of bits of resolution in the PMT (either 24 or 32)
- *
- * DESCRIPTION: Obtains resolution of the ACPI PMT (either 24bit or 32bit)
- *
- ******************************************************************************/
-
-u32
-acpi_hw_pmt_resolution (void)
-{
-	if (0 == acpi_gbl_FADT->tmr_val_ext) {
-		return (24);
-	}
-
-	return (32);
-}
 

@@ -18,11 +18,11 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/fs.h>
-#include <linux/malloc.h>
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/smp_lock.h>
 #include <linux/cache.h>
+#include <linux/module.h>
 
 #include <asm/uaccess.h>
 
@@ -52,13 +52,8 @@ static unsigned int d_hash_shift;
 static struct list_head *dentry_hashtable;
 static LIST_HEAD(dentry_unused);
 
-struct {
-	int nr_dentry;
-	int nr_unused;
-	int age_limit;		/* age in seconds */
-	int want_pages;		/* pages requested by system */
-	int dummy[2];
-} dentry_stat = {0, 0, 45, 0,};
+/* Statistics gathering. */
+struct dentry_stat_t dentry_stat = {0, 0, 45, 0,};
 
 /* no dcache_lock, please */
 static inline void d_free(struct dentry *dentry)
@@ -144,10 +139,6 @@ repeat:
 		goto kill_it;
 	list_add(&dentry->d_lru, &dentry_unused);
 	dentry_stat.nr_unused++;
-	/*
-	 * Update the timestamp
-	 */
-	dentry->d_reftime = jiffies;
 	spin_unlock(&dcache_lock);
 	return;
 
@@ -229,8 +220,7 @@ static inline struct dentry * __dget_locked(struct dentry *dentry)
 	atomic_inc(&dentry->d_count);
 	if (atomic_read(&dentry->d_count) == 1) {
 		dentry_stat.nr_unused--;
-		list_del(&dentry->d_lru);
-		INIT_LIST_HEAD(&dentry->d_lru);		/* make "list_empty()" work */
+		list_del_init(&dentry->d_lru);
 	}
 	return dentry;
 }
@@ -343,10 +333,9 @@ void prune_dcache(int count)
 		dentry = list_entry(tmp, struct dentry, d_lru);
 
 		/* If the dentry was recently referenced, don't free it. */
-		if (dentry->d_flags & DCACHE_REFERENCED) {
-			dentry->d_flags &= ~DCACHE_REFERENCED;
+		if (dentry->d_vfs_flags & DCACHE_REFERENCED) {
+			dentry->d_vfs_flags &= ~DCACHE_REFERENCED;
 			list_add(&dentry->d_lru, &dentry_unused);
-			count--;
 			continue;
 		}
 		dentry_stat.nr_unused--;
@@ -419,8 +408,7 @@ repeat:
 		if (atomic_read(&dentry->d_count))
 			continue;
 		dentry_stat.nr_unused--;
-		list_del(tmp);
-		INIT_LIST_HEAD(tmp);
+		list_del_init(tmp);
 		prune_one_dentry(dentry);
 		goto repeat;
 	}
@@ -559,7 +547,7 @@ void shrink_dcache_parent(struct dentry * parent)
  *  ...
  *   6 - base-level: try to shrink a bit.
  */
-void shrink_dcache_memory(int priority, unsigned int gfp_mask)
+int shrink_dcache_memory(int priority, unsigned int gfp_mask)
 {
 	int count = 0;
 
@@ -574,14 +562,14 @@ void shrink_dcache_memory(int priority, unsigned int gfp_mask)
 	 * We should make sure we don't hold the superblock lock over
 	 * block allocations, but for now:
 	 */
-	if (!(gfp_mask & __GFP_IO))
-		return;
+	if (!(gfp_mask & __GFP_FS))
+		return 0;
 
-	if (priority)
-		count = dentry_stat.nr_unused / priority;
+	count = dentry_stat.nr_unused / priority;
 
 	prune_dcache(count);
 	kmem_cache_shrink(dentry_cache);
+	return 0;
 }
 
 #define NAME_ALLOC_LEN(len)	((len+16) & ~15)
@@ -618,6 +606,7 @@ struct dentry * d_alloc(struct dentry * parent, const struct qstr *name)
 	str[name->len] = 0;
 
 	atomic_set(&dentry->d_count, 1);
+	dentry->d_vfs_flags = 0;
 	dentry->d_flags = 0;
 	dentry->d_inode = NULL;
 	dentry->d_parent = NULL;
@@ -627,7 +616,7 @@ struct dentry * d_alloc(struct dentry * parent, const struct qstr *name)
 	dentry->d_name.hash = name->hash;
 	dentry->d_op = NULL;
 	dentry->d_fsdata = NULL;
-	INIT_LIST_HEAD(&dentry->d_vfsmnt);
+	dentry->d_mounted = 0;
 	INIT_LIST_HEAD(&dentry->d_hash);
 	INIT_LIST_HEAD(&dentry->d_lru);
 	INIT_LIST_HEAD(&dentry->d_subdirs);
@@ -662,6 +651,7 @@ struct dentry * d_alloc(struct dentry * parent, const struct qstr *name)
  
 void d_instantiate(struct dentry *entry, struct inode * inode)
 {
+	if (!list_empty(&entry->d_alias)) BUG();
 	spin_lock(&dcache_lock);
 	if (inode)
 		list_add(&entry->d_alias, &inode->i_dentry);
@@ -696,7 +686,7 @@ struct dentry * d_alloc_root(struct inode * root_inode)
 static inline struct list_head * d_hash(struct dentry * parent, unsigned long hash)
 {
 	hash += (unsigned long) parent / L1_CACHE_BYTES;
-	hash = hash ^ (hash >> D_HASHBITS) ^ (hash >> D_HASHBITS*2);
+	hash = hash ^ (hash >> D_HASHBITS);
 	return dentry_hashtable + (hash & D_HASHMASK);
 }
 
@@ -740,7 +730,7 @@ struct dentry * d_lookup(struct dentry * parent, struct qstr * name)
 				continue;
 		}
 		__dget_locked(dentry);
-		dentry->d_flags |= DCACHE_REFERENCED;
+		dentry->d_vfs_flags |= DCACHE_REFERENCED;
 		spin_unlock(&dcache_lock);
 		return dentry;
 	}
@@ -750,58 +740,48 @@ struct dentry * d_lookup(struct dentry * parent, struct qstr * name)
 
 /**
  * d_validate - verify dentry provided from insecure source
- * @dentry: The dentry alleged to be valid
- * @dparent: The parent dentry
+ * @dentry: The dentry alleged to be valid child of @dparent
+ * @dparent: The parent dentry (known to be valid)
  * @hash: Hash of the dentry
  * @len: Length of the name
  *
  * An insecure source has sent us a dentry, here we verify it and dget() it.
  * This is used by ncpfs in its readdir implementation.
  * Zero is returned in the dentry is invalid.
- *
- * NOTE: This function does _not_ dereference the pointers before we have
- * validated them. We can test the pointer values, but we
- * must not actually use them until we have found a valid
- * copy of the pointer in kernel space..
  */
  
-int d_validate(struct dentry *dentry, struct dentry *dparent,
-	       unsigned int hash, unsigned int len)
+int d_validate(struct dentry *dentry, struct dentry *dparent)
 {
+	unsigned long dent_addr = (unsigned long) dentry;
+	unsigned long min_addr = PAGE_OFFSET;
+	unsigned long align_mask = 0x0F;
 	struct list_head *base, *lhp;
-	int valid = 1;
+
+	if (dent_addr < min_addr)
+		goto out;
+	if (dent_addr > (unsigned long)high_memory - sizeof(struct dentry))
+		goto out;
+	if (dent_addr & align_mask)
+		goto out;
+	if ((!kern_addr_valid(dent_addr)) || (!kern_addr_valid(dent_addr -1 +
+						sizeof(struct dentry))))
+		goto out;
+
+	if (dentry->d_parent != dparent)
+		goto out;
 
 	spin_lock(&dcache_lock);
-	if (dentry != dparent) {
-		base = d_hash(dparent, hash);
-		lhp = base;
-		while ((lhp = lhp->next) != base) {
-			if (dentry == list_entry(lhp, struct dentry, d_hash)) {
-				__dget_locked(dentry);
-				goto out;
-			}
-		}
-	} else {
-		/*
-		 * Special case: local mount points don't live in
-		 * the hashes, so we search the super blocks.
-		 */
-		struct super_block *sb = sb_entry(super_blocks.next);
-
-		for (; sb != sb_entry(&super_blocks); 
-		     sb = sb_entry(sb->s_list.next)) {
-			if (!sb->s_dev)
-				continue;
-			if (sb->s_root == dentry) {
-				__dget_locked(dentry);
-				goto out;
-			}
+	lhp = base = d_hash(dparent, dentry->d_name.hash);
+	while ((lhp = lhp->next) != base) {
+		if (dentry == list_entry(lhp, struct dentry, d_hash)) {
+			__dget_locked(dentry);
+			spin_unlock(&dcache_lock);
+			return 1;
 		}
 	}
-	valid = 0;
-out:
 	spin_unlock(&dcache_lock);
-	return valid;
+out:
+	return 0;
 }
 
 /*
@@ -854,6 +834,7 @@ void d_delete(struct dentry * dentry)
 void d_rehash(struct dentry * entry)
 {
 	struct list_head *list = d_hash(entry->d_parent, entry->d_name.hash);
+	if (!list_empty(&entry->d_hash)) BUG();
 	spin_lock(&dcache_lock);
 	list_add(&entry->d_hash, list);
 	spin_unlock(&dcache_lock);
@@ -928,8 +909,7 @@ void d_move(struct dentry * dentry, struct dentry * target)
 	list_add(&dentry->d_hash, &target->d_hash);
 
 	/* Unhash the target: dput() will then get rid of it */
-	list_del(&target->d_hash);
-	INIT_LIST_HEAD(&target->d_hash);
+	list_del_init(&target->d_hash);
 
 	list_del(&dentry->d_child);
 	list_del(&target->d_child);
@@ -1245,6 +1225,18 @@ static void __init dcache_init(unsigned long mempages)
 	} while (i);
 }
 
+static void init_buffer_head(void * foo, kmem_cache_t * cachep, unsigned long flags)
+{
+	if ((flags & (SLAB_CTOR_VERIFY|SLAB_CTOR_CONSTRUCTOR)) ==
+	    SLAB_CTOR_CONSTRUCTOR)
+	{
+		struct buffer_head * bh = (struct buffer_head *) foo;
+
+		memset(bh, 0, sizeof(*bh));
+		init_waitqueue_head(&bh->b_wait);
+	}
+}
+
 /* SLAB cache for __getname() consumers */
 kmem_cache_t *names_cachep;
 
@@ -1256,12 +1248,16 @@ kmem_cache_t *dquot_cachep;
 
 /* SLAB cache for buffer_head structures */
 kmem_cache_t *bh_cachep;
+EXPORT_SYMBOL(bh_cachep);
+
+extern void bdev_cache_init(void);
+extern void cdev_cache_init(void);
 
 void __init vfs_caches_init(unsigned long mempages)
 {
 	bh_cachep = kmem_cache_create("buffer_head",
 			sizeof(struct buffer_head), 0,
-			SLAB_HWCACHE_ALIGN, NULL, NULL);
+			SLAB_HWCACHE_ALIGN, init_buffer_head, NULL);
 	if(!bh_cachep)
 		panic("Cannot create buffer head SLAB cache");
 
@@ -1286,4 +1282,8 @@ void __init vfs_caches_init(unsigned long mempages)
 #endif
 
 	dcache_init(mempages);
+	inode_init(mempages);
+	mnt_init(mempages);
+	bdev_cache_init();
+	cdev_cache_init();
 }

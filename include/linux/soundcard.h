@@ -179,7 +179,7 @@ typedef struct seq_event_rec {
  * Some big endian/little endian handling macros
  */
 
-#if defined(_AIX) || defined(AIX) || defined(sparc) || defined(__sparc__) || defined(HPPA) || defined(PPC)
+#if defined(_AIX) || defined(AIX) || defined(sparc) || defined(__sparc__) || defined(HPPA) || defined(PPC) || defined(__mc68000__)
 /* Big endian machines */
 #  define _PATCHKEY(id) (0xfd00|id)
 #  define AFMT_S16_NE AFMT_S16_BE
@@ -622,6 +622,17 @@ typedef struct buffmem_desc {
 #	define DSP_BIND_MODEM2		0x00000040
 #	define DSP_BIND_I2S		0x00000080
 #	define DSP_BIND_SPDIF		0x00000100
+
+#define SNDCTL_DSP_SETSPDIF		_SIOW ('P', 66, int)
+#define SNDCTL_DSP_GETSPDIF		_SIOR ('P', 67, int)
+#	define SPDIF_PRO	0x0001
+#	define SPDIF_N_AUD	0x0002
+#	define SPDIF_COPY	0x0004
+#	define SPDIF_PRE	0x0008
+#	define SPDIF_CC		0x07f0
+#	define SPDIF_L		0x0800
+#	define SPDIF_DRS	0x4000
+#	define SPDIF_V		0x8000
 
 /*
  * Application's profile defines the way how playback underrun situations should be handled.

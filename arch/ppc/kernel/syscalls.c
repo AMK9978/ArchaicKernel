@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.syscalls.c 1.11 10/16/01 15:58:42 trini
+ */
+/*
  * linux/arch/ppc/kernel/sys_ppc.c
  *
  *  PowerPC version 
@@ -185,9 +188,10 @@ int sys_pipe(int *fildes)
 	return error;
 }
 
-unsigned long sys_mmap(unsigned long addr, size_t len,
-		       unsigned long prot, unsigned long flags,
-		       unsigned long fd, off_t offset)
+static inline unsigned long
+do_mmap2(unsigned long addr, size_t len,
+	 unsigned long prot, unsigned long flags,
+	 unsigned long fd, unsigned long pgoff)
 {
 	struct file * file = NULL;
 	int ret = -EBADF;
@@ -198,13 +202,34 @@ unsigned long sys_mmap(unsigned long addr, size_t len,
 			goto out;
 	}
 	
-	down(&current->mm->mmap_sem);
-	ret = do_mmap(file, addr, len, prot, flags, offset);
-	up(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
+	ret = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
+	up_write(&current->mm->mmap_sem);
 	if (file)
 		fput(file);
 out:
 	return ret;
+}
+
+unsigned long sys_mmap2(unsigned long addr, size_t len,
+			unsigned long prot, unsigned long flags,
+			unsigned long fd, unsigned long pgoff)
+{
+	return do_mmap2(addr, len, prot, flags, fd, pgoff);
+}
+
+unsigned long sys_mmap(unsigned long addr, size_t len,
+		       unsigned long prot, unsigned long flags,
+		       unsigned long fd, off_t offset)
+{
+	int err = -EINVAL;
+
+	if (offset & ~PAGE_MASK)
+		goto out;
+
+	err = do_mmap2(addr, len, prot, flags, fd, offset >> PAGE_SHIFT);
+out:
+	return err;
 }
 
 extern int sys_select(int, fd_set *, fd_set *, fd_set *, struct timeval *);
@@ -281,7 +306,7 @@ int sys_olduname(struct oldold_utsname * name)
  * Those are normally defined in arch/ppc/kernel/pci.c. But when CONFIG_PCI is
  * not defined, this file is not linked at all, so here are the "empty" versions
  */
-asmlinkage int sys_pciconfig_read() { return -ENOSYS; }
-asmlinkage int sys_pciconfig_write() { return -ENOSYS; }
-asmlinkage long sys_pciconfig_iobase() { return -ENOSYS; }
+int sys_pciconfig_read(void) { return -ENOSYS; }
+int sys_pciconfig_write(void) { return -ENOSYS; }
+long sys_pciconfig_iobase(void) { return -ENOSYS; }
 #endif

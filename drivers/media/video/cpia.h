@@ -62,7 +62,7 @@ struct cpia_camera_ops
 	/* transferCmd sends commands to the camera.  command MUST point to
 	 * an  8 byte buffer in kernel space. data can be NULL if no extra
 	 * data is needed.  The size of the data is given by the last 2
-	 * bytes of comand.  data must also point to memory in kernel space.
+	 * bytes of command.  data must also point to memory in kernel space.
 	 * Returns negative value on error, otherwise 0.
 	 */
 	int (*transferCmd)(void *privdata, u8 *command, u8 *data);
@@ -414,6 +414,26 @@ void cpia_unregister_camera(struct cam_data *cam);
       unlock_kernel();\
     }\
   } while (0)
+
+
+static inline void cpia_add_to_list(struct cam_data* l, struct cam_data* drv)
+{
+	drv->next = l;
+	drv->previous = &l;
+	l = drv;
+}
+
+
+static inline void cpia_remove_from_list(struct cam_data* drv)
+{
+	if (drv->previous != NULL) {
+		if (drv->next != NULL)
+			drv->next->previous = drv->previous;
+		*(drv->previous) = drv->next;
+		drv->previous = NULL;
+		drv->next = NULL;
+	}
+}
 
 
 #endif /* __KERNEL__ */

@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.ioctls.h 1.7 05/17/01 18:14:24 cort
+ */
 #ifndef _ASM_PPC_IOCTLS_H
 #define _ASM_PPC_IOCTLS_H
 
@@ -9,6 +12,7 @@
 #define FIONBIO		_IOW('f', 126, int)
 #define FIONREAD	_IOR('f', 127, int)
 #define TIOCINQ		FIONREAD
+#define FIOQSIZE	_IOR('f', 128, loff_t)
 
 #define TIOCGETP	_IOR('t', 8, struct sgttyb)
 #define TIOCSETP	_IOW('t', 9, struct sgttyb)

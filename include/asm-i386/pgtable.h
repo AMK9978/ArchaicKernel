@@ -105,8 +105,20 @@ extern unsigned long empty_zero_page[1024];
 #ifndef __ASSEMBLY__
 #if CONFIG_X86_PAE
 # include <asm/pgtable-3level.h>
+
+/*
+ * Need to initialise the X86 PAE caches
+ */
+extern void pgtable_cache_init(void);
+
 #else
 # include <asm/pgtable-2level.h>
+
+/*
+ * No page table caches to initialise
+ */
+#define pgtable_cache_init()	do { } while (0)
+
 #endif
 #endif
 
@@ -140,7 +152,11 @@ extern unsigned long empty_zero_page[1024];
 #define VMALLOC_START	(((unsigned long) high_memory + 2*VMALLOC_OFFSET-1) & \
 						~(VMALLOC_OFFSET-1))
 #define VMALLOC_VMADDR(x) ((unsigned long)(x))
-#define VMALLOC_END	(FIXADDR_START)
+#if CONFIG_HIGHMEM
+# define VMALLOC_END	(PKMAP_BASE-2*PAGE_SIZE)
+#else
+# define VMALLOC_END	(FIXADDR_START-2*PAGE_SIZE)
+#endif
 
 /*
  * The 4MB page is guessing..  Detailed in the infamous "Chapter H"
@@ -238,12 +254,6 @@ extern unsigned long empty_zero_page[1024];
 
 /* page table for 0-4MB for everybody */
 extern unsigned long pg0[1024];
-
-/*
- * Handling allocation failures during page table setup.
- */
-extern void __handle_bad_pmd(pmd_t * pmd);
-extern void __handle_bad_pmd_kernel(pmd_t * pmd);
 
 #define pte_present(x)	((x).pte_low & (_PAGE_PRESENT | _PAGE_PROTNONE))
 #define pte_clear(xp)	do { set_pte(xp, __pte(0)); } while (0)

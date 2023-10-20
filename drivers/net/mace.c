@@ -5,6 +5,7 @@
  * Copyright (C) 1996 Paul Mackerras.
  */
 
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/kernel.h>
@@ -20,7 +21,11 @@
 #include <asm/pgtable.h>
 #include "mace.h"
 
-static struct net_device *mace_devs = NULL;
+static struct net_device *mace_devs;
+static int port_aaui = -1;
+
+MODULE_PARM(port_aaui, "i");
+MODULE_PARM_DESC(port_aaui, "MACE uses AAUI port (0-1)");
 
 #define N_RX_RING	8
 #define N_TX_RING	6
@@ -53,6 +58,7 @@ struct mace_data {
     struct net_device_stats stats;
     struct timer_list tx_timeout;
     int timeout_active;
+    int port_aaui;
     struct net_device *next_mace;
 };
 
@@ -87,7 +93,7 @@ static void __mace_set_address(struct net_device *dev, void *addr);
 /*
  * If we can't get a skbuff when we need it, we use this area for DMA.
  */
-static unsigned char dummy_buf[RX_BUFLEN+2];
+static unsigned char *dummy_buf;
 
 /* Bit-reverse one byte of an ethernet hardware address. */
 static inline int
@@ -106,7 +112,7 @@ static int __init mace_probe(void)
 
 	for (mace = find_devices("mace"); mace != NULL; mace = mace->next)
 		mace_probe1(mace);
-	return 0;
+	return mace_devs? 0: -ENODEV;
 }
 
 static void __init mace_probe1(struct device_node *mace)
@@ -128,6 +134,14 @@ static void __init mace_probe1(struct device_node *mace)
 		if (addr == NULL) {
 			printk(KERN_ERR "Can't get mac-address for MACE %s\n",
 			       mace->full_name);
+			return;
+		}
+	}
+
+	if (dummy_buf == NULL) {
+		dummy_buf = kmalloc(RX_BUFLEN+2, GFP_KERNEL);
+		if (dummy_buf == NULL) {
+			printk(KERN_ERR "MACE: couldn't allocate dummy buffer\n");
 			return;
 		}
 	}
@@ -169,6 +183,21 @@ static void __init mace_probe1(struct device_node *mace)
 	       (NCMDS_TX*N_TX_RING + N_RX_RING + 2) * sizeof(struct dbdma_cmd));
 	init_timer(&mp->tx_timeout);
 	mp->timeout_active = 0;
+
+	if (port_aaui >= 0)
+		mp->port_aaui = port_aaui;
+	else {
+		/* Apple Network Server uses the AAUI port */
+		if (machine_is_compatible("AAPL,ShinerESB"))
+			mp->port_aaui = 1;
+		else {
+#ifdef CONFIG_MACE_AAUI_PORT
+			mp->port_aaui = 1;
+#else
+			mp->port_aaui = 0;
+#endif			
+		}
+	}
 
 	dev->open = mace_open;
 	dev->stop = mace_close;
@@ -253,7 +282,10 @@ static void mace_reset(struct net_device *dev)
     /* done changing address */
     out_8(&mb->iac, 0);
 
-    out_8(&mb->plscc, PORTSEL_GPSI + ENPLSIO);
+    if (mp->port_aaui)
+    	out_8(&mb->plscc, PORTSEL_AUI + ENPLSIO);
+    else
+    	out_8(&mb->plscc, PORTSEL_GPSI + ENPLSIO);
 }
 
 static void __mace_set_address(struct net_device *dev, void *addr)
@@ -826,9 +858,10 @@ static void mace_rxdma_intr(int irq, void *dev_id, struct pt_regs *regs)
 		skb_put(skb, nb);
 		skb->dev = dev;
 		skb->protocol = eth_type_trans(skb, dev);
-		netif_rx(skb);
-		mp->rx_bufs[i] = 0;
 		mp->stats.rx_bytes += skb->len;
+		netif_rx(skb);
+		dev->last_rx = jiffies;
+		mp->rx_bufs[i] = 0;
 		++mp->stats.rx_packets;
 	    }
 	} else {
@@ -880,6 +913,7 @@ static void mace_rxdma_intr(int irq, void *dev_id, struct pt_regs *regs)
 
 MODULE_AUTHOR("Paul Mackerras");
 MODULE_DESCRIPTION("PowerMac MACE driver.");
+MODULE_LICENSE("GPL");
 
 static void __exit mace_cleanup (void)
 {
@@ -896,6 +930,10 @@ static void __exit mace_cleanup (void)
 
 	unregister_netdev(dev);
 	kfree(dev);
+    }
+    if (dummy_buf != NULL) {
+	kfree(dummy_buf);
+	dummy_buf = NULL;
     }
 }
 

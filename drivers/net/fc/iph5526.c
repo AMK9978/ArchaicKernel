@@ -118,6 +118,8 @@ static struct pci_device_id iph5526_pci_tbl[] __initdata = {
 };
 MODULE_DEVICE_TABLE(pci, iph5526_pci_tbl);
 
+MODULE_LICENSE("GPL");
+
 #define MAX_FC_CARDS 2
 static struct fc_info *fc[MAX_FC_CARDS+1];
 static unsigned int pci_irq_line;
@@ -222,7 +224,7 @@ static void flush_tachyon_cache(struct fc_info *fi, u_short ox_id);
 static int get_scsi_oxid(struct fc_info *fi);
 static void update_scsi_oxid(struct fc_info *fi);
 
-Scsi_Host_Template driver_template = IPH5526_SCSI_FC;
+static Scsi_Host_Template driver_template = IPH5526_SCSI_FC;
 
 static void iph5526_timeout(struct net_device *dev);
 
@@ -241,7 +243,7 @@ static int __init iph5526_probe_pci(struct net_device *dev)
 	struct fc_info *fi = (struct fc_info *)dev->priv;
 #else
 	struct fc_info *fi;
-	static int count = 0;
+	static int count;
  
 	if(fc[count] != NULL) {
 		if (dev == NULL) {
@@ -1074,11 +1076,11 @@ int wrap_around = FALSE, no_of_wrap_buffs = NO_OF_ENTRIES - 1;
 			fi->fc_stats.rx_dropped++;
 			fi->g.mfs_buffer_count += no_of_buffers;
 			if (fi->g.mfs_buffer_count >= NO_OF_ENTRIES) {
-			int count = fi->g.mfs_buffer_count / NO_OF_ENTRIES;
+				int count = fi->g.mfs_buffer_count / NO_OF_ENTRIES;
 				fi->g.mfs_buffer_count -= NO_OF_ENTRIES * count;
 				update_MFSBQ_indx(fi, count);
-				return;
 			}
+			return;
 		}
 		if (wrap_around) {
 		int wrap_size = no_of_wrap_buffs * MFS_BUFFER_SIZE;
@@ -1930,7 +1932,7 @@ u_int tachyon_status;
 		fi->g.name_server = FALSE;
 		fi->g.alpa_list_index = 0;
 		fi->g.ox_id = NOT_SCSI_XID;
-		fi->g.my_mtu = FRAME_SIZE;
+		fi->g.my_mtu = TACH_FRAME_SIZE;
 		
 		/* Implicitly LOGO with all logged-in nodes. 
 		 */
@@ -2809,7 +2811,7 @@ int i;
 	else
 	if (logi == ELS_FLOGI)
 		fi->g.login.common_features = htons(FLOGI_C_F);
-	fi->g.login.recv_data_field_size = htons(FRAME_SIZE);
+	fi->g.login.recv_data_field_size = htons(TACH_FRAME_SIZE);
 	fi->g.login.n_port_total_conc_seq = htons(CONCURRENT_SEQUENCES);
 	fi->g.login.rel_off_by_info_cat = htons(RO_INFO_CATEGORY);
 	fi->g.login.ED_TOV = htonl(E_D_TOV);
@@ -2845,7 +2847,7 @@ int i;
 		fi->g.login.c_of_s[2].service_options  = htons(SERVICE_VALID);
 	fi->g.login.c_of_s[2].initiator_ctl = htons(0);
 	fi->g.login.c_of_s[2].recipient_ctl = htons(0);
-	fi->g.login.c_of_s[2].recv_data_field_size = htons(FRAME_SIZE);
+	fi->g.login.c_of_s[2].recv_data_field_size = htons(TACH_FRAME_SIZE);
 	fi->g.login.c_of_s[2].concurrent_sequences = htons(CLASS3_CONCURRENT_SEQUENCE);
 	fi->g.login.c_of_s[2].n_port_end_to_end_credit = htons(0);
 	fi->g.login.c_of_s[2].open_seq_per_exchange = htons(CLASS3_OPEN_SEQUENCE);
@@ -3148,6 +3150,7 @@ struct fch_hdr fch;
 	if (skb->protocol == ntohs(ETH_P_ARP))
 		skb->data[1] = 0x06;
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 	fi->fc_stats.rx_packets++;
 	LEAVE("rx_net_packet");
 }
@@ -3168,6 +3171,7 @@ struct fch_hdr fch;
 	skb->protocol = fc_type_trans(skb, dev);
 	DPRINTK("protocol = %x", skb->protocol);
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 	LEAVE("rx_net_mfs_packet");
 }
 
@@ -4521,9 +4525,9 @@ static char buf[80];
 
 static struct net_device *dev_fc[MAX_FC_CARDS];
 
-static int io =  0;
-static int irq  = 0;
-static int bad  = 0;	/* 0xbad = bad sig or no reset ack */
+static int io;
+static int irq;
+static int bad;	/* 0xbad = bad sig or no reset ack */
 static int scsi_registered;
 
 

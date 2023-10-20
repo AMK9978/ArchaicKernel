@@ -19,7 +19,7 @@
     are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
 
     Alternatively, the contents of this file may be used under the
-    terms of the GNU Public License version 2 (the "GPL"), in which
+    terms of the GNU General Public License version 2 (the "GPL"), in which
     case the provisions of the GPL are applicable instead of the
     above.  If you wish to allow the use of your version of this file
     only under the terms of the GPL and not to allow others to use
@@ -37,10 +37,11 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/errno.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/timer.h>
+#include <linux/proc_fs.h>
 
 #define IN_CARD_SERVICES
 #include <pcmcia/cs_types.h>
@@ -210,7 +211,7 @@ static void handle_erase_timeout(u_long arg)
     retry_erase((erase_busy_t *)arg, MTD_REQ_TIMEOUT);
 }
 
-static void setup_erase_request(client_handle_t handle, eraseq_entry_t *erase)
+static int setup_erase_request(client_handle_t handle, eraseq_entry_t *erase)
 {
     erase_busy_t *busy;
     region_info_t *info;
@@ -228,6 +229,8 @@ static void setup_erase_request(client_handle_t handle, eraseq_entry_t *erase)
 	else {
 	    erase->State = 1;
 	    busy = kmalloc(sizeof(erase_busy_t), GFP_KERNEL);
+	    if (!busy)
+		return CS_GENERAL_FAILURE;
 	    busy->erase = erase;
 	    busy->client = handle;
 	    init_timer(&busy->timeout);
@@ -237,6 +240,7 @@ static void setup_erase_request(client_handle_t handle, eraseq_entry_t *erase)
 	    retry_erase(busy, 0);
 	}
     }
+    return CS_SUCCESS;
 } /* setup_erase_request */
 
 /*======================================================================
@@ -321,7 +325,7 @@ int MTDHelperEntry(int func, void *a1, void *a2)
     
 ======================================================================*/
 
-static void setup_regions(client_handle_t handle, int attr,
+static int setup_regions(client_handle_t handle, int attr,
 			  memory_handle_t *list)
 {
     int i, code, has_jedec, has_geo;
@@ -336,7 +340,7 @@ static void setup_regions(client_handle_t handle, int attr,
 
     code = (attr) ? CISTPL_DEVICE_A : CISTPL_DEVICE;
     if (read_tuple(handle, code, &device) != CS_SUCCESS)
-	return;
+	return CS_GENERAL_FAILURE;
     code = (attr) ? CISTPL_JEDEC_A : CISTPL_JEDEC_C;
     has_jedec = (read_tuple(handle, code, &jedec) == CS_SUCCESS);
     if (has_jedec && (device.ndev != jedec.nid)) {
@@ -359,6 +363,8 @@ static void setup_regions(client_handle_t handle, int attr,
 	if ((device.dev[i].type != CISTPL_DTYPE_NULL) &&
 	    (device.dev[i].size != 0)) {
 	    r = kmalloc(sizeof(*r), GFP_KERNEL);
+	    if (!r)
+		return CS_GENERAL_FAILURE;
 	    r->region_magic = REGION_MAGIC;
 	    r->state = 0;
 	    r->dev_info[0] = '\0';
@@ -383,6 +389,7 @@ static void setup_regions(client_handle_t handle, int attr,
 	}
 	offset += device.dev[i].size;
     }
+    return CS_SUCCESS;
 } /* setup_regions */
 
 /*======================================================================
@@ -416,8 +423,10 @@ int pcmcia_get_first_region(client_handle_t handle, region_info_t *rgn)
     
     if ((handle->Attributes & INFO_MASTER_CLIENT) &&
 	(!(s->state & SOCKET_REGION_INFO))) {
-	setup_regions(handle, 0, &s->c_region);
-	setup_regions(handle, 1, &s->a_region);
+	if (setup_regions(handle, 0, &s->c_region) != CS_SUCCESS)
+	    return CS_GENERAL_FAILURE;
+	if (setup_regions(handle, 1, &s->a_region) != CS_SUCCESS)
+	    return CS_GENERAL_FAILURE;
 	s->state |= SOCKET_REGION_INFO;
     }
 

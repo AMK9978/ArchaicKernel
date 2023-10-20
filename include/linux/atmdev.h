@@ -22,6 +22,13 @@
 			   max cell rate:  353207.547 cells/sec */
 #define ATM_25_PCR	((25600000/8-8000)/54)
 			/* 25 Mbps ATM cell rate (59111) */
+#define ATM_OC12_PCR	(622080000/1080*1040/8/53)
+			/* OC12 link rate: 622080000 bps
+			   SONET overhead: /1080*1040
+			   bits per cell:  /8/53
+			   max cell rate:  1412830.188 cells/sec */
+#define ATM_DS3_PCR	(8000*12)
+			/* DS3: 12 cells in a 125 usec time slot */
 
 #define ATM_PDU_OVHD	0	/* number of bytes to charge against buffer
 				   quota per PDU */
@@ -86,6 +93,17 @@ struct atm_dev_stats {
 					/* query supported loopback modes */
 #define ATM_SETSC	_IOW('a',ATMIOC_SPECIAL+1,int)
 					/* enable or disable single-copy */
+#define ATM_SETBACKEND	_IOW('a',ATMIOC_SPECIAL+2,atm_backend_t)
+					/* set backend handler */
+
+/*
+ * These are backend handkers that can be set via the ATM_SETBACKEND call
+ * above.  In the future we may support dynamic loading of these - for now,
+ * they're just being used to share the ATMIOC_BACKEND ioctls
+ */
+#define ATM_BACKEND_RAW		0	
+#define ATM_BACKEND_PPP		1	/* PPPoATM - RFC2364 */
+#define ATM_BACKEND_BR_2684	2	/* Bridged RFC1483/2684 */
 
 /* for ATM_GETTYPE */
 #define ATM_ITFTYP_LEN	8	/* maximum length of interface type name */

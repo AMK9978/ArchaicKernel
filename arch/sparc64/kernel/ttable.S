@@ -1,12 +1,16 @@
-/* $Id: ttable.S,v 1.31 2000/05/09 17:40:14 davem Exp $
- * ttable.S: Sparc V9 Trap Table(s) with SpitFire extensions.
+/* $Id: ttable.S,v 1.35 2001/09/21 02:14:39 kanoj Exp $
+ * ttable.S: Sparc V9 Trap Table(s) with SpitFire/Cheetah extensions.
  *
- * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
+ * Copyright (C) 1996, 2001 David S. Miller (davem@caip.rutgers.edu)
  */
 
 #include <linux/config.h>
 
-	.globl	sparc64_ttable_tl0, sparc64_ttable_tl1,
+	.globl	sparc64_ttable_tl0, sparc64_ttable_tl1
+	.globl	tl0_fecc, tl1_fecc
+	.globl	tl0_cee, tl1_cee
+	.globl	tl0_iae, tl1_iae
+	.globl	tl0_dae, tl1_dae
 
 sparc64_ttable_tl0:
 tl0_resv000:	BOOT_KERNEL BTRAP(0x1) BTRAP(0x2) BTRAP(0x3)
@@ -22,7 +26,7 @@ tl0_resv018:	BTRAP(0x18) BTRAP(0x19) BTRAP(0x1a) BTRAP(0x1b) BTRAP(0x1c) BTRAP(0
 tl0_resv01e:	BTRAP(0x1e) BTRAP(0x1f)
 tl0_fpdis:	TRAP_NOSAVE(do_fpdis)
 tl0_fpieee:	TRAP_SAVEFPU(do_fpieee)
-tl0_fpother:	TRAP_SAVEFPU(do_fpother)
+tl0_fpother:	TRAP_NOSAVE(do_fpother_check_fitos)
 tl0_tof:	TRAP(do_tof)
 tl0_cwin:	CLEAN_WINDOW
 tl0_div0:	TRAP(do_div0)
@@ -64,7 +68,8 @@ tl0_damiss:
 #include	"dtlb_base.S"
 tl0_daprot:
 #include	"dtlb_prot.S"
-tl0_resv070:	BTRAP(0x70) BTRAP(0x71) BTRAP(0x72) BTRAP(0x73) BTRAP(0x74) BTRAP(0x75)
+tl0_fecc:	BTRAP(0x70)	/* Fast-ECC on Cheetah */
+tl0_resv071:	BTRAP(0x71) BTRAP(0x72) BTRAP(0x73) BTRAP(0x74) BTRAP(0x75)
 tl0_resv076:	BTRAP(0x76) BTRAP(0x77) BTRAP(0x78) BTRAP(0x79) BTRAP(0x7a) BTRAP(0x7b)
 tl0_resv07c:	BTRAP(0x7c) BTRAP(0x7d) BTRAP(0x7e) BTRAP(0x7f)
 tl0_s0n:	SPILL_0_NORMAL
@@ -101,7 +106,7 @@ tl0_f6o:	FILL_6_OTHER
 tl0_f7o:	FILL_7_OTHER
 tl0_sunos:	SUNOS_SYSCALL_TRAP
 tl0_bkpt:	BREAKPOINT_TRAP
-tl0_resv102:	BTRAP(0x102)
+tl0_divz:	TRAP(do_div0)
 tl0_flushw:	FLUSH_WINDOW_TRAP
 tl0_resv104:	BTRAP(0x104) BTRAP(0x105) BTRAP(0x106) BTRAP(0x107)
 		.globl tl0_solaris
@@ -139,12 +144,7 @@ tl0_resv164:	BTRAP(0x164) BTRAP(0x165) BTRAP(0x166) BTRAP(0x167) BTRAP(0x168)
 tl0_resv169:	BTRAP(0x169) BTRAP(0x16a) BTRAP(0x16b) BTRAP(0x16c)
 tl0_linux64:	LINUX_64BIT_SYSCALL_TRAP
 tl0_gsctx:	TRAP(sparc64_get_context) TRAP(sparc64_set_context)
-tl0_resv170:	BTRAP(0x170) BTRAP(0x171) 
-#ifdef CONFIG_EC_FLUSH_TRAP
-					  TRAP(cache_flush_trap)
-#else
-					  BTRAP(0x172)
-#endif
+tl0_resv170:	BTRAP(0x170) BTRAP(0x171) BTRAP(0x172)
 tl0_resv173:	BTRAP(0x173) BTRAP(0x174) BTRAP(0x175) BTRAP(0x176) BTRAP(0x177)
 tl0_resv178:	BTRAP(0x178) BTRAP(0x179) BTRAP(0x17a) BTRAP(0x17b) BTRAP(0x17c)
 tl0_resv17d:	BTRAP(0x17d) BTRAP(0x17e) BTRAP(0x17f)
@@ -203,13 +203,30 @@ tl1_resv05c:	BTRAPTL1(0x5c) BTRAPTL1(0x5d) BTRAPTL1(0x5e) BTRAPTL1(0x5f)
 tl1_ivec:	TRAP_IVEC
 tl1_paw:	TRAPTL1(do_paw_tl1)
 tl1_vaw:	TRAPTL1(do_vaw_tl1)
-tl1_cee:	TRAPTL1_CEE
+
+		/* The grotty trick to save %g1 into current->thread.kernel_cntd0
+		 * is because when we take this trap we could be interrupting trap
+		 * code already using the trap alternate global registers.  It is
+		 * better to corrupt a performance counter than corrupt trap register
+		 * state.  We cross our fingers and pray that this store/load does
+		 * not cause yet another CEE trap.
+		 */
+tl1_cee:	membar	#Sync
+		stx	%g1, [%g6 + AOFF_task_thread + AOFF_thread_kernel_cntd0]
+		ldxa	[%g0] ASI_AFSR, %g1
+		membar	#Sync
+		stxa	%g1, [%g0] ASI_AFSR
+		membar	#Sync
+		ldx	[%g6 + AOFF_task_thread + AOFF_thread_kernel_cntd0], %g1
+		retry
+
 tl1_iamiss:	BTRAPTL1(0x64) BTRAPTL1(0x65) BTRAPTL1(0x66) BTRAPTL1(0x67)
 tl1_damiss:
 #include	"dtlb_backend.S"
 tl1_daprot:
 #include	"dtlb_prot.S"
-tl1_resv070:	BTRAPTL1(0x70) BTRAPTL1(0x71) BTRAPTL1(0x72) BTRAPTL1(0x73)
+tl1_fecc:	BTRAP(0x70)	/* Fast-ECC on Cheetah */
+tl1_resc071:	BTRAPTL1(0x71) BTRAPTL1(0x72) BTRAPTL1(0x73)
 tl1_resv074:	BTRAPTL1(0x74) BTRAPTL1(0x75) BTRAPTL1(0x76) BTRAPTL1(0x77)
 tl1_resv078:	BTRAPTL1(0x78) BTRAPTL1(0x79) BTRAPTL1(0x7a) BTRAPTL1(0x7b)
 tl1_resv07c:	BTRAPTL1(0x7c) BTRAPTL1(0x7d) BTRAPTL1(0x7e) BTRAPTL1(0x7f)

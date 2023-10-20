@@ -113,15 +113,6 @@ put_log_buffer(hysdn_card * card, char *cp)
 }				/* put_log_buffer */
 
 
-/*************************/
-/* dummy file operations */
-/*************************/
-static loff_t
-hysdn_dummy_lseek(struct file *file, loff_t offset, int orig)
-{
-	return -ESPIPE;
-}				/* hysdn_dummy_lseek */
-
 /**********************************/
 /* log file operations and tables */
 /**********************************/
@@ -139,7 +130,7 @@ hysdn_log_write(struct file *file, const char *buf, size_t count, loff_t * off)
 		return (-ESPIPE);
 
 	if ((retval = pof_boot_write(card, buf, count)) < 0)
-		retval = -EFAULT;	/* an error occured */
+		retval = -EFAULT;	/* an error occurred */
 
 	return (retval);
 }				/* hysdn_log_write */
@@ -340,7 +331,7 @@ hysdn_log_poll(struct file *file, poll_table * wait)
 /**************************************************/
 static struct file_operations log_fops =
 {
-	llseek:		hysdn_dummy_lseek,
+	llseek:		no_llseek,
 	read:		hysdn_log_read,
 	write:		hysdn_log_write,
 	poll:		hysdn_log_poll,

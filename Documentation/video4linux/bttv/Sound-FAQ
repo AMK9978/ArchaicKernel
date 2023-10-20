@@ -79,10 +79,12 @@ mux.
 What you have to do is figure out the correct values for gpiomask and
 the audiomux array.  If you have Windows and the drivers four your
 card installed, you might to check out if you can read these registers
-values used by the windows driver.  A tool to do this is available
-from ftp://telepresence.dmem.strath.ac.uk/pub/bt848/winutil (doesn't
-work with bt878 boards according to some reports I received).  You
-might also dig around in the *.ini files of the Windows applications.
+values used by the windows driver.  A tool to do this is available from
+ftp://telepresence.dmem.strath.ac.uk/pub/bt848/winutil, but it does'nt
+work with bt878 boards according to some reports I received.  Another
+one is available from http://www.kki.net.pl/~borgx/bTV.html.
+
+You might also dig around in the *.ini files of the Windows applications.
 You can have a look at the board to see which of the gpio pins are
 connected at all and then start trial-and-error ...
 
@@ -107,6 +109,30 @@ out =	_out_put bits of the data register (BT848_GPIO_DATA),
 in  = 	_in_put bits of the data register,
 	i.e. BT848_GPIO_DATA & ~BT848_GPIO_OUT_EN
 
+
+
+Other elements of the tvcards array
+===================================
+
+If you are trying to make a new card work you might find it useful to
+know what the other elements in the tvcards array are good for:
+
+video_inputs    - # of video inputs the card has
+audio_inputs    - historical cruft, not used any more.
+tuner           - which input is the tuner
+svhs            - which input is svhs (all others are labled composite)
+muxsel          - video mux, input->registervalue mapping
+pll             - same as pll= insmod option
+tuner_type      - same as tuner= insmod option
+*_modulename    - hint whenever some card needs this or that audio
+                  module loaded to work properly.
+has_radio	- whenever this TV card has a radio tuner.
+
+If some config item is specified both from the tvcards array and as
+insmod option, the insmod option takes precedence.
+
+
+
 Good luck,
 
   Gerd
@@ -115,4 +141,4 @@ Good luck,
 PS: If you have a new working entry, mail it to me.
 
 -- 
-Gerd Knorr <kraxel@goldbach.in-berlin.de>
+Gerd Knorr <kraxel@bytesex.org>

@@ -43,7 +43,7 @@
 #include <linux/interrupt.h>
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/config.h>
 #include <linux/init.h>
@@ -137,7 +137,7 @@ struct lance_private {
 };
 
 #ifdef MODULE
-static struct lance_private *root_a2065_dev = NULL;
+static struct lance_private *root_a2065_dev;
 #endif
 
 #define TX_BUFFS_AVAIL ((lp->tx_old<=lp->tx_new)?\
@@ -335,7 +335,9 @@ static int lance_rx (struct net_device *dev)
 					 len, 0);
 			skb->protocol = eth_type_trans (skb, dev);
 			netif_rx (skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
+			lp->stats.rx_bytes += len;
 		}
 
 		/* Return the packet to the pool */
@@ -835,3 +837,4 @@ static void __exit a2065_cleanup(void)
 
 module_init(a2065_probe);
 module_exit(a2065_cleanup);
+MODULE_LICENSE("GPL");

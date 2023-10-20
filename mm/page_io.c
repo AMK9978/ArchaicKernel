@@ -33,7 +33,7 @@
  * that shared pages stay shared while being swapped.
  */
 
-static int rw_swap_page_base(int rw, swp_entry_t entry, struct page *page, int wait)
+static int rw_swap_page_base(int rw, swp_entry_t entry, struct page *page)
 {
 	unsigned long offset;
 	int zones[PAGE_SIZE/512];
@@ -41,11 +41,6 @@ static int rw_swap_page_base(int rw, swp_entry_t entry, struct page *page, int w
 	kdev_t dev = 0;
 	int block_size;
 	struct inode *swapf = 0;
-
-	/* Don't allow too many pending pages in flight.. */
-	if ((rw == WRITE) && atomic_read(&nr_async_pages) >
-			pager_daemon.swap_cluster * (1 << page_cluster))
-		wait = 1;
 
 	if (rw == READ) {
 		ClearPageUptodate(page);
@@ -74,10 +69,6 @@ static int rw_swap_page_base(int rw, swp_entry_t entry, struct page *page, int w
 	} else {
 		return 0;
 	}
- 	if (!wait) {
- 		SetPageDecrAfter(page);
- 		atomic_inc(&nr_async_pages);
- 	}
 
  	/* block_size == PAGE_SIZE/zones_used */
  	brw_page(rw, page, dev, zones, block_size);
@@ -86,14 +77,6 @@ static int rw_swap_page_base(int rw, swp_entry_t entry, struct page *page, int w
  	 * decrementing the page count, and unlocking the page in the
  	 * swap lock map - in the IO completion handler.
  	 */
- 	if (!wait)
- 		return 1;
-
- 	wait_on_page(page);
-	/* This shouldn't happen, but check to be sure. */
-	if (page_count(page) == 0)
-		printk(KERN_ERR "rw_swap_page: page unused while waiting!\n");
-
 	return 1;
 }
 
@@ -104,7 +87,7 @@ static int rw_swap_page_base(int rw, swp_entry_t entry, struct page *page, int w
  *  - it's marked as being swap-cache
  *  - it's associated with the swap inode
  */
-void rw_swap_page(int rw, struct page *page, int wait)
+void rw_swap_page(int rw, struct page *page)
 {
 	swp_entry_t entry;
 
@@ -116,7 +99,7 @@ void rw_swap_page(int rw, struct page *page, int wait)
 		PAGE_BUG(page);
 	if (page->mapping != &swapper_space)
 		PAGE_BUG(page);
-	if (!rw_swap_page_base(rw, entry, page, wait))
+	if (!rw_swap_page_base(rw, entry, page))
 		UnlockPage(page);
 }
 
@@ -125,7 +108,7 @@ void rw_swap_page(int rw, struct page *page, int wait)
  * Therefore we can't use it.  Later when we can remove the need for the
  * lock map and we can reduce the number of functions exported.
  */
-void rw_swap_page_nolock(int rw, swp_entry_t entry, char *buf, int wait)
+void rw_swap_page_nolock(int rw, swp_entry_t entry, char *buf)
 {
 	struct page *page = virt_to_page(buf);
 	
@@ -137,7 +120,8 @@ void rw_swap_page_nolock(int rw, swp_entry_t entry, char *buf, int wait)
 		PAGE_BUG(page);
 	/* needs sync_page to wait I/O completation */
 	page->mapping = &swapper_space;
-	if (!rw_swap_page_base(rw, entry, page, wait))
+	if (!rw_swap_page_base(rw, entry, page))
 		UnlockPage(page);
+	wait_on_page(page);
 	page->mapping = NULL;
 }

@@ -1,4 +1,4 @@
-/* $Id: ioport.c,v 1.42 2000/12/05 00:56:36 anton Exp $
+/* $Id: ioport.c,v 1.45 2001/10/30 04:54:21 davem Exp $
  * ioport.c:  Simple io mapping allocator.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -32,7 +32,7 @@
 #include <linux/types.h>
 #include <linux/ioport.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/pci.h>		/* struct pci_dev */
 #include <linux/proc_fs.h>
 
@@ -225,7 +225,7 @@ _sparc_ioremap(struct resource *res, u32 bus, u32 pa, int sz)
 	 * XXX Playing with implementation details here.
 	 * On sparc64 Ebus has resources with precise boundaries.
 	 * We share drivers with sparc64. Too clever drivers use
-	 * start of a resource instead of a base adress.
+	 * start of a resource instead of a base address.
 	 *
 	 * XXX-2 This may be not valid anymore, clean when
 	 * interface to sbus_ioremap() is resolved.
@@ -703,7 +703,7 @@ void pci_dma_sync_sg(struct pci_dev *hwdev, struct scatterlist *sg, int nents, i
 		}
 	}
 }
-#endif CONFIG_PCI
+#endif /* CONFIG_PCI */
 
 #ifdef CONFIG_PROC_FS
 
@@ -725,7 +725,7 @@ _sparc_io_get_info(char *buf, char **start, off_t fpos, int length, int *eof,
 	return p-buf;
 }
 
-#endif CONFIG_PROC_FS
+#endif /* CONFIG_PROC_FS */
 
 /*
  * This is a version of find_resource and it belongs to kernel/resource.c.

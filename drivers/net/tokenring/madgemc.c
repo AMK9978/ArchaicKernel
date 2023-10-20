@@ -4,7 +4,7 @@
  *  Written 2000 by Adam Fritzler
  *
  *  This software may be used and distributed according to the terms
- *  of the GNU Public License, incorporated herein by reference.
+ *  of the GNU General Public License, incorporated herein by reference.
  *
  *  This driver module supports the following cards:
  *      - Madge Smart 16/4 Ringnode MC16
@@ -17,7 +17,7 @@
  *	16-Jan-00	AF	Created
  *
  */
-static const char *version = "madgemc.c: v0.91 23/01/2000 by Adam Fritzler\n";
+static const char version[] = "madgemc.c: v0.91 23/01/2000 by Adam Fritzler\n";
 
 #include <linux/module.h>
 #include <linux/mca.h>
@@ -61,7 +61,7 @@ struct madgemc_card {
 
 	struct madgemc_card *next;
 };
-static struct madgemc_card *madgemc_card_list = NULL;
+static struct madgemc_card *madgemc_card_list;
 
 
 int madgemc_probe(void);
@@ -155,7 +155,7 @@ static void madgemc_sifwritew(struct net_device *dev, unsigned short val, unsign
 
 int __init madgemc_probe(void)
 {	
-	static int versionprinted = 0;
+	static int versionprinted;
 	struct net_device *dev;
 	struct net_local *tp;
 	struct madgemc_card *card;
@@ -349,7 +349,8 @@ int __init madgemc_probe(void)
 			printk(":%2.2x", dev->dev_addr[i]);
 		printk("\n");
 
-		if (tmsdev_init(dev)) {
+		/* XXX is ISA_MAX_ADDRESS correct here? */
+		if (tmsdev_init(dev, ISA_MAX_ADDRESS, NULL)) {
 			printk("%s: unable to get memory for dev->priv.\n", 
 			       dev->name);
 			return -1;
@@ -362,7 +363,6 @@ int __init madgemc_probe(void)
 		 * they know what they're talking about.  Cut off DMA
 		 * at 16mb.
 		 */
-		tp->dmalimit = ISA_MAX_ADDRESS; /* XXX: ?? */
 		tp->setnselout = madgemc_setnselout_pins;
 		tp->sifwriteb = madgemc_sifwriteb;
 		tp->sifreadb = madgemc_sifreadb;
@@ -383,7 +383,7 @@ int __init madgemc_probe(void)
 			printk("madgemc: register_trdev() returned non-zero.\n");
 			
 			kfree(card);
-			kfree(dev->priv);
+			tmsdev_term(dev);
 			kfree(dev);
 			return -1;
 		}
@@ -526,7 +526,7 @@ unsigned short madgemc_setnselout_pins(struct net_device *dev)
  */
 static void madgemc_setregpage(struct net_device *dev, int page)
 {	
-	static int reg1 = 0;
+	static int reg1;
 
 	reg1 = inb(dev->base_addr + MC_CONTROL_REG1);
 	if ((page == 0) && (reg1 & MC_CONTROL_REG1_SRSX)) {
@@ -783,7 +783,7 @@ void cleanup_module(void)
 		unregister_trdev(dev);
 		release_region(dev->base_addr-MADGEMC_SIF_OFFSET, MADGEMC_IO_EXTENT);
 		free_irq(dev->irq, dev);
-		kfree(dev->priv);
+		tmsdev_term(dev);
 		kfree(dev);
 		this_card = madgemc_card_list;
 		madgemc_card_list = this_card->next;
@@ -792,6 +792,8 @@ void cleanup_module(void)
 	/* unlock_tms380_module(); */
 }
 #endif /* MODULE */
+
+MODULE_LICENSE("GPL");
 
 
 /*
@@ -804,3 +806,4 @@ void cleanup_module(void)
  *  tab-width: 8
  * End:
  */
+

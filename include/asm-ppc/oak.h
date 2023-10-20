@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.oak.h 1.12 10/11/01 13:05:07 trini
+ */
+/*
  *
  *    Copyright (c) 1999 Grant Erickson <grant@lcse.umn.edu>
  *
@@ -14,13 +17,6 @@
 #ifdef __KERNEL__
 #ifndef	__OAK_H__
 #define	__OAK_H__
-
-#include <asm/irq.h>
-
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 #define _IO_BASE	0
 #define _ISA_MEM_BASE	0
@@ -40,11 +36,14 @@ extern "C" {
 
 /* Interrupt assignments fixed by the hardware implementation */
 
-#define	PPC403SPU_RX_INT	AIC_INT4
-#define	PPC403SPU_TX_INT	AIC_INT5
-#define	OAKNET_INT		AIC_INT27
-#define	OAKSERIAL_INT		AIC_INT28
+/* This is annoying kbuild-2.4 problem. -- Tom */
 
+#define	PPC403SPU_RX_INT	4	/* AIC_INT4 */
+#define	PPC403SPU_TX_INT	5	/* AIC_INT5 */
+#define	OAKNET_INT		27	/* AIC_INT27 */
+#define	OAKSERIAL_INT		28	/* AIC_INT28 */
+
+#ifndef __ASSEMBLY__
 /*
  * Data structure defining board information maintained by the boot
  * ROM on IBM's "Oak" evaluation board. An effort has been made to
@@ -61,10 +60,6 @@ typedef struct board_info {
 	unsigned int	 bi_busfreq;		/* Bus speed, in Hz */
 } bd_t;
 
-
-#ifdef __cplusplus
-}
-#endif
-
+#endif /* !__ASSEMBLY__ */
 #endif /* __OAK_H__ */
 #endif /* __KERNEL__ */

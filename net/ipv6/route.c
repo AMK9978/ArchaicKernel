@@ -5,7 +5,7 @@
  *	Authors:
  *	Pedro Roque		<roque@di.fc.ul.pt>	
  *
- *	$Id: route.c,v 1.49 2000/11/03 01:11:58 davem Exp $
+ *	$Id: route.c,v 1.55 2001/09/18 22:29:10 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -785,7 +785,7 @@ int ip6_route_add(struct in6_rtmsg *rtmsg)
 
 install_route:
 	rt->u.dst.pmtu = ipv6_get_mtu(dev);
-	rt->u.dst.advmss = max(rt->u.dst.pmtu - 60, ip6_rt_min_advmss);
+	rt->u.dst.advmss = max_t(unsigned int, rt->u.dst.pmtu - 60, ip6_rt_min_advmss);
 	/* Maximal non-jumbo IPv6 payload is 65535 and corresponding
 	   MSS is 65535 - tcp_header_size. 65535 is also valid and
 	   means: "any MSS, rely only on pmtu discovery"
@@ -892,12 +892,6 @@ void rt6_redirect(struct in6_addr *dest, struct in6_addr *saddr,
 	if (!(rt->rt6i_flags&RTF_GATEWAY))
 		goto out;
 
-#if !defined(CONFIG_IPV6_EUI64) || defined(CONFIG_IPV6_NO_PB)
-	/*
-	 *	During transition gateways have more than
-	 *	one link local address. Certainly, it is violation
-	 *	of basic principles, but it is temporary.
-	 */
 	/*
 	 *	RFC 1970 specifies that redirects should only be
 	 *	accepted if they come from the nexthop to the target.
@@ -929,7 +923,6 @@ void rt6_redirect(struct in6_addr *dest, struct in6_addr *saddr,
 	}
 
 source_ok:
-#endif
 
 	/*
 	 *	We have finally decided to accept it.
@@ -951,7 +944,7 @@ source_ok:
 	nrt->rt6i_nexthop = neigh_clone(neigh);
 	/* Reset pmtu, it may be better */
 	nrt->u.dst.pmtu = ipv6_get_mtu(neigh->dev);
-	nrt->u.dst.advmss = max(nrt->u.dst.pmtu - 60, ip6_rt_min_advmss);
+	nrt->u.dst.advmss = max_t(unsigned int, nrt->u.dst.pmtu - 60, ip6_rt_min_advmss);
 	if (rt->u.dst.advmss > 65535-20)
 		rt->u.dst.advmss = 65535;
 	nrt->rt6i_hoplimit = ipv6_get_hoplimit(neigh->dev);
@@ -1206,7 +1199,7 @@ int ip6_rt_addr_add(struct in6_addr *addr, struct net_device *dev)
 	rt->u.dst.output = ip6_output;
 	rt->rt6i_dev = dev_get_by_name("lo");
 	rt->u.dst.pmtu = ipv6_get_mtu(rt->rt6i_dev);
-	rt->u.dst.advmss = max(rt->u.dst.pmtu - 60, ip6_rt_min_advmss);
+	rt->u.dst.advmss = max_t(unsigned int, rt->u.dst.pmtu - 60, ip6_rt_min_advmss);
 	if (rt->u.dst.advmss > 65535-20)
 		rt->u.dst.advmss = 65535;
 	rt->rt6i_hoplimit = ipv6_get_hoplimit(rt->rt6i_dev);
@@ -1394,9 +1387,10 @@ static int rt6_mtu_change_route(struct rt6_info *rt, void *p_arg)
 	   caused by addrconf/ndisc.
 	*/
 	if (rt->rt6i_dev == arg->dev &&
+	    rt->u.dst.pmtu > arg->mtu &&
 	    !(rt->u.dst.mxlock&(1<<RTAX_MTU)))
 		rt->u.dst.pmtu = arg->mtu;
-	rt->u.dst.advmss = max(arg->mtu - 60, ip6_rt_min_advmss);
+	rt->u.dst.advmss = max_t(unsigned int, arg->mtu - 60, ip6_rt_min_advmss);
 	if (rt->u.dst.advmss > 65535-20)
 		rt->u.dst.advmss = 65535;
 	return 0;

@@ -12,7 +12,7 @@
  * driver probes: io: 0x360,0x300,0x320,0x340 / dma: 3,5,6,7
  *
  * This is an extension to the Linux operating system, and is covered by the
- * same Gnu Public License that covers the Linux-kernel.
+ * same GNU General Public License that covers the Linux-kernel.
  *
  * comments/bugs/suggestions can be sent to:
  *   Michael Hipp
@@ -67,7 +67,7 @@
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -1045,6 +1045,7 @@ static void ni65_recv_intr(struct net_device *dev,int csr0)
 				p->stats.rx_bytes += len;
 				skb->protocol=eth_type_trans(skb,dev);
 				netif_rx(skb);
+				dev->last_rx = jiffies;
 			}
 			else
 			{
@@ -1173,20 +1174,19 @@ static void set_multicast_list(struct net_device *dev)
 }
 
 #ifdef MODULE
-static struct net_device dev_ni65 = {
-	"",	/* "ni6510": device name inserted by net_init.c */
-	0, 0, 0, 0,
-	0x360, 9,	 /* I/O address, IRQ */
-	0, 0, 0, NULL, ni65_probe };
+static struct net_device dev_ni65 = { base_addr: 0x360, irq: 9, init: ni65_probe };
 
 /* set: io,irq,dma or set it when calling insmod */
-static int irq=0;
-static int io=0;
-static int dma=0;
+static int irq;
+static int io;
+static int dma;
 
 MODULE_PARM(irq, "i");
 MODULE_PARM(io, "i");
 MODULE_PARM(dma, "i");
+MODULE_PARM_DESC(irq, "ni6510 IRQ number (ignored for some cards)");
+MODULE_PARM_DESC(io, "ni6510 I/O base address");
+MODULE_PARM_DESC(dma, "ni6510 ISA DMA channel (ignored for some cards)");
 
 int init_module(void)
 {
@@ -1214,6 +1214,7 @@ void cleanup_module(void)
 	dev_ni65.priv = NULL;
 }
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
 
 /*
  * END of ni65.c

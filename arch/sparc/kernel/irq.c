@@ -1,4 +1,4 @@
-/*  $Id: irq.c,v 1.109 2000/08/31 10:00:39 anton Exp $
+/*  $Id: irq.c,v 1.113 2001/07/17 16:17:33 anton Exp $
  *  arch/sparc/kernel/irq.c:  Interrupt request handling routines. On the
  *                            Sparc the IRQ's are basically 'cast in stone'
  *                            and you are supposed to probe the prom's device
@@ -6,9 +6,9 @@
  *
  *  Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  *  Copyright (C) 1995 Miguel de Icaza (miguel@nuclecu.unam.mx)
- *  Copyright (C) 1995 Pete A. Zaitcev (zaitcev@metabyte.com)
+ *  Copyright (C) 1995 Pete A. Zaitcev (zaitcev@yahoo.com)
  *  Copyright (C) 1996 Dave Redman (djhr@tadpole.co.uk)
- *  Copyright (C) 1998-2000 Anton Blanchard (anton@linuxcare.com)
+ *  Copyright (C) 1998-2000 Anton Blanchard (anton@samba.org)
  */
 
 #include <linux/config.h>
@@ -19,7 +19,7 @@
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/init.h>
 #include <linux/smp.h>
@@ -424,6 +424,8 @@ void handler_irq(int irq, struct pt_regs * regs)
 	} while (action);
 	enable_pil_irq(irq);
 	irq_exit(cpu, irq);
+	if (softirq_pending(cpu))
+		do_softirq();
 }
 
 #ifdef CONFIG_BLK_DEV_FD
@@ -439,6 +441,8 @@ void sparc_floppy_irq(int irq, void *dev_id, struct pt_regs *regs)
 	floppy_interrupt(irq, dev_id, regs);
 	irq_exit(cpu, irq);
 	enable_pil_irq(irq);
+	if (softirq_pending(cpu))
+		do_softirq();
 }
 #endif
 

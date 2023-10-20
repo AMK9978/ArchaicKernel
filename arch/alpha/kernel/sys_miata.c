@@ -14,6 +14,7 @@
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/reboot.h>
 
 #include <asm/ptrace.h>
 #include <asm/system.h>
@@ -175,6 +176,19 @@ miata_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 		{   -1,    -1,    -1,    -1,    -1},  /* IdSel 31,  PCI-PCI */
         };
 	const long min_idsel = 3, max_idsel = 20, irqs_per_slot = 5;
+	
+	/* the USB function of the 82c693 has it's interrupt connected to 
+           the 2nd 8259 controller. So we have to check for it first. */
+
+	if((slot == 7) && (PCI_FUNC(dev->devfn) == 3)) {
+		u8 irq=0;
+
+		if(pci_read_config_byte(pci_find_slot(dev->bus->number, dev->devfn & ~(7)), 0x40,&irq)!=PCIBIOS_SUCCESSFUL)
+			return -1;
+		else	
+			return irq;
+	}
+
 	return COMMON_TABLE_LOOKUP;
 }
 
@@ -223,11 +237,21 @@ miata_init_pci(void)
 static void
 miata_kill_arch(int mode)
 {
-	/* Who said DEC engineers have no sense of humor? ;-)  */
-	if (alpha_using_srm) {
-		*(vuip) PYXIS_RESET = 0x0000dead;
-		mb();
+	switch(mode) {
+	case LINUX_REBOOT_CMD_RESTART:
+		/* Who said DEC engineers have no sense of humor? ;-)  */ 
+		if (alpha_using_srm) {
+			*(vuip) PYXIS_RESET = 0x0000dead; 
+			mb(); 
+		}
+		break;
+	case LINUX_REBOOT_CMD_HALT:
+		break;
+	case LINUX_REBOOT_CMD_POWER_OFF:
+		break;
 	}
+
+	halt();
 }
 
 
@@ -245,6 +269,7 @@ struct alpha_machine_vector miata_mv __initmv = {
 	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
 	min_io_address:		DEFAULT_IO_BASE,
 	min_mem_address:	DEFAULT_MEM_BASE,
+	pci_dac_offset:		PYXIS_DAC_OFFSET,
 
 	nr_irqs:		48,
 	device_interrupt:	pyxis_device_interrupt,

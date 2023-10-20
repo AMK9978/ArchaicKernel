@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.residual.h 1.8 08/09/01 09:11:24 trini
+ */
 /* 7/18/95                                                                    */
 /*----------------------------------------------------------------------------*/
 /*      Residual Data header definitions and prototypes                       */
@@ -26,7 +29,7 @@
 /*               Public structures...                                         */
 /*----------------------------------------------------------------------------*/
 
-#include "pnp.h"
+#include <asm/pnp.h>
 
 typedef enum _L1CACHE_TYPE {
   NoneCAC = 0,

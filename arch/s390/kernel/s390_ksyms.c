@@ -5,30 +5,29 @@
  */
 #include <linux/config.h>
 #include <linux/module.h>
-#include <asm/irq.h>
-#include <asm/string.h>
 #include <asm/checksum.h>
-
-/*
- * I/O subsystem
- */
-EXPORT_SYMBOL(halt_IO);
-EXPORT_SYMBOL(do_IO);
-EXPORT_SYMBOL(resume_IO);
-EXPORT_SYMBOL(ioinfo);
-EXPORT_SYMBOL(get_dev_info_by_irq);
-EXPORT_SYMBOL(get_dev_info_by_devno);
-EXPORT_SYMBOL(get_irq_by_devno);
-EXPORT_SYMBOL(get_devno_by_irq);
-EXPORT_SYMBOL(get_irq_first);
-EXPORT_SYMBOL(get_irq_next);
+#include <asm/delay.h>
+#include <asm/setup.h>
+#if CONFIG_IP_MULTICAST
+#include <net/arp.h>
+#endif
 
 /*
  * memory management
  */
-EXPORT_SYMBOL(_oi_bitmap);
-EXPORT_SYMBOL(_ni_bitmap);
-EXPORT_SYMBOL(_zb_findmap);
+EXPORT_SYMBOL_NOVERS(_oi_bitmap);
+EXPORT_SYMBOL_NOVERS(_ni_bitmap);
+EXPORT_SYMBOL_NOVERS(_zb_findmap);
+EXPORT_SYMBOL_NOVERS(__copy_from_user_fixup);
+EXPORT_SYMBOL_NOVERS(__copy_to_user_fixup);
+
+/*
+ * semaphore ops
+ */
+EXPORT_SYMBOL(__up);
+EXPORT_SYMBOL(__down);
+EXPORT_SYMBOL(__down_interruptible);
+EXPORT_SYMBOL(__down_trylock);
 
 /*
  * string functions
@@ -36,6 +35,7 @@ EXPORT_SYMBOL(_zb_findmap);
 EXPORT_SYMBOL_NOVERS(memcmp);
 EXPORT_SYMBOL_NOVERS(memset);
 EXPORT_SYMBOL_NOVERS(memmove);
+EXPORT_SYMBOL_NOVERS(strlen);
 EXPORT_SYMBOL_NOVERS(strchr);
 EXPORT_SYMBOL_NOVERS(strcmp);
 EXPORT_SYMBOL_NOVERS(strncat);
@@ -43,22 +43,19 @@ EXPORT_SYMBOL_NOVERS(strncmp);
 EXPORT_SYMBOL_NOVERS(strncpy);
 EXPORT_SYMBOL_NOVERS(strnlen);
 EXPORT_SYMBOL_NOVERS(strrchr);
+EXPORT_SYMBOL_NOVERS(strstr);
 EXPORT_SYMBOL_NOVERS(strtok);
 EXPORT_SYMBOL_NOVERS(strpbrk);
 
 /*
  * misc.
  */
-#ifdef CONFIG_SMP
-#include <asm/smplock.h>
-EXPORT_SYMBOL(__global_cli);
-EXPORT_SYMBOL(__global_sti);
-EXPORT_SYMBOL(__global_save_flags);
-EXPORT_SYMBOL(__global_restore_flags);
-EXPORT_SYMBOL(global_bh_lock);
-EXPORT_SYMBOL(kernel_flag);
-#endif
+EXPORT_SYMBOL(machine_flags);
+EXPORT_SYMBOL(__udelay);
 EXPORT_SYMBOL(kernel_thread);
 EXPORT_SYMBOL(csum_fold);
+EXPORT_SYMBOL(console_mode);
+EXPORT_SYMBOL(console_device);
+EXPORT_SYMBOL_NOVERS(do_call_softirq);
 
 

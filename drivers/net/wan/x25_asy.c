@@ -42,7 +42,9 @@ typedef struct x25_ctrl {
 static x25_asy_ctrl_t	**x25_asy_ctrls = NULL;
 
 int x25_asy_maxdev = SL_NRUNIT;		/* Can be overridden with insmod! */
+
 MODULE_PARM(x25_asy_maxdev, "i");
+MODULE_LICENSE("GPL");
 
 static struct tty_ldisc	x25_ldisc;
 
@@ -874,8 +876,6 @@ int x25_asy_init(struct net_device *dev)
 	dev->type		= ARPHRD_X25;
 	dev->tx_queue_len	= 10;
 
-	dev_init_buffers(dev);
-	
 	/* New-style flags. */
 	dev->flags		= IFF_NOARP;
 

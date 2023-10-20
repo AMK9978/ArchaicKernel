@@ -14,12 +14,11 @@
 
 static void arch_idle(void)
 {
-        while (!current->need_resched && !hlt_counter) {
-		cpu_do_idle(IDLE_WAIT_SLOW);
-	}
+	/* fixme: this needs to be cleaned up (converted from ASM code) --rmk */
+	*(unsigned long *)(IO_BASE + 0x50004) = 1;	/* idle mode */
 }
 
-extern inline void arch_reset(char mode)
+static inline void arch_reset(char mode)
 {
 	if (mode == 's') {
 		cpu_reset(0);

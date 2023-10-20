@@ -273,6 +273,7 @@ static struct ip_tunnel * ipgre_tunnel_locate(struct ip_tunnel_parm *parms, int 
 	dev->init = ipgre_tunnel_init;
 	dev->features |= NETIF_F_DYNALLOC;
 	memcpy(&nt->parms, parms, sizeof(*parms));
+	nt->parms.name[IFNAMSIZ-1] = '\0';
 	strcpy(dev->name, nt->parms.name);
 	if (dev->name[0] == 0) {
 		int i;
@@ -283,7 +284,7 @@ static struct ip_tunnel * ipgre_tunnel_locate(struct ip_tunnel_parm *parms, int 
 		}
 		if (i==100)
 			goto failed;
-		memcpy(parms->name, dev->name, IFNAMSIZ);
+		memcpy(nt->parms.name, dev->name, IFNAMSIZ);
 	}
 	if (register_netdevice(dev) < 0)
 		goto failed;
@@ -313,7 +314,7 @@ static void ipgre_tunnel_uninit(struct net_device *dev)
 }
 
 
-void ipgre_err(struct sk_buff *skb, unsigned char *dp, int len)
+void ipgre_err(struct sk_buff *skb, u32 info)
 {
 #ifndef I_WISH_WORLD_WERE_PERFECT
 
@@ -330,8 +331,8 @@ void ipgre_err(struct sk_buff *skb, unsigned char *dp, int len)
    by themself???
  */
 
-	struct iphdr *iph = (struct iphdr*)dp;
-	u16	     *p = (u16*)(dp+(iph->ihl<<2));
+	struct iphdr *iph = (struct iphdr*)skb->data;
+	u16	     *p = (u16*)(skb->data+(iph->ihl<<2));
 	int grehlen = (iph->ihl<<2) + 4;
 	int type = skb->h.icmph->type;
 	int code = skb->h.icmph->code;
@@ -350,7 +351,7 @@ void ipgre_err(struct sk_buff *skb, unsigned char *dp, int len)
 	}
 
 	/* If only 8 bytes returned, keyed message will be dropped here */
-	if (len < grehlen)
+	if (skb_headlen(skb) < grehlen)
 		return;
 
 	switch (type) {
@@ -547,28 +548,31 @@ static inline void ipgre_ecn_decapsulate(struct iphdr *iph, struct sk_buff *skb)
 static inline u8
 ipgre_ecn_encapsulate(u8 tos, struct iphdr *old_iph, struct sk_buff *skb)
 {
-#ifdef CONFIG_INET_ECN
 	u8 inner = 0;
 	if (skb->protocol == __constant_htons(ETH_P_IP))
 		inner = old_iph->tos;
 	else if (skb->protocol == __constant_htons(ETH_P_IPV6))
 		inner = ip6_get_dsfield((struct ipv6hdr*)old_iph);
 	return INET_ECN_encapsulate(tos, inner);
-#else
-	return tos;
-#endif
 }
 
-int ipgre_rcv(struct sk_buff *skb, unsigned short len)
+int ipgre_rcv(struct sk_buff *skb)
 {
-	struct iphdr *iph = skb->nh.iph;
-	u8     *h = skb->h.raw;
-	u16    flags = *(u16*)h;
+	struct iphdr *iph;
+	u8     *h;
+	u16    flags;
 	u16    csum = 0;
 	u32    key = 0;
 	u32    seqno = 0;
 	struct ip_tunnel *tunnel;
 	int    offset = 4;
+
+	if (!pskb_may_pull(skb, 16))
+		goto drop_nolock;
+
+	iph = skb->nh.iph;
+	h = skb->data;
+	flags = *(u16*)h;
 
 	if (flags&(GRE_CSUM|GRE_KEY|GRE_ROUTING|GRE_SEQ|GRE_VERSION)) {
 		/* - Version must be 0.
@@ -578,7 +582,16 @@ int ipgre_rcv(struct sk_buff *skb, unsigned short len)
 			goto drop_nolock;
 
 		if (flags&GRE_CSUM) {
-			csum = ip_compute_csum(h, len);
+			if (skb->ip_summed == CHECKSUM_HW) {
+				csum = (u16)csum_fold(skb->csum);
+				if (csum)
+					skb->ip_summed = CHECKSUM_NONE;
+			}
+			if (skb->ip_summed == CHECKSUM_NONE) {
+				skb->csum = skb_checksum(skb, 0, skb->len, 0);
+				skb->ip_summed = CHECKSUM_HW;
+				csum = (u16)csum_fold(skb->csum);
+			}
 			offset += 4;
 		}
 		if (flags&GRE_KEY) {
@@ -594,9 +607,11 @@ int ipgre_rcv(struct sk_buff *skb, unsigned short len)
 	read_lock(&ipgre_lock);
 	if ((tunnel = ipgre_tunnel_lookup(iph->saddr, iph->daddr, key)) != NULL) {
 		skb->mac.raw = skb->nh.raw;
-		skb->nh.raw = skb_pull(skb, h + offset - skb->data);
+		skb->nh.raw = __pskb_pull(skb, offset);
 		memset(&(IPCB(skb)->opt), 0, sizeof(struct ip_options));
-		skb->ip_summed = 0;
+		if (skb->ip_summed == CHECKSUM_HW)
+			skb->csum = csum_sub(skb->csum,
+					     csum_partial(skb->mac.raw, skb->nh.raw-skb->mac.raw, 0));
 		skb->protocol = *(u16*)(h + 2);
 		skb->pkt_type = PACKET_HOST;
 #ifdef CONFIG_NET_IPGRE_BROADCAST
@@ -992,6 +1007,7 @@ ipgre_tunnel_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd)
 			err = -EPERM;
 			if (t == &ipgre_fb_tunnel)
 				goto done;
+			dev = t->dev;
 		}
 		err = unregister_netdevice(dev);
 		break;
@@ -1129,8 +1145,6 @@ static void ipgre_tunnel_init_gen(struct net_device *dev)
 	dev->do_ioctl		= ipgre_tunnel_ioctl;
 	dev->change_mtu		= ipgre_tunnel_change_mtu;
 
-	dev_init_buffers(dev);
-
 	dev->type		= ARPHRD_IPGRE;
 	dev->hard_header_len 	= LL_MAX_HEADER + sizeof(struct iphdr) + 4;
 	dev->mtu		= 1500 - sizeof(struct iphdr) - 4;
@@ -1263,14 +1277,7 @@ int __init ipgre_init(void)
 	printk(KERN_INFO "GRE over IPv4 tunneling driver\n");
 
 	ipgre_fb_tunnel_dev.priv = (void*)&ipgre_fb_tunnel;
-#ifdef MODULE
 	register_netdev(&ipgre_fb_tunnel_dev);
-#else
-	rtnl_lock();
-	register_netdevice(&ipgre_fb_tunnel_dev);
-	rtnl_unlock();
-#endif
-
 	inet_add_protocol(&ipgre_protocol);
 	return 0;
 }
@@ -1286,3 +1293,4 @@ void cleanup_module(void)
 }
 
 #endif
+MODULE_LICENSE("GPL");

@@ -1,12 +1,12 @@
 /******************************************************************************
  *
  * Module Name: evrgnini- ACPI Address_space (Op_region) init
- *              $Revision: 31 $
+ *              $Revision: 48 $
  *
  *****************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -30,11 +30,11 @@
 #include "acinterp.h"
 #include "amlcode.h"
 
-#define _COMPONENT          EVENT_HANDLING
+#define _COMPONENT          ACPI_EVENTS
 	 MODULE_NAME         ("evrgnini")
 
 
-/*****************************************************************************
+/*******************************************************************************
  *
  * FUNCTION:    Acpi_ev_system_memory_region_setup
  *
@@ -47,37 +47,39 @@
  *
  * DESCRIPTION: Do any prep work for region handling, a nop for now
  *
- ****************************************************************************/
+ ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_ev_system_memory_region_setup (
-	ACPI_HANDLE             handle,
+	acpi_handle             handle,
 	u32                     function,
 	void                    *handler_context,
 	void                    **region_context)
 {
+	FUNCTION_TRACE ("Ev_system_memory_region_setup");
+
 
 	if (function == ACPI_REGION_DEACTIVATE) {
 		if (*region_context) {
-			acpi_cm_free (*region_context);
+			ACPI_MEM_FREE (*region_context);
 			*region_context = NULL;
 		}
-		return (AE_OK);
+		return_ACPI_STATUS (AE_OK);
 	}
 
 
 	/* Activate.  Create a new context */
 
-	*region_context = acpi_cm_callocate (sizeof (MEM_HANDLER_CONTEXT));
+	*region_context = ACPI_MEM_CALLOCATE (sizeof (acpi_mem_space_context));
 	if (!(*region_context)) {
-		return (AE_NO_MEMORY);
+		return_ACPI_STATUS (AE_NO_MEMORY);
 	}
 
-	return (AE_OK);
+	return_ACPI_STATUS (AE_OK);
 }
 
 
-/*****************************************************************************
+/*******************************************************************************
  *
  * FUNCTION:    Acpi_ev_io_space_region_setup
  *
@@ -90,15 +92,18 @@ acpi_ev_system_memory_region_setup (
  *
  * DESCRIPTION: Do any prep work for region handling
  *
- ****************************************************************************/
+ ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_ev_io_space_region_setup (
-	ACPI_HANDLE             handle,
+	acpi_handle             handle,
 	u32                     function,
 	void                    *handler_context,
 	void                    **region_context)
 {
+	FUNCTION_TRACE ("Ev_io_space_region_setup");
+
+
 	if (function == ACPI_REGION_DEACTIVATE) {
 		*region_context = NULL;
 	}
@@ -106,11 +111,11 @@ acpi_ev_io_space_region_setup (
 		*region_context = handler_context;
 	}
 
-	return (AE_OK);
+	return_ACPI_STATUS (AE_OK);
 }
 
 
-/*****************************************************************************
+/*******************************************************************************
  *
  * FUNCTION:    Acpi_ev_pci_config_region_setup
  *
@@ -125,48 +130,53 @@ acpi_ev_io_space_region_setup (
  *
  * MUTEX:       Assumes namespace is not locked
  *
- ****************************************************************************/
+ ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_ev_pci_config_region_setup (
-	ACPI_HANDLE             handle,
+	acpi_handle             handle,
 	u32                     function,
 	void                    *handler_context,
 	void                    **region_context)
 {
-	ACPI_STATUS             status = AE_OK;
-	ACPI_INTEGER            temp;
-	PCI_HANDLER_CONTEXT     *pci_context = *region_context;
-	ACPI_OPERAND_OBJECT     *handler_obj;
-	ACPI_NAMESPACE_NODE     *node;
-	ACPI_OPERAND_OBJECT     *region_obj = (ACPI_OPERAND_OBJECT *) handle;
-	DEVICE_ID               object_hID;
+	acpi_status             status = AE_OK;
+	acpi_integer            temp;
+	acpi_pci_id             *pci_id = *region_context;
+	acpi_operand_object     *handler_obj;
+	acpi_namespace_node     *node;
+	acpi_operand_object     *region_obj = (acpi_operand_object *) handle;
+	acpi_device_id          object_hID;
+
+
+	FUNCTION_TRACE ("Ev_pci_config_region_setup");
+
 
 	handler_obj = region_obj->region.addr_handler;
-
 	if (!handler_obj) {
 		/*
 		 *  No installed handler. This shouldn't happen because the dispatch
 		 *  routine checks before we get here, but we check again just in case.
 		 */
-		return(AE_NOT_EXIST);
+		ACPI_DEBUG_PRINT ((ACPI_DB_OPREGION,
+			"Attempting to init a region %p, with no handler\n", region_obj));
+		return_ACPI_STATUS (AE_NOT_EXIST);
 	}
 
 	if (function == ACPI_REGION_DEACTIVATE) {
-		if (pci_context) {
-			acpi_cm_free (pci_context);
+		if (pci_id) {
+			ACPI_MEM_FREE (pci_id);
 			*region_context = NULL;
 		}
 
-		return (status);
+		return_ACPI_STATUS (status);
 	}
 
 
 	/* Create a new context */
 
-	pci_context = acpi_cm_callocate (sizeof(PCI_HANDLER_CONTEXT));
-	if (!pci_context) {
-		return (AE_NO_MEMORY);
+	pci_id = ACPI_MEM_CALLOCATE (sizeof (acpi_pci_id));
+	if (!pci_id) {
+		return_ACPI_STATUS (AE_NO_MEMORY);
 	}
 
 	/*
@@ -178,23 +188,20 @@ acpi_ev_pci_config_region_setup (
 	 *  First get device and function numbers from the _ADR object
 	 *  in the parent's scope.
 	 */
-	ACPI_ASSERT(region_obj->region.node);
-
 	node = acpi_ns_get_parent_object (region_obj->region.node);
 
 
 	/* Acpi_evaluate the _ADR object */
 
-	status = acpi_cm_evaluate_numeric_object (METHOD_NAME__ADR, node, &temp);
+	status = acpi_ut_evaluate_numeric_object (METHOD_NAME__ADR, node, &temp);
+
 	/*
 	 *  The default is zero, since the allocation above zeroed the data, just
 	 *  do nothing on failures.
 	 */
 	if (ACPI_SUCCESS (status)) {
-		/*
-		 *  Got it..
-		 */
-		pci_context->dev_func = (u32) temp;
+		pci_id->device = HIWORD (temp);
+		pci_id->function = LOWORD (temp);
 	}
 
 	/*
@@ -215,50 +222,110 @@ acpi_ev_pci_config_region_setup (
 		 * Node is currently the parent object
 		 */
 		while (node != acpi_gbl_root_node) {
-			status = acpi_cm_execute_HID(node, &object_hID);
-
+			status = acpi_ut_execute_HID (node, &object_hID);
 			if (ACPI_SUCCESS (status)) {
-				if (!(STRNCMP(object_hID.buffer, PCI_ROOT_HID_STRING,
-						   sizeof (PCI_ROOT_HID_STRING))))
-				{
-					acpi_install_address_space_handler(node,
-							   ADDRESS_SPACE_PCI_CONFIG,
+				if (!(STRNCMP (object_hID.buffer, PCI_ROOT_HID_STRING,
+						   sizeof (PCI_ROOT_HID_STRING)))) {
+					acpi_install_address_space_handler (node,
+							   ACPI_ADR_SPACE_PCI_CONFIG,
 							   ACPI_DEFAULT_HANDLER, NULL, NULL);
-
 					break;
 				}
 			}
 
-			node = acpi_ns_get_parent_object(node);
+			node = acpi_ns_get_parent_object (node);
 		}
 	}
 	else {
 		node = handler_obj->addr_handler.node;
 	}
 
-	status = acpi_cm_evaluate_numeric_object (METHOD_NAME__SEG, node, &temp);
+	/*
+	 * The PCI segment number comes from the _SEG method
+	 */
+	status = acpi_ut_evaluate_numeric_object (METHOD_NAME__SEG, node, &temp);
 	if (ACPI_SUCCESS (status)) {
-		/*
-		 *  Got it..
-		 */
-		pci_context->seg = (u32) temp;
+		pci_id->segment = LOWORD (temp);
 	}
 
-	status = acpi_cm_evaluate_numeric_object (METHOD_NAME__BBN, node, &temp);
+	/*
+	 * The PCI bus number comes from the _BBN method
+	 */
+	status = acpi_ut_evaluate_numeric_object (METHOD_NAME__BBN, node, &temp);
 	if (ACPI_SUCCESS (status)) {
-		/*
-		 *  Got it..
-		 */
-		pci_context->bus = (u32) temp;
+		pci_id->bus = LOWORD (temp);
 	}
 
-	*region_context = pci_context;
-
-	return (AE_OK);
+	*region_context = pci_id;
+	return_ACPI_STATUS (AE_OK);
 }
 
 
-/*****************************************************************************
+/*******************************************************************************
+ *
+ * FUNCTION:    Acpi_ev_pci_bar_region_setup
+ *
+ * PARAMETERS:  Region_obj          - region we are interested in
+ *              Function            - start or stop
+ *              Handler_context     - Address space handler context
+ *              Region_context      - Region specific context
+ *
+ * RETURN:      Status
+ *
+ * DESCRIPTION: Do any prep work for region handling
+ *
+ * MUTEX:       Assumes namespace is not locked
+ *
+ ******************************************************************************/
+
+acpi_status
+acpi_ev_pci_bar_region_setup (
+	acpi_handle             handle,
+	u32                     function,
+	void                    *handler_context,
+	void                    **region_context)
+{
+
+	FUNCTION_TRACE ("Ev_pci_bar_region_setup");
+
+
+	return_ACPI_STATUS (AE_OK);
+}
+
+
+/*******************************************************************************
+ *
+ * FUNCTION:    Acpi_ev_cmos_region_setup
+ *
+ * PARAMETERS:  Region_obj          - region we are interested in
+ *              Function            - start or stop
+ *              Handler_context     - Address space handler context
+ *              Region_context      - Region specific context
+ *
+ * RETURN:      Status
+ *
+ * DESCRIPTION: Do any prep work for region handling
+ *
+ * MUTEX:       Assumes namespace is not locked
+ *
+ ******************************************************************************/
+
+acpi_status
+acpi_ev_cmos_region_setup (
+	acpi_handle             handle,
+	u32                     function,
+	void                    *handler_context,
+	void                    **region_context)
+{
+
+	FUNCTION_TRACE ("Ev_cmos_region_setup");
+
+
+	return_ACPI_STATUS (AE_OK);
+}
+
+
+/*******************************************************************************
  *
  * FUNCTION:    Acpi_ev_default_region_setup
  *
@@ -271,15 +338,18 @@ acpi_ev_pci_config_region_setup (
  *
  * DESCRIPTION: Do any prep work for region handling
  *
- ****************************************************************************/
+ ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_ev_default_region_setup (
-	ACPI_HANDLE             handle,
+	acpi_handle             handle,
 	u32                     function,
 	void                    *handler_context,
 	void                    **region_context)
 {
+	FUNCTION_TRACE ("Ev_default_region_setup");
+
+
 	if (function == ACPI_REGION_DEACTIVATE) {
 		*region_context = NULL;
 	}
@@ -287,11 +357,11 @@ acpi_ev_default_region_setup (
 		*region_context = handler_context;
 	}
 
-	return (AE_OK);
+	return_ACPI_STATUS (AE_OK);
 }
 
 
-/******************************************************************************
+/*******************************************************************************
  *
  * FUNCTION:    Acpi_ev_initialize_region
  *
@@ -307,30 +377,31 @@ acpi_ev_default_region_setup (
  *
  *              This also performs address space specific intialization.  For
  *              example, PCI regions must have an _ADR object that contains
- *              a PCI address in the scope of the defintion.  This address is
+ *              a PCI address in the scope of the definition.  This address is
  *              required to perform an access to PCI config space.
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_ev_initialize_region (
-	ACPI_OPERAND_OBJECT     *region_obj,
+	acpi_operand_object     *region_obj,
 	u8                      acpi_ns_locked)
 {
-	ACPI_OPERAND_OBJECT    *handler_obj;
-	ACPI_OPERAND_OBJECT    *obj_desc;
-	ACPI_ADDRESS_SPACE_TYPE space_id;
-	ACPI_NAMESPACE_NODE    *node;
-	ACPI_STATUS             status;
-	ACPI_NAMESPACE_NODE    *method_node;
-	ACPI_NAME              *reg_name_ptr = (ACPI_NAME *) METHOD_NAME__REG;
+	acpi_operand_object     *handler_obj;
+	acpi_operand_object     *obj_desc;
+	ACPI_ADR_SPACE_TYPE     space_id;
+	acpi_namespace_node     *node;
+	acpi_status             status;
+	acpi_namespace_node     *method_node;
+	acpi_name               *reg_name_ptr = (acpi_name *) METHOD_NAME__REG;
+
+
+	FUNCTION_TRACE_U32 ("Ev_initialize_region", acpi_ns_locked);
 
 
 	if (!region_obj) {
-		return (AE_BAD_PARAMETER);
+		return_ACPI_STATUS (AE_BAD_PARAMETER);
 	}
-
-	ACPI_ASSERT(region_obj->region.node);
 
 	node = acpi_ns_get_parent_object (region_obj->region.node);
 	space_id = region_obj->region.space_id;
@@ -362,13 +433,12 @@ acpi_ev_initialize_region (
 		 *  Check to see if a handler exists
 		 */
 		handler_obj = NULL;
-		obj_desc = acpi_ns_get_attached_object ((ACPI_HANDLE) node);
+		obj_desc = acpi_ns_get_attached_object (node);
 		if (obj_desc) {
 			/*
 			 *  can only be a handler if the object exists
 			 */
-			switch (node->type)
-			{
+			switch (node->type) {
 			case ACPI_TYPE_DEVICE:
 
 				handler_obj = obj_desc->device.addr_handler;
@@ -391,11 +461,16 @@ acpi_ev_initialize_region (
 				 *  see if it has the type we want
 				 */
 				if (handler_obj->addr_handler.space_id == space_id) {
+					ACPI_DEBUG_PRINT ((ACPI_DB_OPREGION,
+						"Found handler %p for region %p in obj %p\n",
+						handler_obj, region_obj, obj_desc));
+
 					/*
 					 *  Found it! Now update the region and the handler
 					 */
-					acpi_ev_associate_region_and_handler (handler_obj, region_obj, acpi_ns_locked);
-					return (AE_OK);
+					acpi_ev_associate_region_and_handler (handler_obj, region_obj,
+							acpi_ns_locked);
+					return_ACPI_STATUS (AE_OK);
 				}
 
 				handler_obj = handler_obj->addr_handler.next;
@@ -414,6 +489,10 @@ acpi_ev_initialize_region (
 	/*
 	 *  If we get here, there is no handler for this region
 	 */
-	return (AE_NOT_EXIST);
+	ACPI_DEBUG_PRINT ((ACPI_DB_OPREGION,
+		"No handler for Region_type %s(%X) (Region_obj %p)\n",
+		acpi_ut_get_region_name (space_id), space_id, region_obj));
+
+	return_ACPI_STATUS (AE_NOT_EXIST);
 }
 

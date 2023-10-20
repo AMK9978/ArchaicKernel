@@ -6,11 +6,12 @@
 	Director, National Security Agency.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
-	The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-	Center of Excellence in Space Data and Information Sciences
-	   Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
 
 	This is a driver for WD8003 and WD8013 "compatible" ethercards.
 
@@ -24,7 +25,7 @@
 
 */
 
-static const char *version =
+static const char version[] =
 	"wd.c:v1.10 9/23/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 #include <linux/module.h>
@@ -126,7 +127,7 @@ static int __init wd_probe1(struct net_device *dev, int ioaddr)
 	int ancient = 0;			/* An old card without config registers. */
 	int word16 = 0;				/* 0 = 8 bit, 1 = 16 bit */
 	const char *model_name;
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 
 	for (i = 0; i < 8; i++)
 		checksum += inb(ioaddr + 8 + i);
@@ -449,6 +450,11 @@ MODULE_PARM(io, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
 MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
 MODULE_PARM(mem_end, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
+MODULE_PARM_DESC(io, "WD80x3 I/O base address(es)");
+MODULE_PARM_DESC(irq, "WD80x3 IRQ number(s) (ignored for PureData boards)");
+MODULE_PARM_DESC(mem, "WD80x3 memory base address(es)(ignored for PureData boards)");
+MODULE_PARM_DESC(mem_end, "WD80x3 memory end address(es)");
+MODULE_LICENSE("GPL");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */

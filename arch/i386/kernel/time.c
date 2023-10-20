@@ -178,6 +178,15 @@ static unsigned long do_slow_gettimeoffset(void)
  	jiffies_t = jiffies;
 
 	count |= inb_p(0x40) << 8;
+	
+        /* VIA686a test code... reset the latch if count > max + 1 */
+        if (count > LATCH) {
+                outb_p(0x34, 0x43);
+                outb_p(LATCH & 0xff, 0x40);
+                outb(LATCH >> 8, 0x40);
+                count = LATCH - 1;
+        }
+	
 	spin_unlock(&i8253_lock);
 
 	/*
@@ -413,7 +422,7 @@ static inline void do_timer_interrupt(int irq, void *dev_id, struct pt_regs *reg
 	if (!user_mode(regs))
 		x86_do_profile(regs->eip);
 #else
-	if (!smp_found_config)
+	if (!using_apic_timer)
 		smp_local_timer_interrupt(regs);
 #endif
 
@@ -510,6 +519,7 @@ unsigned long get_cmos_time(void)
 	unsigned int year, mon, day, hour, min, sec;
 	int i;
 
+	spin_lock(&rtc_lock);
 	/* The Linux interpretation of the CMOS clock register contents:
 	 * When the Update-In-Progress (UIP) flag goes from 1 to 0, the
 	 * RTC registers show the second which has precisely just started.
@@ -539,6 +549,7 @@ unsigned long get_cmos_time(void)
 	    BCD_TO_BIN(mon);
 	    BCD_TO_BIN(year);
 	  }
+	spin_unlock(&rtc_lock);
 	if ((year += 1900) < 1970)
 		year += 100;
 	return mktime(year, mon, day, hour, min, sec);

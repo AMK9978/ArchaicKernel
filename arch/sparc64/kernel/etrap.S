@@ -1,4 +1,4 @@
-/* $Id: etrap.S,v 1.43 2000/03/29 09:55:30 davem Exp $
+/* $Id: etrap.S,v 1.45 2001/09/07 21:04:40 kanoj Exp $
  * etrap.S: Preparing for entry into the kernel on Sparc V9.
  *
  * Copyright (C) 1996, 1997 David S. Miller (davem@caip.rutgers.edu)
@@ -11,8 +11,9 @@
 #include <asm/page.h>
 #include <asm/spitfire.h>
 #include <asm/head.h>
+#include <asm/processor.h>
 
-#define		TASK_REGOFF		((PAGE_SIZE<<1)-TRACEREG_SZ-REGWIN_SZ)
+#define		TASK_REGOFF		(THREAD_SIZE-TRACEREG_SZ-REGWIN_SZ)
 #define		ETRAP_PSTATE1		(PSTATE_RMO | PSTATE_PRIV)
 #define		ETRAP_PSTATE2		(PSTATE_RMO | PSTATE_PEF | PSTATE_PRIV | PSTATE_IE)
 
@@ -186,3 +187,5 @@ scetrap:	rdpr	%pil, %g2						! Single 	Group
 		nop
 
 #undef TASK_REGOFF
+#undef ETRAP_PSTATE1
+#undef ETRAP_PSTATE2

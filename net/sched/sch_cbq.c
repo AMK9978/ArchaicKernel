@@ -282,6 +282,7 @@ cbq_classify(struct sk_buff *skb, struct Qdisc *sch)
 		case TC_POLICE_SHOT:
 			return NULL;
 		default:
+			break;
 		}
 #endif
 		if (cl->level == 0)
@@ -506,7 +507,7 @@ static void cbq_ovl_classic(struct cbq_class *cl)
 			}
 		}
 
-		q->wd_expires = delay;
+		q->wd_expires = base_delay;
 	}
 }
 
@@ -1244,8 +1245,10 @@ static int cbq_drop(struct Qdisc* sch)
 
 		cl = cl_head;
 		do {
-			if (cl->q->ops->drop && cl->q->ops->drop(cl->q))
+			if (cl->q->ops->drop && cl->q->ops->drop(cl->q)) {
+				sch->q.qlen--;
 				return 1;
+			}
 		} while ((cl = cl->next_alive) != cl_head);
 	}
 	return 0;
@@ -1740,9 +1743,13 @@ cbq_destroy(struct Qdisc* sch)
 	}
 
 	for (h = 0; h < 16; h++) {
-		for (cl = q->classes[h]; cl; cl = cl->next)
+		struct cbq_class *next;
+
+		for (cl = q->classes[h]; cl; cl = next) {
+			next = cl->next;
 			if (cl != &q->link)
 				cbq_destroy_class(cl);
+		}
 	}
 
 	qdisc_put_rtab(q->link.R_tab);
@@ -2113,3 +2120,4 @@ void cleanup_module(void)
 	unregister_qdisc(&cbq_qdisc_ops);
 }
 #endif
+MODULE_LICENSE("GPL");

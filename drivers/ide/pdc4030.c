@@ -367,7 +367,7 @@ read_next:
 #ifdef DEBUG_READ
 			printk(KERN_DEBUG "%s: promise_read: waiting for"
 			       "interrupt\n", drive->name);
-#endif 
+#endif
 			return ide_started;
 		}
 		printk(KERN_ERR "%s: Eeek! promise_read_intr: sectors left "
@@ -445,9 +445,9 @@ static ide_startstop_t promise_write_pollfunc (ide_drive_t *drive)
 
 /*
  * promise_write() transfers a block of one or more sectors of data to a
- * drive as part of a disk write operation. All but 4 sectors are transfered
+ * drive as part of a disk write operation. All but 4 sectors are transferred
  * in the first attempt, then the interface is polled (nicely!) for completion
- * before the final 4 sectors are transfered. There is no interrupt generated
+ * before the final 4 sectors are transferred. There is no interrupt generated
  * on writes (at least on the DC4030VL-2), we just have to poll for NOT BUSY.
  */
 static ide_startstop_t promise_write (ide_drive_t *drive)
@@ -457,8 +457,8 @@ static ide_startstop_t promise_write (ide_drive_t *drive)
 
 #ifdef DEBUG_WRITE
 	printk(KERN_DEBUG "%s: promise_write: sectors(%ld-%ld), "
-	       "buffer=0x%08x\n", drive->name, rq->sector,
-	       rq->sector + rq->nr_sectors - 1, (unsigned int)rq->buffer);
+	       "buffer=%p\n", drive->name, rq->sector,
+	       rq->sector + rq->nr_sectors - 1, rq->buffer);
 #endif
 
 	/*

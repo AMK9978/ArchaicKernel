@@ -1,13 +1,15 @@
-/* $Id: niccy.c,v 1.15.6.2 2000/11/29 16:00:14 kai Exp $
+/* $Id: niccy.c,v 1.15.6.6 2001/10/20 22:08:24 kai Exp $
  *
- * niccy.c  low level stuff for Dr. Neuhaus NICCY PnP and NICCY PCI and
- *          compatible (SAGEM cybermodem)
+ * low level stuff for Dr. Neuhaus NICCY PnP and NICCY PCI and
+ * compatible (SAGEM cybermodem)
  *
- * Author   Karsten Keil
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
  * 
- * Thanks to Dr. Neuhaus and SAGEM for informations
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ * 
+ * Thanks to Dr. Neuhaus and SAGEM for information
  *
  */
 
@@ -22,7 +24,7 @@
 #include <linux/pci.h>
 
 extern const char *CardType[];
-const char *niccy_revision = "$Revision: 1.15.6.2 $";
+const char *niccy_revision = "$Revision: 1.15.6.6 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -195,7 +197,7 @@ release_io_niccy(struct IsdnCardState *cs)
 		val = inl(cs->hw.niccy.cfg_reg + PCI_IRQ_CTRL_REG);
 		val &= PCI_IRQ_DISABLE;
 		outl(val, cs->hw.niccy.cfg_reg + PCI_IRQ_CTRL_REG);
-		release_region(cs->hw.niccy.cfg_reg, 0x80);
+		release_region(cs->hw.niccy.cfg_reg, 0x40);
 		release_region(cs->hw.niccy.isac, 4);
 	} else {
 		release_region(cs->hw.niccy.isac, 2);
@@ -322,16 +324,16 @@ setup_niccy(struct IsdnCard *card)
 			return (0);
 		} else
 			request_region(cs->hw.niccy.isac, 4, "niccy");
-		if (check_region(cs->hw.niccy.cfg_reg, 0x80)) {
+		if (check_region(cs->hw.niccy.cfg_reg, 0x40)) {
 			printk(KERN_WARNING
 			       "HiSax: %s pci port %x-%x already in use\n",
 				CardType[card->typ],
 				cs->hw.niccy.cfg_reg,
-				cs->hw.niccy.cfg_reg + 0x80);
+				cs->hw.niccy.cfg_reg + 0x40);
 			release_region(cs->hw.niccy.isac, 4);
 			return (0);
 		} else {
-			request_region(cs->hw.niccy.cfg_reg, 0x80, "niccy pci");
+			request_region(cs->hw.niccy.cfg_reg, 0x40, "niccy pci");
 		}
 #else
 		printk(KERN_WARNING "Niccy: io0 0 and NO_PCI_BIOS\n");

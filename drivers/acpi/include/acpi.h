@@ -1,12 +1,12 @@
 /******************************************************************************
  *
  * Name: acpi.h - Master include file, Publics and external data.
- *       $Revision: 48 $
+ *       $Revision: 54 $
  *
  *****************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -31,20 +31,21 @@
  * We put them here because we don't want to duplicate them
  * in the rest of the source code again and again.
  */
-#include "acconfig.h"       /* Configuration constants */
-#include "acenv.h"          /* Target environment specific items */
-#include "actypes.h"        /* Fundamental data types */
-#include "acexcep.h"        /* Local exception codes */
-#include "acmacros.h"       /* C macros */
-#include "actbl.h"          /* Acpi table definitions */
-#include "aclocal.h"        /* Internal data types */
-#include "acoutput.h"       /* Error output and Debug macros */
-#include "acpiosxf.h"       /* Interfaces to the Acpi-to-OS layer*/
-#include "acpixf.h"         /* Acpi core external interfaces */
-#include "acobject.h"       /* Acpi internal object */
-#include "acglobal.h"       /* All global variables */
-#include "achware.h"        /* Hardware defines and interfaces */
-#include "accommon.h"       /* Common (global) interfaces */
+#include "acconfig.h"           /* Configuration constants */
+#include "platform/acenv.h"     /* Target environment specific items */
+#include "actypes.h"            /* Fundamental common data types */
+#include "acexcep.h"            /* ACPI exception codes */
+#include "acmacros.h"           /* C macros */
+#include "actbl.h"              /* ACPI table definitions */
+#include "aclocal.h"            /* Internal data types */
+#include "acoutput.h"           /* Error output and Debug macros */
+#include "acpiosxf.h"           /* Interfaces to the ACPI-to-OS layer*/
+#include "acpixf.h"             /* ACPI core subsystem external interfaces */
+#include "acobject.h"           /* ACPI internal object */
+#include "acstruct.h"           /* Common structures */
+#include "acglobal.h"           /* All global variables */
+#include "achware.h"            /* Hardware defines and interfaces */
+#include "acutils.h"            /* Utility interfaces */
 
 
 #endif /* __ACPI_H__ */

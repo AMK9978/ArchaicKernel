@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.checks.c 1.6 05/17/01 18:14:21 cort
+ */
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -7,7 +10,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 

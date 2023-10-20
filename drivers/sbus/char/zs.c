@@ -1,9 +1,12 @@
-/* $Id: zs.c,v 1.61 2001/01/03 08:08:49 ecd Exp $
+/* $Id: zs.c,v 1.68 2001/10/25 18:48:03 davem Exp $
  * zs.c: Zilog serial port driver for the Sparc.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  * Copyright (C) 1996 Eddie C. Dost   (ecd@skynet.be)
- * Fixes by Pete A. Zaitcev <zaitcev@metabyte.com>.
+ * Fixes by Pete A. Zaitcev <zaitcev@yahoo.com>.
+ *
+ * Fixed to use tty_get_baud_rate().
+ *   Theodore Ts'o <tytso@mit.edu>, 2001-Oct-12
  */
 
 #include <linux/errno.h>
@@ -177,7 +180,7 @@ struct zs_logent {
 #define REGCTRL	0xfd
 };
 struct zs_logent zslog[32];
-int zs_curlog = 0;
+int zs_curlog;
 #define ZSLOG(__reg, __val, __write) \
 do{	int index = zs_curlog; \
 	zslog[index].reg = (__reg); \
@@ -217,7 +220,7 @@ int zs_dumplog(char *buffer)
  * buffer across all the serial ports, since it significantly saves
  * memory if large numbers of serial ports are open.
  */
-static unsigned char tmp_buf[4096]; /* This is cheating */
+static unsigned char *tmp_buf = 0;
 static DECLARE_MUTEX(tmp_buf_sem);
 
 static inline int serial_paranoia_check(struct sun_serial *info,
@@ -241,19 +244,13 @@ static inline int serial_paranoia_check(struct sun_serial *info,
 	return 0;
 }
 
-/* This is used to figure out the divisor speeds and the timeouts. */
-static int baud_table[] = {
-	0, 50, 75, 110, 134, 150, 200, 300, 600, 1200, 1800, 2400, 4800,
-	9600, 19200, 38400, 76800, 0
-};
-
 /* Reading and writing Zilog8530 registers.  The delays are to make this
  * driver work on the Sun4 which needs a settling delay after each chip
  * register access, other machines handle this in hardware via auxiliary
  * flip-flops which implement the settle time we do in software.
  */
-static inline unsigned char read_zsreg(struct sun_zschannel *channel,
-				       unsigned char reg)
+static unsigned char read_zsreg(struct sun_zschannel *channel,
+				unsigned char reg)
 {
 	unsigned char retval;
 
@@ -265,8 +262,8 @@ static inline unsigned char read_zsreg(struct sun_zschannel *channel,
 	return retval;
 }
 
-static inline void write_zsreg(struct sun_zschannel *channel,
-			       unsigned char reg, unsigned char value)
+static void write_zsreg(struct sun_zschannel *channel,
+			unsigned char reg, unsigned char value)
 {
 	ZSLOG(reg, value, 1);
 	sbus_writeb(reg, &channel->control);
@@ -275,7 +272,7 @@ static inline void write_zsreg(struct sun_zschannel *channel,
 	ZSDELAY();
 }
 
-static inline void load_zsregs(struct sun_serial *info, unsigned char *regs)
+static void load_zsregs(struct sun_serial *info, unsigned char *regs)
 {
 	struct sun_zschannel *channel = info->zs_channel;
 	unsigned long flags;
@@ -323,7 +320,7 @@ static inline void load_zsregs(struct sun_serial *info, unsigned char *regs)
 
 #define ZS_PUT_CHAR_MAX_DELAY	2000	/* 10 ms */
 
-static inline void zs_put_char(struct sun_zschannel *channel, char ch)
+static void zs_put_char(struct sun_zschannel *channel, char ch)
 {
 	int loops = ZS_PUT_CHAR_MAX_DELAY;
 
@@ -346,7 +343,7 @@ static inline void zs_put_char(struct sun_zschannel *channel, char ch)
 }
 
 /* Sets or clears DTR/RTS on the requested line */
-static inline void zs_rtsdtr(struct sun_serial *ss, int set)
+static void zs_rtsdtr(struct sun_serial *ss, int set)
 {
 	unsigned long flags;
 
@@ -362,7 +359,7 @@ static inline void zs_rtsdtr(struct sun_serial *ss, int set)
 	return;
 }
 
-static inline void kgdb_chaninit(struct sun_serial *ss, int intson, int bps)
+static void kgdb_chaninit(struct sun_serial *ss, int intson, int bps)
 {
 	int brg;
 
@@ -475,8 +472,7 @@ void batten_down_hatches(void)
  * This routine is used by the interrupt handler to schedule
  * processing in the software interrupt portion of the driver.
  */
-static _INLINE_ void zs_sched_event(struct sun_serial *info,
-				    int event)
+static void zs_sched_event(struct sun_serial *info, int event)
 {
 	info->event |= 1 << event;
 	queue_task(&info->tqueue, &tq_serial);
@@ -487,7 +483,7 @@ static _INLINE_ void zs_sched_event(struct sun_serial *info,
 extern void breakpoint(void);  /* For the KGDB frame character */
 #endif
 
-static _INLINE_ void receive_chars(struct sun_serial *info, struct pt_regs *regs)
+static void receive_chars(struct sun_serial *info, struct pt_regs *regs)
 {
 	struct tty_struct *tty = info->tty;
 	unsigned char ch, stat;
@@ -575,7 +571,7 @@ static _INLINE_ void receive_chars(struct sun_serial *info, struct pt_regs *regs
 		queue_task(&tty->flip.tqueue, &tq_timer);
 }
 
-static _INLINE_ void transmit_chars(struct sun_serial *info)
+static void transmit_chars(struct sun_serial *info)
 {
 	struct tty_struct *tty = info->tty;
 
@@ -611,7 +607,7 @@ static _INLINE_ void transmit_chars(struct sun_serial *info)
 	}
 }
 
-static _INLINE_ void status_handle(struct sun_serial *info)
+static void status_handle(struct sun_serial *info)
 {
 	unsigned char status;
 
@@ -655,7 +651,7 @@ static _INLINE_ void status_handle(struct sun_serial *info)
 	return;
 }
 
-static _INLINE_ void special_receive(struct sun_serial *info)
+static void special_receive(struct sun_serial *info)
 {
 	struct tty_struct *tty = info->tty;
 	unsigned char ch, stat;
@@ -945,8 +941,7 @@ static void shutdown(struct sun_serial * info)
 static void change_speed(struct sun_serial *info)
 {
 	unsigned cflag;
-	int	quot = 0;
-	int	i;
+	int	baud, quot = 0;
 	int	brg;
 
 	if (!info->tty || !info->tty->termios)
@@ -954,20 +949,12 @@ static void change_speed(struct sun_serial *info)
 	cflag = info->tty->termios->c_cflag;
 	if (!info->port)
 		return;
-	i = cflag & CBAUD;
-	if (cflag & CBAUDEX) {
-		i &= ~CBAUDEX;
-		if (i != 5)
-			info->tty->termios->c_cflag &= ~CBAUDEX;
-		else
-			i = 16;
-	}
-	if (i == 15) {
-		if ((info->flags & ZILOG_SPD_MASK) == ZILOG_SPD_HI)
-			i += 1;
-		if ((info->flags & ZILOG_SPD_MASK) == ZILOG_SPD_CUST)
-			quot = info->custom_divisor;
-	}
+	baud = tty_get_baud_rate(info->tty);
+	
+	if ((baud == 38400) && 
+	    ((info->flags & ZILOG_SPD_MASK) == ZILOG_SPD_CUST))
+		quot = info->custom_divisor;
+
 	if (quot) {
 		info->zs_baud = info->baud_base / quot;
 		info->clk_divisor = 16;
@@ -979,8 +966,8 @@ static void change_speed(struct sun_serial *info)
 		info->curregs[13] = ((brg >> 8) & 255);
 		info->curregs[14] = BRSRC | BRENAB;
 		zs_rtsdtr(info, 1);
-	} else if (baud_table[i]) {
-		info->zs_baud = baud_table[i];
+	} else if (baud) {
+		info->zs_baud = baud;
 		info->clk_divisor = 16;
 
 		info->curregs[4] = X16CLK;
@@ -1153,32 +1140,55 @@ static int zs_write(struct tty_struct * tty, int from_user,
 	if (serial_paranoia_check(info, tty->device, "zs_write"))
 		return 0;
 
-	if (!info || !info->xmit_buf)
+	if (!info || !info->xmit_buf || !tmp_buf)
 		return 0;
 
 	save_flags(flags);
-	while (1) {
-		cli();		
-		c = MIN(count, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
-				   SERIAL_XMIT_SIZE - info->xmit_head));
-		if (c <= 0)
-			break;
-
-		if (from_user) {
-			down(&tmp_buf_sem);
-			copy_from_user(tmp_buf, buf, c);
+	if (from_user) {
+		down(&tmp_buf_sem);
+		while (1) {
+			c = MIN(count, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
+					   SERIAL_XMIT_SIZE - info->xmit_head));
+			if (c <= 0)
+				break;
+			c -= copy_from_user(tmp_buf, buf, c);
+			if (!c) {
+				if (!total)
+					total = -EFAULT;
+				break;
+			}
+			cli();
 			c = MIN(c, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
 				       SERIAL_XMIT_SIZE - info->xmit_head));
 			memcpy(info->xmit_buf + info->xmit_head, tmp_buf, c);
-			up(&tmp_buf_sem);
-		} else
+			info->xmit_head = ((info->xmit_head + c) &
+					   (SERIAL_XMIT_SIZE - 1));
+			info->xmit_cnt += c;
+			restore_flags(flags);
+
+			buf += c;
+			count -= c;
+			total += c;
+		}
+		up(&tmp_buf_sem);
+	} else {
+		while (1) {
+			cli();		
+			c = MIN(count, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
+					   SERIAL_XMIT_SIZE - info->xmit_head));
+			if (c <= 0) {
+				restore_flags(flags);
+				break;
+			}
 			memcpy(info->xmit_buf + info->xmit_head, buf, c);
-		info->xmit_head = (info->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
-		info->xmit_cnt += c;
-		restore_flags(flags);
-		buf += c;
-		count -= c;
-		total += c;
+			info->xmit_head = ((info->xmit_head + c) &
+					   (SERIAL_XMIT_SIZE - 1));
+			info->xmit_cnt += c;
+			restore_flags(flags);
+			buf += c;
+			count -= c;
+			total += c;
+		}
 	}
 
 	cli();		
@@ -1863,6 +1873,17 @@ int zs_open(struct tty_struct *tty, struct file * filp)
 		printk("zs_open %s%d, tty overwrite.\n", tty->driver.name, info->line);
 		return -EBUSY;
 	}
+
+	if (!tmp_buf) {
+		unsigned long page = get_free_page(GFP_KERNEL);
+		if (!page)
+			return -ENOMEM;
+		if (tmp_buf)
+			free_page(page);
+		else
+			tmp_buf = (unsigned char *) page;
+	}
+
 	info->count++;
 	tty->driver_data = info;
 	info->tty = tty;
@@ -1912,7 +1933,7 @@ int zs_open(struct tty_struct *tty, struct file * filp)
 
 static void show_serial_version(void)
 {
-	char *revision = "$Revision: 1.61 $";
+	char *revision = "$Revision: 1.68 $";
 	char *version, *p;
 
 	version = strchr(revision, ' ');
@@ -2037,16 +2058,7 @@ static struct sun_zslayout * __init get_zs(int chip)
 	if (mapped_addr != 0) {
 		return (struct sun_zslayout *) mapped_addr;
 	} else {
-		pgd_t *pgd = pgd_offset_k((unsigned long)vaddr[0]);
-		pmd_t *pmd = pmd_offset(pgd, (unsigned long)vaddr[0]);
-		pte_t *pte = pte_offset(pmd, (unsigned long)vaddr[0]);
-		unsigned long base = pte_val(*pte) & _PAGE_PADDR;
-
-		/* Translate PROM's mapping we captured at boot
-		 * time into physical address.
-		 */
-		base += ((unsigned long)vaddr[0] & ~PAGE_MASK);
-		return (struct sun_zslayout *) base;
+		return (struct sun_zslayout *) prom_virt_to_phys((unsigned long)vaddr[0], 0);
 	}
 }
 #else /* !(__sparc_v9__) */
@@ -2763,22 +2775,23 @@ static kdev_t zs_console_device(struct console *con)
 
 static int __init zs_console_setup(struct console *con, char *options)
 {
+	static struct tty_struct c_tty;
+	static struct termios c_termios;
 	struct sun_serial *info;
-	int i, brg, baud;
+	int brg, baud;
 
 	info = zs_soft + con->index;
 	info->is_cons = 1;
 
 	printk("Console: ttyS%d (Zilog8530)\n", info->line);
-
+	
 	sunserial_console_termios(con);
+	memset(&c_tty, 0, sizeof(c_tty));
+	memset(&c_termios, 0, sizeof(c_termios));
+	c_tty.termios = &c_termios;
+	c_termios.c_cflag = con->cflag;
+	baud = tty_get_baud_rate(&c_tty);
 
-	i = con->cflag & CBAUD;
-	if (con->cflag & CBAUDEX) {
-		i &= ~CBAUDEX;
-		con->cflag &= ~CBAUDEX;
-	}
-	baud = baud_table[i];
 	info->zs_baud = baud;
 
 	switch (con->cflag & CSIZE) {

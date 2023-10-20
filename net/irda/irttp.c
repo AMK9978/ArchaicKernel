@@ -11,6 +11,7 @@
  * 
  *     Copyright (c) 1998-2000 Dag Brattli <dagb@cs.uit.no>, 
  *     All Rights Reserved.
+ *     Copyright (c) 2000-2001 Jean Tourrilhes <jt@hpl.hp.com>
  *     
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -139,6 +140,15 @@ struct tsap_cb *irttp_open_tsap(__u8 stsap_sel, int credit, notify_t *notify)
 	ASSERT(irttp != NULL, return NULL;);
 	ASSERT(irttp->magic == TTP_MAGIC, return NULL;);
 
+	/* The IrLMP spec (IrLMP 1.1 p10) says that we have the right to
+	 * use only 0x01-0x6F. Of course, we can use LSAP_ANY as well.
+	 * JeanII */
+	if((stsap_sel != LSAP_ANY) &&
+	   ((stsap_sel < 0x01) || (stsap_sel >= 0x70))) {
+		IRDA_DEBUG(0, __FUNCTION__ "(), invalid tsap!\n");
+		return NULL;
+	}
+
 	self = kmalloc(sizeof(struct tsap_cb), GFP_ATOMIC);
 	if (self == NULL) {
 		IRDA_DEBUG(0, __FUNCTION__ "(), unable to kmalloc!\n");
@@ -214,6 +224,11 @@ static void __irttp_close_tsap(struct tsap_cb *self)
 
 	del_timer(&self->todo_timer);
 
+	/* This one won't be cleaned up if we are diconnect_pend + close_pend
+	 * and we receive a disconnect_indication */
+	if (self->disconnect_skb)
+		dev_kfree_skb(self->disconnect_skb);
+
 	self->connected = FALSE;
 	self->magic = ~TTP_TSAP_MAGIC;
 
@@ -226,6 +241,9 @@ static void __irttp_close_tsap(struct tsap_cb *self)
  *    Remove TSAP from list of all TSAPs and then deallocate all resources
  *    associated with this TSAP
  *
+ * Note : because we *free* the tsap structure, it is the responsability
+ * of the caller to make sure we are called only once and to deal with
+ * possible race conditions. - Jean II
  */
 int irttp_close_tsap(struct tsap_cb *self)
 {
@@ -239,8 +257,8 @@ int irttp_close_tsap(struct tsap_cb *self)
 	/* Make sure tsap has been disconnected */
 	if (self->connected) {
 		/* Check if disconnect is not pending */
-		if (!self->disconnect_pend) {
-			IRDA_DEBUG(0, __FUNCTION__ "(), TSAP still connected!\n");
+		if (!test_bit(0, &self->disconnect_pend)) {
+			WARNING(__FUNCTION__ "(), TSAP still connected!\n");
 			irttp_disconnect_request(self, NULL, P_NORMAL);
 		}
 		self->close_pend = TRUE;
@@ -360,7 +378,7 @@ int irttp_data_request(struct tsap_cb *self, struct sk_buff *skb)
 	} else {
 		/*
 		 *  Fragment the frame, this function will also queue the
-		 *  fragments, we don't care about the fact the the transmit
+		 *  fragments, we don't care about the fact the transmit
 		 *  queue may be overfilled by all the segments for a little
 		 *  while
 		 */
@@ -398,6 +416,7 @@ static void irttp_run_tx_queue(struct tsap_cb *self)
 	unsigned long flags;
 	int n;
 
+	/* Get exclusive access to the tx queue, otherwise don't touch it */
 	if (irda_lock(&self->tx_queue_lock) == FALSE)
 		return;
 
@@ -445,6 +464,36 @@ static void irttp_run_tx_queue(struct tsap_cb *self)
 		 */
 		skb->data[0] |= (n & 0x7f);
 		
+		/* Detach from socket.
+		 * The current skb has a reference to the socket that sent
+		 * it (skb->sk). When we pass it to IrLMP, the skb will be
+		 * stored in in IrLAP (self->wx_list). When we are within
+		 * IrLAP, we loose the notion of socket, so we should not
+		 * have a reference to a socket. So, we drop it here.
+		 * 
+		 * Why does it matter ?
+		 * When the skb is freed (kfree_skb), if it is associated
+		 * with a socket, it release buffer space on the socket
+		 * (through sock_wfree() and sock_def_write_space()).
+		 * If the socket no longer exist, we may crash. Hard.
+		 * When we close a socket, we make sure that associated packets
+		 * in IrTTP are freed. However, we have no way to cancel
+		 * the packet that we have passed to IrLAP. So, if a packet
+		 * remains in IrLAP (retry on the link or else) after we
+		 * close the socket, we are dead !
+		 * Jean II */
+		if (skb->sk != NULL) {
+			/* IrSOCK application, IrOBEX, ... */
+			IRDA_DEBUG(4, __FUNCTION__ "() : Detaching SKB from socket.\n");
+
+			/* That's the right way to do it - Jean II */
+			skb_orphan(skb);
+		} else {
+			/* IrCOMM over IrTTP, IrLAN, ... */
+			IRDA_DEBUG(4, __FUNCTION__ "() : Got SKB not attached to a socket.\n");
+		}
+
+		/* Pass the skb to IrLMP - done */
 		irlmp_data_request(self->lsap, skb);
 		self->stats.tx_packets++;
 
@@ -1056,18 +1105,23 @@ int irttp_disconnect_request(struct tsap_cb *self, struct sk_buff *userdata,
 	/* Already disconnected? */
 	if (!self->connected) {
 		IRDA_DEBUG(4, __FUNCTION__ "(), already disconnected!\n");
+		if (userdata)
+			dev_kfree_skb(userdata);
 		return -1;
 	}
 
-	/* Disconnect already pending? */
-	if (self->disconnect_pend) {
-		IRDA_DEBUG(1, __FUNCTION__ "(), disconnect already pending\n");
-		if (userdata) {
+	/* Disconnect already pending ?
+	 * We need to use an atomic operation to prevent reentry. This
+	 * function may be called from various context, like user, timer
+	 * for following a disconnect_indication() (i.e. net_bh).
+	 * Jean II */
+	if(test_and_set_bit(0, &self->disconnect_pend)) {
+		IRDA_DEBUG(0, __FUNCTION__ "(), disconnect already pending\n");
+		if (userdata)
 			dev_kfree_skb(userdata);
-		}
 
 		/* Try to make some progress */
-		irttp_run_rx_queue(self);
+		irttp_run_tx_queue(self);
 		return -1;
 	}
 
@@ -1076,25 +1130,20 @@ int irttp_disconnect_request(struct tsap_cb *self, struct sk_buff *userdata,
 	 */
 	if (skb_queue_len(&self->tx_queue) > 0) {
 		if (priority == P_HIGH) {
-			IRDA_DEBUG(1, __FUNCTION__  "High priority!!()\n" );
-			
 			/* 
 			 *  No need to send the queued data, if we are 
 			 *  disconnecting right now since the data will
 			 *  not have any usable connection to be sent on
 			 */
+			IRDA_DEBUG(1, __FUNCTION__  "High priority!!()\n" );
 			irttp_flush_queues(self);
 		} else if (priority == P_NORMAL) {
 			/* 
-			 *  Must delay disconnect til after all data segments
-			 *  have been sent an the tx_queue is empty
+			 *  Must delay disconnect until after all data segments
+			 *  have been sent and the tx_queue is empty
 			 */
-			if (userdata)
-				self->disconnect_skb = userdata;
-			else
-				self->disconnect_skb = NULL;
-
-			self->disconnect_pend = TRUE;
+			/* We'll reuse this one later for the disconnect */
+			self->disconnect_skb = userdata;  /* May be NULL */
 
 			irttp_run_tx_queue(self);
 
@@ -1103,9 +1152,8 @@ int irttp_disconnect_request(struct tsap_cb *self, struct sk_buff *userdata,
 		}
 	}
 	IRDA_DEBUG(1, __FUNCTION__ "(), Disconnecting ...\n");
-
 	self->connected = FALSE;
-	
+
 	if (!userdata) {
 		skb = dev_alloc_skb(64);
 		if (!skb)
@@ -1119,6 +1167,9 @@ int irttp_disconnect_request(struct tsap_cb *self, struct sk_buff *userdata,
 		userdata = skb;
 	}
 	ret = irlmp_disconnect_request(self->lsap, userdata);
+
+	/* The disconnect is no longer pending */
+	clear_bit(0, &self->disconnect_pend);	/* FALSE */
 
 	return ret;
 }
@@ -1141,19 +1192,27 @@ void irttp_disconnect_indication(void *instance, void *sap, LM_REASON reason,
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == TTP_TSAP_MAGIC, return;);
 	
+	/* Prevent higher layer to send more data */
 	self->connected = FALSE;
 	
 	/* Check if client has already tried to close the TSAP */
 	if (self->close_pend) {
+		/* In this case, the higher layer is probably gone. Don't
+		 * bother it and clean up the remains - Jean II */
+		if (skb)
+			dev_kfree_skb(skb);
 		irttp_close_tsap(self);
 		return;
 	}
 
+	/* If we are here, we assume that is the higher layer is still
+	 * waiting for the disconnect notification and able to process it,
+	 * even if he tried to disconnect. Otherwise, it would have already
+	 * attempted to close the tsap and self->close_pend would be TRUE.
+	 * Jean II */
+
 	/* No need to notify the client if has already tried to disconnect */
-	if (self->disconnect_pend)
-		return;
-	
-	if (self->notify.disconnect_indication)
+	if(self->notify.disconnect_indication)
 		self->notify.disconnect_indication(self->notify.instance, self,
 						   reason, skb);
 	else
@@ -1173,7 +1232,7 @@ void irttp_do_data_indication(struct tsap_cb *self, struct sk_buff *skb)
 	int err;
 
 	/* Check if client has already tried to close the TSAP */
-	if (self->close_pend || self->disconnect_pend) {
+	if (self->close_pend) {
 		dev_kfree_skb(skb);
 		return;
 	}
@@ -1214,6 +1273,7 @@ void irttp_run_rx_queue(struct tsap_cb *self)
 	IRDA_DEBUG(2, __FUNCTION__ "() send=%d,avail=%d,remote=%d\n", 
 		   self->send_credit, self->avail_credit, self->remote_credit);
 
+	/* Get exclusive access to the rx queue, otherwise don't touch it */
 	if (irda_lock(&self->rx_queue_lock) == FALSE)
 		return;
 	
@@ -1451,7 +1511,7 @@ static int irttp_param_max_sdu_size(void *instance, irda_param_t *param,
 	else
 		self->tx_max_sdu_size = param->pv.i;
 
-	IRDA_DEBUG(0, __FUNCTION__ "(), MaxSduSize=%d\n", param->pv.i);
+	IRDA_DEBUG(1, __FUNCTION__ "(), MaxSduSize=%d\n", param->pv.i);
 	
 	return 0;
 }
@@ -1481,18 +1541,16 @@ static void irttp_todo_expired(unsigned long data)
 	}
 
 	/* Check if time for disconnect */
-	if (self->disconnect_pend) {
+	if (test_bit(0, &self->disconnect_pend)) {
 		/* Check if it's possible to disconnect yet */
 		if (skb_queue_empty(&self->tx_queue)) {
-			
 			/* Make sure disconnect is not pending anymore */
-			self->disconnect_pend = FALSE;
-			if (self->disconnect_skb) {
-				irttp_disconnect_request(
-					self, self->disconnect_skb, P_NORMAL);
-				self->disconnect_skb = NULL;
-			} else
-				irttp_disconnect_request(self, NULL, P_NORMAL);
+			clear_bit(0, &self->disconnect_pend);	/* FALSE */
+
+			/* Note : self->disconnect_skb may be NULL */
+			irttp_disconnect_request(self, self->disconnect_skb,
+						 P_NORMAL);
+			self->disconnect_skb = NULL;
 		} else {
 			/* Try again later */
 			irttp_start_todo_timer(self, 1*HZ);
@@ -1549,7 +1607,7 @@ int irttp_proc_read(char *buf, char **start, off_t offset, int len)
 	self = (struct tsap_cb *) hashbin_get_first(irttp->tsaps);
 	while (self != NULL) {
 		if (!self || self->magic != TTP_TSAP_MAGIC)
-			return len;
+			break;
 
 		len += sprintf(buf+len, "TSAP %d, ", i++);
 		len += sprintf(buf+len, "stsap_sel: %02x, ", 
@@ -1564,9 +1622,9 @@ int irttp_proc_read(char *buf, char **start, off_t offset, int len)
 			       self->remote_credit);
 		len += sprintf(buf+len, "send credit: %d\n",
 			       self->send_credit);
-		len += sprintf(buf+len, "  tx packets: %d, ",
+		len += sprintf(buf+len, "  tx packets: %ld, ",
 			       self->stats.tx_packets);
-		len += sprintf(buf+len, "rx packets: %d, ",
+		len += sprintf(buf+len, "rx packets: %ld, ",
 			       self->stats.rx_packets);
 		len += sprintf(buf+len, "tx_queue len: %d ", 
 			       skb_queue_len(&self->tx_queue));

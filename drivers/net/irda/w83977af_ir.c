@@ -47,7 +47,7 @@
 #include <linux/netdevice.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/rtnetlink.h>
 
@@ -497,7 +497,7 @@ void w83977af_change_speed(struct w83977af_ir *self, __u32 speed)
 int w83977af_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct w83977af_ir *self;
-	__u32 speed;
+	__s32 speed;
 	int iobase;
 	__u8 set;
 	int mtt;
@@ -513,10 +513,12 @@ int w83977af_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 	netif_stop_queue(dev);
 	
 	/* Check if we need to change the speed */
-	if ((speed = irda_get_speed(skb)) != self->io.speed) {
+	speed = irda_get_next_speed(skb);
+	if ((speed != self->io.speed) && (speed != -1)) {
 		/* Check for empty frame */
 		if (!skb->len) {
 			w83977af_change_speed(self, speed); 
+			dev_kfree_skb(skb);
 			return 0;
 		} else
 			self->new_speed = speed;
@@ -873,7 +875,7 @@ int w83977af_dma_receive_complete(struct w83977af_ir *self)
 				self->stats.rx_fifo_errors++;
 			
 		} else {
-			/* Check if we have transfered all data to memory */
+			/* Check if we have transferred all data to memory */
 			switch_bank(iobase, SET0);
 			if (inb(iobase+USR) & USR_RDR) {
 #ifdef CONFIG_USE_INTERNAL_TIMER
@@ -1208,6 +1210,7 @@ static int w83977af_net_open(struct net_device *dev)
 {
 	struct w83977af_ir *self;
 	int iobase;
+	char hwname[32];
 	__u8 set;
 	
 	IRDA_DEBUG(0, __FUNCTION__ "()\n");
@@ -1249,11 +1252,14 @@ static int w83977af_net_open(struct net_device *dev)
 	/* Ready to play! */
 	netif_start_queue(dev);
 	
+	/* Give self a hardware name */
+	sprintf(hwname, "w83977af @ 0x%03x", self->io.fir_base);
+
 	/* 
 	 * Open new IrLAP layer instance, now that everything should be
 	 * initialized properly 
 	 */
-	self->irlap = irlap_open(dev, &self->qos);
+	self->irlap = irlap_open(dev, &self->qos, hwname);
 
 	MOD_INC_USE_COUNT;
 
@@ -1337,13 +1343,17 @@ static int w83977af_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	
 	switch (cmd) {
 	case SIOCSBANDWIDTH: /* Set bandwidth */
-		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
+		if (!capable(CAP_NET_ADMIN)) {
+			ret = -EPERM;
+			goto out;
+		}
 		w83977af_change_speed(self, irq->ifr_baudrate);
 		break;
 	case SIOCSMEDIABUSY: /* Set media busy */
-		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
+		if (!capable(CAP_NET_ADMIN)) {
+			ret = -EPERM;
+			goto out;
+		}
 		irda_device_set_media_busy(self->netdev, TRUE);
 		break;
 	case SIOCGRECEIVING: /* Check if we are receiving right now */
@@ -1352,9 +1362,8 @@ static int w83977af_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	default:
 		ret = -EOPNOTSUPP;
 	}
-	
+out:
 	restore_flags(flags);
-	
 	return ret;
 }
 
@@ -1369,6 +1378,8 @@ static struct net_device_stats *w83977af_net_get_stats(struct net_device *dev)
 
 MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");
 MODULE_DESCRIPTION("Winbond W83977AF IrDA Device Driver");
+MODULE_LICENSE("GPL");
+
 
 MODULE_PARM(qos_mtt_bits, "i");
 MODULE_PARM_DESC(qos_mtt_bits, "Mimimum Turn Time");

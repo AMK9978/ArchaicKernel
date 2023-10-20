@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.xmon.c 1.16 09/22/01 15:25:10 trini
+ */
+/*
  * Routines providing a simple monitor for use on the PowerMac.
  *
  * Copyright (C) 1996 Paul Mackerras.
@@ -208,10 +211,11 @@ void
 xmon_irq(int irq, void *d, struct pt_regs *regs)
 {
 	unsigned long flags;
-	save_flags(flags);cli();
+	__save_flags(flags);
+	__cli();
 	printf("Keyboard interrupt\n");
 	xmon(regs);
-	restore_flags(flags);
+	__restore_flags(flags);
 }
 
 int
@@ -406,6 +410,7 @@ cmds(struct pt_regs *excp)
 			break;
 		case 'M':
 			print_sysmap();
+			break;
 		case 'S':
 			super_regs();
 			break;
@@ -656,8 +661,7 @@ backtrace(struct pt_regs *excp)
 	unsigned stack[2];
 	struct pt_regs regs;
 	extern char ret_from_intercept, ret_from_syscall_1, ret_from_syscall_2;
-	extern char lost_irq_ret, do_bottom_half_ret, do_signal_ret;
-	extern char ret_from_except;
+	extern char do_signal_ret, ret_from_except;
 
 	printf("backtrace:\n");
 	
@@ -675,8 +679,6 @@ backtrace(struct pt_regs *excp)
 		    || stack[1] == (unsigned) &ret_from_except
 		    || stack[1] == (unsigned) &ret_from_syscall_1
 		    || stack[1] == (unsigned) &ret_from_syscall_2
-		    || stack[1] == (unsigned) &lost_irq_ret
-		    || stack[1] == (unsigned) &do_bottom_half_ret
 		    || stack[1] == (unsigned) &do_signal_ret) {
 			if (mread(sp+16, &regs, sizeof(regs)) != sizeof(regs))
 				break;
@@ -795,6 +797,8 @@ print_sysmap(void)
 	extern char *sysmap;
 	if ( sysmap )
 		printf("System.map: \n%s", sysmap);
+	else
+		printf("No System.map\n");
 }
 
 void
@@ -809,10 +813,12 @@ super_regs()
 		printf("sprg0-3 = %x %x %x %x\n", get_sprg0(), get_sprg1(),
 		       get_sprg2(), get_sprg3());
 		printf("srr0 = %x, srr1 = %x\n", get_srr0(), get_srr1());
+#ifdef CONFIG_PPC_STD_MMU
 		printf("sr0-15 =");
 		for (i = 0; i < 16; ++i)
 			printf(" %x", get_sr(i));
 		printf("\n");
+#endif
 		asm("mr %0,1" : "=r" (i) :);
 		printf("sp = %x ", i);
 		asm("mr %0,2" : "=r" (i) :);
@@ -1013,7 +1019,8 @@ dump_hash_table()
 		seg_end = (seg << 28) | 0x0ffff000;
 		if (seg_end > hash_end)
 			seg_end = hash_end;
-		dump_hash_table_seg((hash_ctx << 4) + seg, seg_start, seg_end);
+		dump_hash_table_seg((hash_ctx << 4) + (seg * 0x111),
+				    seg_start, seg_end);
 		seg_start = seg_end + 0x1000;
 	}
 }

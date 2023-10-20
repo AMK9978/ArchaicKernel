@@ -7,7 +7,7 @@
 	written 1993-1994 by Donald Becker.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
         The author may be reached at nelson@crynwr.com, Crynwr
         Software, 521 Pleasant Valley Rd., Potsdam, NY 13676
@@ -74,13 +74,14 @@
                     : Use SET_MODULE_OWNER()
                     : Tidied up strange request_irq() abuse in net_open().
 
+  Andrew Morton     : Kernel 2.4.3-pre1
+                    : Request correct number of pages for DMA (Hugh Dickens)
+                    : Select PP_ChipID _after_ unregister_netdev in cleanup_module()
+                    :  because unregister_netdev() calls get_stats.
+                    : Make `version[]' __initdata
+                    : Uninlined the read/write reg/word functions.
+
 */
-
-static char version[] =
-"cs89x0.c: v2.4.0-test11-pre4 Russell Nelson <nelson@crynwr.com>, Andrew Morton <andrewm@uow.edu.au>\n";
-
-/* ======================= end of configuration ======================= */
-
 
 /* Always include 'config.h' first in case the user wants to turn on
    or override something. */
@@ -119,8 +120,9 @@ static char version[] =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/init.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
@@ -128,7 +130,6 @@ static char version[] =
 #include <asm/dma.h>
 #endif
 #include <linux/errno.h>
-#include <linux/init.h>
 #include <linux/spinlock.h>
 
 #include <linux/netdevice.h>
@@ -136,6 +137,9 @@ static char version[] =
 #include <linux/skbuff.h>
 
 #include "cs89x0.h"
+
+static char version[] __initdata =
+"cs89x0.c: v2.4.3-pre1 Russell Nelson <nelson@crynwr.com>, Andrew Morton <andrewm@uow.edu.au>\n";
 
 /* First, a few definitions that the brave might change.
    A zero-terminated list of I/O addresses to be probed. Some special flags..
@@ -260,7 +264,7 @@ int __init cs89x0_probe(struct net_device *dev)
 	SET_MODULE_OWNER(dev);
 
 	if (net_debug)
-		printk("cs89x0:cs89x0_probe()\n");
+		printk("cs89x0:cs89x0_probe(0x%x)\n", base_addr);
 
 	if (base_addr > 0x1ff)		/* Check a single specified location. */
 		return cs89x0_probe1(dev, base_addr);
@@ -275,27 +279,27 @@ int __init cs89x0_probe(struct net_device *dev)
 	return -ENODEV;
 }
 
-extern int inline
+static int
 readreg(struct net_device *dev, int portno)
 {
 	outw(portno, dev->base_addr + ADD_PORT);
 	return inw(dev->base_addr + DATA_PORT);
 }
 
-extern void inline
+static void
 writereg(struct net_device *dev, int portno, int value)
 {
 	outw(portno, dev->base_addr + ADD_PORT);
 	outw(value, dev->base_addr + DATA_PORT);
 }
 
-extern int inline
+static int
 readword(struct net_device *dev, int portno)
 {
 	return inw(dev->base_addr + portno);
 }
 
-extern void inline
+static void
 writeword(struct net_device *dev, int portno, int value)
 {
 	outw(value, dev->base_addr + portno);
@@ -356,7 +360,7 @@ static int __init
 cs89x0_probe1(struct net_device *dev, int ioaddr)
 {
 	struct net_local *lp;
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 	int i;
 	unsigned rev_type = 0;
 	int eeprom_buff[CHKSUM_LEN];
@@ -383,7 +387,9 @@ cs89x0_probe1(struct net_device *dev, int ioaddr)
 	lp = (struct net_local *)dev->priv;
 
 	/* Grab the region so we can find another board if autoIRQ fails. */
-	if (!request_region(ioaddr, NETCARD_IO_EXTENT, dev->name)) {
+	if (!request_region(ioaddr & ~3, NETCARD_IO_EXTENT, dev->name)) {
+		printk(KERN_ERR "%s: request_region(0x%x, 0x%x) failed\n",
+				dev->name, ioaddr, NETCARD_IO_EXTENT);
 		retval = -EBUSY;
 		goto out1;
 	}
@@ -393,16 +399,23 @@ cs89x0_probe1(struct net_device *dev, int ioaddr)
            expect to find the EISA signature word. An IO with a base of 0x3
 	   will skip the test for the ADD_PORT. */
 	if (ioaddr & 1) {
+		if (net_debug > 1)
+			printk(KERN_INFO "%s: odd ioaddr 0x%x\n", dev->name, ioaddr);
 	        if ((ioaddr & 2) != 2)
 	        	if ((inw((ioaddr & ~3)+ ADD_PORT) & ADD_MASK) != ADD_SIG) {
+				printk(KERN_ERR "%s: bad signature 0x%x\n",
+					dev->name, inw((ioaddr & ~3)+ ADD_PORT));
 		        	retval = -ENODEV;
 				goto out2;
 			}
 		ioaddr &= ~3;
 		outw(PP_ChipID, ioaddr + ADD_PORT);
 	}
+printk("PP_addr=0x%x\n", inw(ioaddr + ADD_PORT));
 
         if (inw(ioaddr + DATA_PORT) != CHIP_EISA_ID_SIG) {
+		printk(KERN_ERR "%s: incorrect signature 0x%x\n",
+			dev->name, inw(ioaddr + DATA_PORT));
   		retval = -ENODEV;
   		goto out2;
 	}
@@ -480,6 +493,10 @@ cs89x0_probe1(struct net_device *dev, int ioaddr)
 			lp->adapter_cnf |=  A_CNF_AUI | A_CNF_10B_T | 
 			A_CNF_MEDIA_AUI | A_CNF_MEDIA_10B_T | A_CNF_MEDIA_AUTO;
 		
+		if (net_debug > 1)
+			printk(KERN_INFO "%s: PP_LineCTL=0x%x, adapter_cnf=0x%x\n",
+					dev->name, i, lp->adapter_cnf);
+
 		/* IRQ. Other chips already probe, see below. */
 		if (lp->chip_type == CS8900) 
 			lp->isa_config = readreg(dev, PP_CS8900_ISAINT) & INT_NO_MASK;
@@ -519,6 +536,9 @@ cs89x0_probe1(struct net_device *dev, int ioaddr)
                         dev->dev_addr[i*2] = eeprom_buff[i];
                         dev->dev_addr[i*2+1] = eeprom_buff[i] >> 8;
                 }
+		if (net_debug > 1)
+			printk(KERN_DEBUG "%s: new adapter_cnf: 0%x\n",
+				dev->name, lp->adapter_cnf);
         }
 
         /* allow them to force multiple transceivers.  If they force multiple, autosense */
@@ -532,6 +552,10 @@ cs89x0_probe1(struct net_device *dev, int ioaddr)
 		else if (lp->force & FORCE_AUI)	{lp->adapter_cnf |= A_CNF_MEDIA_AUI; }
 		else if (lp->force & FORCE_BNC)	{lp->adapter_cnf |= A_CNF_MEDIA_10B_2; }
         }
+
+	if (net_debug > 1)
+		printk(KERN_DEBUG "%s: after force 0x%x, adapter_cnf=0x%x\n",
+			dev->name, lp->force, lp->adapter_cnf);
 
         /* FIXME: We don't let you set dc-dc polarity or low RX squelch from the command line: add it here */
 
@@ -615,7 +639,7 @@ cs89x0_probe1(struct net_device *dev, int ioaddr)
 		printk("cs89x0_probe1() successful\n");
 	return 0;
 out2:
-	release_region(ioaddr, NETCARD_IO_EXTENT);
+	release_region(ioaddr & ~3, NETCARD_IO_EXTENT);
 out1:
 	kfree(dev->priv);
 	dev->priv = 0;
@@ -773,8 +797,9 @@ skip_this_frame:
 	}
         skb->protocol=eth_type_trans(skb,dev);
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 	lp->stats.rx_packets++;
-	return;
+	lp->stats.rx_bytes += length;
 }
 
 #endif	/* ALLOW_DMA */
@@ -1074,7 +1099,7 @@ net_open(struct net_device *dev)
 		if (lp->isa_config & ANY_ISA_DMA) {
 			unsigned long flags;
 			lp->dma_buff = (unsigned char *)__get_dma_pages(GFP_KERNEL,
-							(lp->dmasize * 1024) / PAGE_SIZE);
+							get_order(lp->dmasize * 1024));
 
 			if (!lp->dma_buff) {
 				printk(KERN_ERR "%s: cannot get %dK memory for DMA\n", dev->name, lp->dmasize);
@@ -1086,7 +1111,7 @@ net_open(struct net_device *dev)
 					(unsigned long)lp->dma_buff,
 					(unsigned long)virt_to_bus(lp->dma_buff));
 			}
-			if ((unsigned long)virt_to_bus(lp->dma_buff) >= MAX_DMA_ADDRESS ||
+			if ((unsigned long) lp->dma_buff >= MAX_DMA_ADDRESS ||
 			    !dma_page_eq(lp->dma_buff, lp->dma_buff+lp->dmasize*1024-1)) {
 				printk(KERN_ERR "%s: not usable as DMA buffer\n", dev->name);
 				goto release_irq;
@@ -1446,16 +1471,16 @@ net_rx(struct net_device *dev)
 
         skb->protocol=eth_type_trans(skb,dev);
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 	lp->stats.rx_packets++;
-	lp->stats.rx_bytes+=skb->len;
-	return;
+	lp->stats.rx_bytes += length;
 }
 
 #if ALLOW_DMA
 static void release_dma_buff(struct net_local *lp)
 {
 	if (lp->dma_buff) {
-		free_pages((unsigned long)(lp->dma_buff), (lp->dmasize * 1024) / PAGE_SIZE);
+		free_pages((unsigned long)(lp->dma_buff), get_order(lp->dmasize * 1024));
 		lp->dma_buff = 0;
 	}
 }
@@ -1564,14 +1589,14 @@ static struct net_device dev_cs89x0 = {
  * avoid breaking someone's startup scripts 
  */
 
-static int io=0;
-static int irq=0;
-static int debug=0;
+static int io;
+static int irq;
+static int debug;
 static char media[8];
 static int duplex=-1;
 
-static int use_dma = 0;			/* These generate unused var warnings if ALLOW_DMA = 0 */
-static int dma=0;
+static int use_dma;			/* These generate unused var warnings if ALLOW_DMA = 0 */
+static int dma;
 static int dmasize=16;			/* or 64 */
 
 MODULE_PARM(io, "i");
@@ -1582,8 +1607,29 @@ MODULE_PARM(duplex, "i");
 MODULE_PARM(dma , "i");
 MODULE_PARM(dmasize , "i");
 MODULE_PARM(use_dma , "i");
+MODULE_PARM_DESC(io, "cs89x0 I/O base address");
+MODULE_PARM_DESC(irq, "cs89x0 IRQ number");
+#if DEBUGGING
+MODULE_PARM_DESC(debug, "cs89x0 debug level (0-6)");
+#else
+MODULE_PARM_DESC(debug, "(ignored)");
+#endif
+MODULE_PARM_DESC(media, "Set cs89x0 adapter(s) media type(s) (rj45,bnc,aui)");
+/* No other value than -1 for duplex seems to be currently interpreted */
+MODULE_PARM_DESC(duplex, "(ignored)");
+#if ALLOW_DMA
+MODULE_PARM_DESC(dma , "cs89x0 ISA DMA channel; ignored if use_dma=0");
+MODULE_PARM_DESC(dmasize , "cs89x0 DMA size in kB (16,64); ignored if use_dma=0");
+MODULE_PARM_DESC(use_dma , "cs89x0 using DMA (0-1)");
+#else
+MODULE_PARM_DESC(dma , "(ignored)");
+MODULE_PARM_DESC(dmasize , "(ignored)");
+MODULE_PARM_DESC(use_dma , "(ignored)");
+#endif
 
 MODULE_AUTHOR("Mike Cruse, Russwll Nelson <nelson@crynwr.com>, Andrew Morton <andrewm@uow.edu.au>");
+MODULE_LICENSE("GPL");
+
 
 EXPORT_NO_SYMBOLS;
 
@@ -1689,10 +1735,10 @@ out:
 void
 cleanup_module(void)
 {
-	outw(PP_ChipID, dev_cs89x0.base_addr + ADD_PORT);
         if (dev_cs89x0.priv != NULL) {
                 /* Free up the private structure, or leak memory :-)  */
                 unregister_netdev(&dev_cs89x0);
+		outw(PP_ChipID, dev_cs89x0.base_addr + ADD_PORT);
                 kfree(dev_cs89x0.priv);
                 dev_cs89x0.priv = NULL;	/* gets re-allocated by cs89x0_probe1 */
                 /* If we don't do this, we can't re-insmod it later. */

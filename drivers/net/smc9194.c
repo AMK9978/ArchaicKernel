@@ -4,7 +4,7 @@
  .
  . Copyright (C) 1996 by Erik Stahlman
  . This software may be used and distributed according to the terms
- . of the GNU Public License, incorporated herein by reference.
+ . of the GNU General Public License, incorporated herein by reference.
  .
  . "Features" of the SMC chip:
  .   4608 byte packet memory. ( for the 91C92.  Others have more )
@@ -25,7 +25,7 @@
  .
  . Sources:
  .    o   SMC databook
- .    o   skeleton.c by Donald Becker ( becker@cesdis.gsfc.nasa.gov )
+ .    o   skeleton.c by Donald Becker ( becker@scyld.com )
  .    o   ( a LOT of advice from Becker as well )
  .
  . History:
@@ -53,7 +53,7 @@
  .      12/15/00  Christian Jullien fix "Warning: kfree_skb on hard IRQ"
  ----------------------------------------------------------------------------*/
 
-static const char *version =
+static const char version[] =
 	"smc9194.c:v0.14 12/15/00 by Erik Stahlman (erik@vt.edu)\n";
 
 #include <linux/module.h>
@@ -66,7 +66,7 @@ static const char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
 #include <asm/bitops.h>
@@ -88,7 +88,11 @@ static const char *version =
  . Do you want to use 32 bit xfers?  This should work on all chips, as
  . the chipset is designed to accommodate them.
 */
+#ifdef __sh__
+#undef USE_32_BIT
+#else
 #define USE_32_BIT 1
+#endif
 
 /*
  .the SMC9194 can be at any of the following port addresses.  To change,
@@ -238,12 +242,12 @@ static void smc_interrupt(int irq, void *, struct pt_regs *regs);
  . This is a separate procedure to handle the receipt of a packet, to
  . leave the interrupt code looking slightly cleaner
 */
-inline static void smc_rcv( struct net_device *dev );
+static inline void smc_rcv( struct net_device *dev );
 /*
  . This handles a TX interrupt, which is only called when an error
  . relating to a packet is sent.
 */
-inline static void smc_tx( struct net_device * dev );
+static inline void smc_tx( struct net_device * dev );
 
 /*
  ------------------------------------------------------------
@@ -616,7 +620,7 @@ static void smc_hardware_send_packet( struct net_device * dev )
 	if ( packet_no & 0x80 ) {
 		/* or isn't there?  BAD CHIP! */
 		printk(KERN_DEBUG CARDNAME": Memory allocation failed. \n");
-		dev_kfree_skb_irq(skb);
+		dev_kfree_skb_any(skb);
 		lp->saved_skb = NULL;
 		netif_wake_queue(dev);
 		return;
@@ -679,7 +683,7 @@ static void smc_hardware_send_packet( struct net_device * dev )
 	PRINTK2((CARDNAME": Sent packet of length %d \n",length));
 
 	lp->saved_skb = NULL;
-	dev_kfree_skb_irq (skb);
+	dev_kfree_skb_any (skb);
 
 	dev->trans_start = jiffies;
 
@@ -982,12 +986,6 @@ static int __init smc_probe(struct net_device *dev, int ioaddr)
 		printk(CARDNAME": Couldn't autodetect your IRQ. Use irq=xx.\n");
 		retval = -ENODEV;
 		goto err_out;
-	}
-	if (dev->irq == 2) {
-		/* Fixup for users that don't know that IRQ 2 is really IRQ 9,
-		 * or don't know which one to set.
-		 */
-		dev->irq = 9;
 	}
 
 	/* now, print out the card info, in a short format.. */
@@ -1341,9 +1339,9 @@ static void smc_rcv(struct net_device *dev)
 		skb = dev_alloc_skb( packet_length + 5);
 
 		if ( skb == NULL ) {
-			printk(KERN_NOTICE CARDNAME
-			": Low memory, packet dropped.\n");
+			printk(KERN_NOTICE CARDNAME ": Low memory, packet dropped.\n");
 			lp->stats.rx_dropped++;
+			goto done;
 		}
 
 		/*
@@ -1369,13 +1367,11 @@ static void smc_rcv(struct net_device *dev)
 			packet_length & 0x3  );
 #else
 		PRINTK3((" Reading %d words and %d byte(s) \n",
-			(packet_length >> 1 ), packet_length & 1 );
-		if ( packet_length & 1 )
-			*(data++) = inb( ioaddr + DATA_1 );
-		insw(ioaddr + DATA_1 , data, (packet_length + 1 ) >> 1);
+			(packet_length >> 1 ), packet_length & 1 ));
+		insw(ioaddr + DATA_1 , data, packet_length >> 1);
 		if ( packet_length & 1 ) {
 			data += packet_length & ~1;
-			*((data++) = inb( ioaddr + DATA_1 );
+			*(data++) = inb( ioaddr + DATA_1 );
 		}
 #endif
 #if	SMC_DEBUG > 2
@@ -1384,7 +1380,9 @@ static void smc_rcv(struct net_device *dev)
 
 		skb->protocol = eth_type_trans(skb, dev );
 		netif_rx(skb);
+		dev->last_rx = jiffies;
 		lp->stats.rx_packets++;
+		lp->stats.rx_bytes += packet_length;
 	} else {
 		/* error ... */
 		lp->stats.rx_errors++;
@@ -1394,11 +1392,10 @@ static void smc_rcv(struct net_device *dev)
 			lp->stats.rx_length_errors++;
 		if ( status & RS_BADCRC)	lp->stats.rx_crc_errors++;
 	}
+
+done:
 	/*  error or good, tell the card to get rid of this packet */
 	outw( MC_RELEASE, ioaddr + MMU_CMD );
-
-
-	return;
 }
 
 
@@ -1561,10 +1558,14 @@ static struct net_device devSMC9194;
 static int io;
 static int irq;
 static int ifport;
+MODULE_LICENSE("GPL");
 
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
 MODULE_PARM(ifport, "i");
+MODULE_PARM_DESC(io, "SMC 99194 I/O base address");
+MODULE_PARM_DESC(irq, "SMC 99194 IRQ number");
+MODULE_PARM_DESC(ifport, "SMC 99194 interface port (0-default, 1-TP, 2-AUI)");
 
 int init_module(void)
 {

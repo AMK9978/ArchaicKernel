@@ -28,10 +28,12 @@
 #define DbgDelay(secs) { int wait_time; printk( " DbgDelay %ds ", secs); \
                          for( wait_time=jiffies + (secs*HZ); \
 		         wait_time > jiffies ;) ; }
+
 #define CPQFCTS_DRIVER_VER(maj,min,submin) ((maj<<16)|(min<<8)|(submin))
-#define VER_MAJOR 1
-#define VER_MINOR 3
-#define VER_SUBMINOR 4
+// don't forget to also change MODULE_DESCRIPTION in cpqfcTSinit.c
+#define VER_MAJOR 2
+#define VER_MINOR 1
+#define VER_SUBMINOR 1
 
 // Macros for kernel (esp. SMP) tracing using a PCI analyzer
 // (e.g. x86).
@@ -77,7 +79,10 @@
 // PDA is Peripheral Device Address, VSA is Volume Set Addressing
 // Linux SCSI parameters
 #define CPQFCTS_MAX_TARGET_ID 64
-#define CPQFCTS_MAX_LUN 8    // The RA-4x00 supports 32 (Linux SCSI supports 8)
+
+// Note, changing CPQFCTS_MAX_LUN to less than 32 (e.g, 8) will result in
+// strange behavior if a box with more than, e.g. 8, is on the loop.
+#define CPQFCTS_MAX_LUN 32    // The RA-4x00 supports 32 (Linux SCSI supports 8)
 #define CPQFCTS_MAX_CHANNEL 0 // One FC port on cpqfcTS HBA
 
 #define CPQFCTS_CMD_PER_LUN 15 // power of 2 -1, must be >0 
@@ -225,6 +230,7 @@ typedef __u8 BOOLEAN;
 #define ELS_RJT 0x1000000
 #define SCSI_REPORT_LUNS 0x0A0
 #define REPORT_LUNS 0xA0 // SCSI-3 command op-code
+#define FCP_TARGET_RESET 0x200
 
 #define ELS_LILP_FRAME 0x00000711 // 1st payload word of LILP frame
 
@@ -409,11 +415,23 @@ typedef struct           // TachLite placeholder for IRBs
                          // struct is sized for largest expected cmnd (LOGIN)
 } TachLiteERQ;
 
+// for now, just 32 bit DMA, eventually 40something, with code changes
+#define CPQFCTS_DMA_MASK ((unsigned long) (0x00000000FFFFFFFF))
 
-#define TL_MAX_SGPAGES 4  // arbitrary limit to # of TL Ext. S/G pages
-                          // stores array of allocated page blocks used
-                          // in extended S/G lists.  Affects amount of static
-                          // memory consumed by driver.
+#define TL_MAX_SG_ELEM_LEN 0x7ffff  // Max buffer length a single S/G entry
+				// may represent (a hardware limitation).  The
+				// only reason to ever change this is if you
+				// want to exercise very-hard-to-reach code in
+				// cpqfcTSworker.c:build_SEST_sglist().
+
+#define TL_DANGER_SGPAGES 7  // arbitrary high water mark for # of S/G pages
+				// we must exceed to elicit a warning indicative
+				// of EXTREMELY large data transfers or 
+				// EXTREME memory fragmentation.
+				// (means we just used up 2048 S/G elements,
+				// Never seen this is real life, only in 
+				// testing with tricked up driver.)
+
 #define TL_EXT_SG_PAGE_COUNT 256  // Number of Extended Scatter/Gather a/l PAIRS
                                   // Tachyon register (IOBaseU 0x68)
                                   // power-of-2 value ONLY!  4 min, 256 max
@@ -431,6 +449,8 @@ typedef struct
   ULONG RSP_Len;
   ULONG RSP_Addr;
   ULONG Buff_Off;
+#define USES_EXTENDED_SGLIST(this_sest, x_ID) \
+	(!((this_sest)->u[ x_ID ].IWE.Buff_Off & 0x80000000))
   ULONG Link;
   ULONG RX_ID;
   ULONG Data_Len;
@@ -510,12 +530,14 @@ typedef struct
   ULONG GAddr3;
 } TachLiteTRE;
 
-typedef struct
+typedef struct ext_sg_page_ptr_t *PSGPAGES;
+typedef struct ext_sg_page_ptr_t 
 {
-  void *PoolPage[TL_MAX_SGPAGES];
-} SGPAGES, *PSGPAGES; // linked list of S/G pairs, by Exchange
-
-
+  unsigned char page[TL_EXT_SG_PAGE_BYTELEN * 2]; // 2x for alignment
+  dma_addr_t busaddr; 	// need the bus addresses and
+  unsigned int maplen;  // lengths for later pci unmapping.
+  PSGPAGES next;
+} SGPAGES; // linked list of S/G pairs, by Exchange
 
 typedef struct                  // SCSI Exchange State Table
 {
@@ -529,7 +551,7 @@ typedef struct                  // SCSI Exchange State Table
 
   TachFCHDR DataHDR[TACH_SEST_LEN]; // for SEST FCP_DATA frame hdr (no pl)
   TachFCHDR_RSP RspHDR[TACH_SEST_LEN]; // space for SEST FCP_RSP frame
-  SGPAGES sgPages[TACH_SEST_LEN]; // array of Pool-allocations
+  PSGPAGES sgPages[TACH_SEST_LEN]; // head of linked list of Pool-allocations
   ULONG length;          // Length register
   ULONG base;            // copy of base ptr for debug
 } TachSEST;
@@ -638,6 +660,8 @@ typedef struct dyn_mem_pair
 {
   void *BaseAllocated;  // address as allocated from O/S;
   unsigned long AlignedAddress; // aligned address (used by Tachyon DMA)
+  dma_addr_t dma_handle;
+  size_t size;
 } ALIGNED_MEM;
 
 
@@ -781,6 +805,8 @@ typedef struct
   TachLiteSFQ *SFQ;          // Single Frame Queue
   TachSEST *SEST;            // SCSI Exchange State Table
 
+  dma_addr_t exch_dma_handle;
+
   // these function pointers are for "generic" functions, which are
   // replaced with Host Bus Adapter types at
   // runtime.
@@ -830,8 +856,9 @@ BOOLEAN tl_write_i2c_nvram( void* GPIOin, void* GPIOout,
 // define misc functions 
 int cpqfcTSGetLPSM( PTACHYON fcChip, char cErrorString[]);
 int cpqfcTSDecodeGBICtype( PTACHYON fcChip, char cErrorString[]);
-void* fcMemManager( ALIGNED_MEM *dyn_mem_pair, ULONG n_alloc, ULONG ab,
-                   ULONG ulAlignedAddress);
+void* fcMemManager( struct pci_dev *pdev,
+		ALIGNED_MEM *dyn_mem_pair, ULONG n_alloc, ULONG ab,
+                   ULONG ulAlignedAddress, dma_addr_t *dma_handle);
 
 void BigEndianSwap(  UCHAR *source, UCHAR *dest,  USHORT cnt);
 
@@ -899,6 +926,7 @@ typedef struct
   ALIGNED_MEM dynamic_mem[DYNAMIC_ALLOCATIONS];
 
   struct pci_dev *PciDev;
+  dma_addr_t fcLQ_dma_handle;
 
   Scsi_Cmnd *LinkDnCmnd[CPQFCTS_REQ_QUEUE_LEN]; // collects Cmnds during LDn
                                                 // (for Acceptable targets)
@@ -960,6 +988,7 @@ ULONG cpqfcTSStartExchange(
   LONG ExchangeID );
 
 void cpqfcTSCompleteExchange( 
+       struct pci_dev *pcidev,
        PTACHYON fcChip, 
        ULONG exchange_ID);
 
@@ -971,12 +1000,6 @@ PFC_LOGGEDIN_PORT  fcFindLoggedInPort(
   UCHAR wwn[8],    // search linked list for WWN, or...
   PFC_LOGGEDIN_PORT *pLastLoggedInPort
 );
-
-// don't do this unless you have the right hardware!
-#define TRIGGERABLE_HBA 1
-#ifdef TRIGGERABLE_HBA
-void TriggerHBA( void*, int);
-#endif
 
 void cpqfcTSPutLinkQue( 
   CPQFCHBA *cpqfcHBAdata, 
@@ -995,9 +1018,10 @@ void fcScsiQReset(
 void fcSestReset(
    CPQFCHBA *);
 
-
-
-
+void cpqfc_pci_unmap(struct pci_dev *pcidev, 
+	Scsi_Cmnd *cmd, 
+	PTACHYON fcChip, 
+	ULONG x_ID);
 
 extern const UCHAR valid_al_pa[];
 extern const int number_of_al_pa;
@@ -1378,6 +1402,12 @@ typedef struct {
 
 	ULONG	s_id;
 } ADISC_PAYLOAD;
+
+struct ext_sg_entry_t {
+	__u32 len:18;		/* buffer length, bits 0-17 */
+	__u32 uba:13;		/* upper bus address bits 18-31 */
+	__u32 lba;		/* lower bus address bits 0-31 */
+}; 
 
 // J. McCarty's LINK.H
 //

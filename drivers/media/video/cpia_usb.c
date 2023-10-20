@@ -4,7 +4,7 @@
  * Supports CPiA based parallel port Video Camera's.
  *
  * Copyright (C) 1999        Jochen Scharrlach <Jochen.Scharrlach@schwaben.de>
- * Copyright (C) 1999, 2000  Johannes Erdfelt <jerdfelt@valinux.com>
+ * Copyright (C) 1999, 2000  Johannes Erdfelt <johannes@erdfelt.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -104,6 +104,7 @@ static struct cpia_camera_ops cpia_usb_ops = {
 };
 
 static struct cam_data *cam_list;
+static spinlock_t cam_list_lock_usb;
 
 static void cpia_usb_complete(struct urb *urb)
 {
@@ -536,7 +537,9 @@ static void *cpia_probe(struct usb_device *udev, unsigned int ifnum,
 		goto fail_all;
 	}
 
-	ADD_TO_LIST(cam_list, cam);
+	spin_lock( &cam_list_lock_usb );
+	cpia_add_to_list(cam_list, cam);
+	spin_unlock( &cam_list_lock_usb );
 
 	return cam;
 
@@ -558,10 +561,13 @@ static void cpia_disconnect(struct usb_device *dev, void *ptr);
 
 static struct usb_device_id cpia_id_table [] = {
 	{ USB_DEVICE(0x0553, 0x0002) },
+	{ USB_DEVICE(0x0813, 0x0001) },
 	{ }					/* Terminating entry */
 };
 
 MODULE_DEVICE_TABLE (usb, cpia_id_table);
+MODULE_LICENSE("GPL");
+
 
 static struct usb_driver cpia_driver = {
 	name:		"cpia",
@@ -578,8 +584,10 @@ static void cpia_disconnect(struct usb_device *udev, void *ptr)
 	struct cam_data *cam = (struct cam_data *) ptr;
 	struct usb_cpia *ucpia = (struct usb_cpia *) cam->lowlevel_data;
   
-	REMOVE_FROM_LIST(cam);
-
+	spin_lock( &cam_list_lock_usb );
+	cpia_remove_from_list(cam);
+	spin_unlock( &cam_list_lock_usb );
+	
 	/* Don't even try to reset the altsetting if we're disconnected */
 	cpia_usb_free_resources(ucpia, 0);
 
@@ -619,7 +627,7 @@ static void cpia_disconnect(struct usb_device *udev, void *ptr)
 static int __init usb_cpia_init(void)
 {
 	cam_list = NULL;
-
+	spin_lock_init(&cam_list_lock_usb);
 	return usb_register(&cpia_driver);
 }
 

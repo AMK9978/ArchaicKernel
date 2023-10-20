@@ -15,7 +15,7 @@
  */
 
 #include <linux/unistd.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/stat.h>
 #include <linux/in.h>
 
@@ -213,7 +213,8 @@ exp_export(struct nfsctl_export *nxp)
 
 	err = -EINVAL;
 	if (!(inode->i_sb->s_type->fs_flags & FS_REQUIRES_DEV) ||
-	    inode->i_sb->s_op->read_inode == NULL) {
+	    (inode->i_sb->s_op->read_inode == NULL
+	     && inode->i_sb->s_op->fh_to_dentry == NULL)) {
 		dprintk("exp_export: export of invalid fs type.\n");
 		goto finish;
 	}
@@ -427,7 +428,7 @@ exp_rootfh(struct svc_client *clp, kdev_t dev, ino_t ino,
 	 * fh must be initialized before calling fh_compose
 	 */
 	fh_init(&fh, maxsize);
-	if (fh_compose(&fh, exp, dget(nd.dentry)))
+	if (fh_compose(&fh, exp, dget(nd.dentry), NULL))
 		err = -EINVAL;
 	else
 		err = 0;
@@ -549,15 +550,15 @@ struct flags {
 	{ NFSEXP_INSECURE_PORT, {"insecure", ""}},
 	{ NFSEXP_ROOTSQUASH, {"root_squash", "no_root_squash"}},
 	{ NFSEXP_ALLSQUASH, {"all_squash", ""}},
-	{ NFSEXP_ASYNC, {"async", ""}},
-	{ NFSEXP_GATHERED_WRITES, {"wdelay", ""}},
+	{ NFSEXP_ASYNC, {"async", "sync"}},
+	{ NFSEXP_GATHERED_WRITES, {"wdelay", "no_wdelay"}},
 	{ NFSEXP_UIDMAP, {"uidmap", ""}},
 	{ NFSEXP_KERBEROS, { "kerberos", ""}},
 	{ NFSEXP_SUNSECURE, { "sunsecure", ""}},
 	{ NFSEXP_CROSSMNT, {"nohide", ""}},
 	{ NFSEXP_NOSUBTREECHECK, {"no_subtree_check", ""}},
 	{ NFSEXP_NOAUTHNLM, {"insecure_locks", ""}},
-#ifdef NSMFS
+#ifdef MSNFS
 	{ NFSEXP_MSNFS, {"msnfs", ""}},
 #endif
 	{ 0, {"", ""}}
@@ -581,6 +582,38 @@ exp_flags(char *buffer, int flag)
     return len;
 }
 
+
+
+/* mangling borrowed from fs/super.c */
+/* Use octal escapes, like mount does, for embedded spaces etc. */
+static unsigned char need_escaping[] = { ' ', '\t', '\n', '\\' };
+
+static int
+mangle(const unsigned char *s, char *buf, int len) {
+        char *sp;
+        int n;
+
+        sp = buf;
+        while(*s && sp-buf < len-3) {
+                for (n = 0; n < sizeof(need_escaping); n++) {
+                        if (*s == need_escaping[n]) {
+                                *sp++ = '\\';
+                                *sp++ = '0' + ((*s & 0300) >> 6);
+                                *sp++ = '0' + ((*s & 070) >> 3);
+                                *sp++ = '0' + (*s & 07);
+                                goto next;
+                        }
+                }
+                *sp++ = *s;
+        next:
+                s++;
+        }
+        return sp - buf;	/* no trailing NUL */
+}
+
+#define FREEROOM	((int)PAGE_SIZE-200-len)
+#define MANGLE(s)	len += mangle((s), buffer+len, FREEROOM);
+
 int
 exp_procfs_exports(char *buffer, char **start, off_t offset,
                              int length, int *eof, void *data)
@@ -593,7 +626,7 @@ exp_procfs_exports(char *buffer, char **start, off_t offset,
         int	len = 0;
 	int	i,j;
 
-        len += sprintf(buffer, "# Version 1.0\n");
+        len += sprintf(buffer, "# Version 1.1\n");
         len += sprintf(buffer+len, "# Path Client(Flags) # IPs\n");
 
 	for (clp = clients; clp; clp = clp->cl_next) {
@@ -601,9 +634,10 @@ exp_procfs_exports(char *buffer, char **start, off_t offset,
 			exp = clp->cl_export[i];
 			while (exp) {
 				int first = 0;
-				len += sprintf(buffer+len, "%s\t", exp->ex_path);
-				len += sprintf(buffer+len, "%s", clp->cl_ident);
-				len += sprintf(buffer+len, "(");
+				MANGLE(exp->ex_path);
+				buffer[len++]='\t';
+				MANGLE(clp->cl_ident);
+				buffer[len++]='(';
 
 				len += exp_flags(buffer+len, exp->ex_flags);
 				len += sprintf(buffer+len, ") # ");

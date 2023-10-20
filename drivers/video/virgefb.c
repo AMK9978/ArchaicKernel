@@ -22,7 +22,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/zorro.h>
 #include <linux/fb.h>
@@ -1085,7 +1085,9 @@ int __init virgefb_setup(char *options)
 	if (!options || !*options)
 		return 0;
 
-	for (this_opt = strtok(options, ","); this_opt; this_opt = strtok(NULL, ","))
+	while ((this_opt = strsep(&options, ",")) != NULL) {
+		if (!*this_opt)
+			continue;
 		if (!strcmp(this_opt, "inverse")) {
 			Cyberfb_inverse = 1;
 			fb_invert_cmaps();
@@ -1099,6 +1101,7 @@ int __init virgefb_setup(char *options)
 		}
 		else
 			get_video_mode(this_opt);
+	}
 
 	DPRINTK("default mode: xres=%d, yres=%d, bpp=%d\n",virgefb_default.xres,
                                                            virgefb_default.yres,
@@ -1392,6 +1395,8 @@ static struct display_switch fbcon_virge16 = {
 #endif
 
 #ifdef MODULE
+MODULE_LICENSE("GPL");
+
 int init_module(void)
 {
 	return virgefb_init();

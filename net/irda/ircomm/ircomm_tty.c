@@ -468,7 +468,8 @@ static int ircomm_tty_open(struct tty_struct *tty, struct file *filp)
 	/* Check if this is a "normal" ircomm device, or an irlpt device */
 	if (line < 0x10) {
 		self->service_type = IRCOMM_3_WIRE | IRCOMM_9_WIRE;
-		self->settings.service_type = IRCOMM_9_WIRE; /* Default */
+		self->settings.service_type = IRCOMM_9_WIRE; /* 9 wire as default */
+		self->settings.dce = IRCOMM_CTS | IRCOMM_CD; /* Default line settings */
 		IRDA_DEBUG(2, __FUNCTION__ "(), IrCOMM device\n");
 	} else {
 		IRDA_DEBUG(2, __FUNCTION__ "(), IrLPT device\n");
@@ -1106,7 +1107,7 @@ void ircomm_tty_check_modem_status(struct ircomm_tty_cb *self)
 /*
  * Function ircomm_tty_data_indication (instance, sap, skb)
  *
- *    Handle incomming data, and deliver it to the line discipline
+ *    Handle incoming data, and deliver it to the line discipline
  *
  */
 static int ircomm_tty_data_indication(void *instance, void *sap,
@@ -1155,7 +1156,7 @@ static int ircomm_tty_data_indication(void *instance, void *sap,
 /*
  * Function ircomm_tty_control_indication (instance, sap, skb)
  *
- *    Parse all incomming parameters (easy!)
+ *    Parse all incoming parameters (easy!)
  *
  */
 static int ircomm_tty_control_indication(void *instance, void *sap,
@@ -1362,6 +1363,7 @@ done:
 #ifdef MODULE
 MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");
 MODULE_DESCRIPTION("IrCOMM serial TTY driver");
+MODULE_LICENSE("GPL");
 
 int init_module(void) 
 {

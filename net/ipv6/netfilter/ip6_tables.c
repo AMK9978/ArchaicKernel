@@ -11,7 +11,7 @@
 #include <linux/module.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
-#include <linux/icmp.h>
+#include <linux/icmpv6.h>
 #include <net/ip.h>
 #include <asm/uaccess.h>
 #include <asm/semaphore.h>
@@ -1102,6 +1102,10 @@ do_replace(void *user, unsigned int len)
 	if (copy_from_user(&tmp, user, sizeof(tmp)) != 0)
 		return -EFAULT;
 
+	/* Pedantry: prevent them from hitting BUG() in vmalloc.c --RR */
+	if ((SMP_ALIGN(tmp.size) >> PAGE_SHIFT) + 2 > num_physpages)
+		return -ENOMEM;
+
 	newinfo = vmalloc(sizeof(struct ip6t_table_info)
 			  + SMP_ALIGN(tmp.size) * smp_num_cpus);
 	if (!newinfo)
@@ -1286,6 +1290,7 @@ do_ip6t_get_ctl(struct sock *sk, int cmd, void *user, int *len)
 			ret = -EFAULT;
 			break;
 		}
+		name[IP6T_TABLE_MAXNAMELEN-1] = '\0';
 		t = find_table_lock(name, &ret, &ip6t_mutex);
 		if (t) {
 			struct ip6t_getinfo info;
@@ -1642,7 +1647,7 @@ udp_checkentry(const char *tablename,
 
 /* Returns 1 if the type and code is matched by the range, 0 otherwise */
 static inline int
-icmp_type_code_match(u_int8_t test_type, u_int8_t min_code, u_int8_t max_code,
+icmp6_type_code_match(u_int8_t test_type, u_int8_t min_code, u_int8_t max_code,
 		     u_int8_t type, u_int8_t code,
 		     int invert)
 {
@@ -1651,7 +1656,7 @@ icmp_type_code_match(u_int8_t test_type, u_int8_t min_code, u_int8_t max_code,
 }
 
 static int
-icmp_match(const struct sk_buff *skb,
+icmp6_match(const struct sk_buff *skb,
 	   const struct net_device *in,
 	   const struct net_device *out,
 	   const void *matchinfo,
@@ -1660,7 +1665,7 @@ icmp_match(const struct sk_buff *skb,
 	   u_int16_t datalen,
 	   int *hotdrop)
 {
-	const struct icmphdr *icmp = hdr;
+	const struct icmp6hdr *icmp = hdr;
 	const struct ip6t_icmp *icmpinfo = matchinfo;
 
 	if (offset == 0 && datalen < 2) {
@@ -1673,16 +1678,16 @@ icmp_match(const struct sk_buff *skb,
 
 	/* Must not be a fragment. */
 	return !offset
-		&& icmp_type_code_match(icmpinfo->type,
+		&& icmp6_type_code_match(icmpinfo->type,
 					icmpinfo->code[0],
 					icmpinfo->code[1],
-					icmp->type, icmp->code,
+					icmp->icmp6_type, icmp->icmp6_code,
 					!!(icmpinfo->invflags&IP6T_ICMP_INV));
 }
 
 /* Called when user tries to insert an entry of this type. */
 static int
-icmp_checkentry(const char *tablename,
+icmp6_checkentry(const char *tablename,
 	   const struct ip6t_ip6 *ipv6,
 	   void *matchinfo,
 	   unsigned int matchsize,
@@ -1691,7 +1696,7 @@ icmp_checkentry(const char *tablename,
 	const struct ip6t_icmp *icmpinfo = matchinfo;
 
 	/* Must specify proto == ICMP, and no unknown invflags */
-	return ipv6->proto == IPPROTO_ICMP
+	return ipv6->proto == IPPROTO_ICMPV6
 		&& !(ipv6->invflags & IP6T_INV_PROTO)
 		&& matchsize == IP6T_ALIGN(sizeof(struct ip6t_icmp))
 		&& !(icmpinfo->invflags & ~IP6T_ICMP_INV);
@@ -1711,8 +1716,8 @@ static struct ip6t_match tcp_matchstruct
 = { { NULL, NULL }, "tcp", &tcp_match, &tcp_checkentry, NULL };
 static struct ip6t_match udp_matchstruct
 = { { NULL, NULL }, "udp", &udp_match, &udp_checkentry, NULL };
-static struct ip6t_match icmp_matchstruct
-= { { NULL, NULL }, "icmp", &icmp_match, &icmp_checkentry, NULL };
+static struct ip6t_match icmp6_matchstruct
+= { { NULL, NULL }, "icmp6", &icmp6_match, &icmp6_checkentry, NULL };
 
 #ifdef CONFIG_PROC_FS
 static inline int print_name(const struct ip6t_table *t,
@@ -1761,7 +1766,7 @@ static int __init init(void)
 	list_append(&ip6t_target, &ip6t_error_target);
 	list_append(&ip6t_match, &tcp_matchstruct);
 	list_append(&ip6t_match, &udp_matchstruct);
-	list_append(&ip6t_match, &icmp_matchstruct);
+	list_append(&ip6t_match, &icmp6_matchstruct);
 	up(&ip6t_mutex);
 
 	/* Register setsockopt */
@@ -1790,5 +1795,14 @@ static void __exit fini(void)
 #endif
 }
 
+EXPORT_SYMBOL(ip6t_register_table);
+EXPORT_SYMBOL(ip6t_unregister_table);
+EXPORT_SYMBOL(ip6t_do_table);
+EXPORT_SYMBOL(ip6t_register_match);
+EXPORT_SYMBOL(ip6t_unregister_match);
+EXPORT_SYMBOL(ip6t_register_target);
+EXPORT_SYMBOL(ip6t_unregister_target);
+
 module_init(init);
 module_exit(fini);
+MODULE_LICENSE("GPL");

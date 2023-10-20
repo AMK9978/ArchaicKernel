@@ -1,4 +1,4 @@
-/* $Id: sys_sunos32.c,v 1.55 2000/11/18 02:10:59 davem Exp $
+/* $Id: sys_sunos32.c,v 1.61 2001/08/13 14:40:07 davem Exp $
  * sys_sunos32.c: SunOS binary compatability layer on sparc64.
  *
  * Copyright (C) 1995, 1996, 1997 David S. Miller (davem@caip.rutgers.edu)
@@ -27,7 +27,7 @@
 #include <linux/utsname.h>
 #include <linux/major.h>
 #include <linux/stat.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/pagemap.h>
 #include <linux/errno.h>
 #include <linux/smp.h>
@@ -100,12 +100,12 @@ asmlinkage u32 sunos_mmap(u32 addr, u32 len, u32 prot, u32 flags, u32 fd, u32 of
 	flags &= ~_MAP_NEW;
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	retval = do_mmap(file,
 			 (unsigned long) addr, (unsigned long) len,
 			 (unsigned long) prot, (unsigned long) flags,
 			 (unsigned long) off);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 	if(!ret_type)
 		retval = ((retval < 0xf0000000) ? 0 : retval);
 out_putf:
@@ -126,7 +126,7 @@ asmlinkage int sunos_brk(u32 baddr)
 	unsigned long rlim;
 	unsigned long newbrk, oldbrk, brk = (unsigned long) baddr;
 
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	if (brk < current->mm->end_code)
 		goto out;
 	newbrk = PAGE_ALIGN(brk);
@@ -170,7 +170,7 @@ asmlinkage int sunos_brk(u32 baddr)
 	do_brk(oldbrk, newbrk-oldbrk);
 	retval = 0;
 out:
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 	return retval;
 }
 
@@ -277,7 +277,7 @@ struct sunos_dirent_callback {
 #define ROUND_UP(x) (((x)+sizeof(s32)-1) & ~(sizeof(s32)-1))
 
 static int sunos_filldir(void * __buf, const char * name, int namlen,
-			 off_t offset, ino_t ino, unsigned int d_type)
+			 loff_t offset, ino_t ino, unsigned int d_type)
 {
 	struct sunos_dirent * dirent;
 	struct sunos_dirent_callback * buf = (struct sunos_dirent_callback *) __buf;
@@ -359,7 +359,7 @@ struct sunos_direntry_callback {
 };
 
 static int sunos_filldirentry(void * __buf, const char * name, int namlen,
-			      off_t offset, ino_t ino, unsigned int d_type)
+			      loff_t offset, ino_t ino, unsigned int d_type)
 {
 	struct sunos_direntry * dirent;
 	struct sunos_direntry_callback * buf = (struct sunos_direntry_callback *) __buf;
@@ -456,6 +456,10 @@ asmlinkage int sunos_nosys(void)
 	static int cnt;
 
 	regs = current->thread.kregs;
+	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+		regs->tpc &= 0xffffffff;
+		regs->tnpc &= 0xffffffff;
+	}
 	info.si_signo = SIGSYS;
 	info.si_errno = 0;
 	info.si_code = __SI_FAULT|0x100;
@@ -580,8 +584,6 @@ struct sunos_nfs_mount_args {
 	char       *netname;   /* server's netname */
 };
 
-extern dev_t get_unnamed_dev(void);
-extern void put_unnamed_dev(dev_t);
 extern asmlinkage int sys_mount(char *, char *, char *, unsigned long, void *);
 extern asmlinkage int sys_connect(int fd, struct sockaddr *uservaddr, int addrlen);
 extern asmlinkage int sys_socket(int family, int type, int protocol);
@@ -713,7 +715,7 @@ static int sunos_nfs_mount(char *dir_name, int linux_flags, void *data)
 asmlinkage int
 sunos_mount(char *type, char *dir, int flags, void *data)
 {
-	int linux_flags = MS_MGC_MSK; /* new semantics */
+	int linux_flags = 0;
 	int ret = -EINVAL;
 	char *dev_fname = 0;
 	char *dir_page, *type_page;
@@ -1047,6 +1049,7 @@ asmlinkage int sunos_msgsys(int op, u32 arg1, u32 arg2, u32 arg3, u32 arg4)
 			(current->thread.kregs->u_regs[UREG_FP] & 0xffffffffUL);
 		if(get_user(arg5, &sp->xxargs[0])) {
 			rval = -EFAULT;
+			kfree(kmbuf);
 			break;
 		}
 		set_fs(KERNEL_DS);

@@ -1,9 +1,13 @@
+/*
+ * BK Id: SCCS/s.irq.h 1.9 05/17/01 18:14:24 cort
+ */
 #ifdef __KERNEL__
 #ifndef _ASM_IRQ_H
 #define _ASM_IRQ_H
 
 #include <linux/config.h>
 #include <asm/machdep.h>		/* ppc_md */
+#include <asm/atomic.h>
 
 extern void disable_irq(unsigned int);
 extern void disable_irq_nosync(unsigned int);
@@ -87,23 +91,31 @@ irq_cannonicalize(int irq)
 #define	SIU_IRQ7	(14)
 #define	SIU_LEVEL7	(15)
 
+/* Now include the board configuration specific associations.
+*/
+#include <asm/mpc8xx.h>
+
 /* The internal interrupts we can configure as we see fit.
  * My personal preference is CPM at level 2, which puts it above the
  * MBX PCI/ISA/IDE interrupts.
  */
+#ifndef PIT_INTERRUPT
 #define PIT_INTERRUPT		SIU_LEVEL0
+#endif
+#ifndef	CPM_INTERRUPT
 #define CPM_INTERRUPT		SIU_LEVEL2
+#endif
+#ifndef	PCMCIA_INTERRUPT
 #define PCMCIA_INTERRUPT	SIU_LEVEL6
+#endif
+#ifndef	DEC_INTERRUPT
 #define DEC_INTERRUPT		SIU_LEVEL7
+#endif
 
 /* Some internal interrupt registers use an 8-bit mask for the interrupt
  * level instead of a number.
  */
 #define	mk_int_int_mask(IL) (1 << (7 - (IL/2)))
-
-/* Now include the board configuration specific associations.
-*/
-#include <asm/mpc8xx.h>
 
 /* always the same on 8xx -- Cort */
 static __inline__ int irq_cannonicalize(int irq)
@@ -163,9 +175,6 @@ extern irq_node_t *new_irq_node(void);
 #ifndef CONFIG_8260
 
 #define NUM_8259_INTERRUPTS	16
-#define IRQ_8259_CASCADE	16
-#define openpic_to_irq(n)	((n)+NUM_8259_INTERRUPTS)
-#define irq_to_openpic(n)	((n)-NUM_8259_INTERRUPTS)
 
 #else /* CONFIG_8260 */
 
@@ -214,7 +223,10 @@ static __inline__ int irq_cannonicalize(int irq)
 #endif
 
 #define NR_MASK_WORDS	((NR_IRQS + 31) / 32)
-extern unsigned int ppc_lost_interrupts[NR_MASK_WORDS];
+/* pendatic: these are long because they are used with set_bit --RR */
+extern unsigned long ppc_cached_irq_mask[NR_MASK_WORDS];
+extern unsigned long ppc_lost_interrupts[NR_MASK_WORDS];
+extern atomic_t ppc_n_lost_interrupts;
 
 #endif /* _ASM_IRQ_H */
 #endif /* __KERNEL__ */

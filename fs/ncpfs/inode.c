@@ -24,7 +24,7 @@
 #include <linux/locks.h>
 #include <linux/file.h>
 #include <linux/fcntl.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/init.h>
 
@@ -692,7 +692,7 @@ int ncp_notify_change(struct dentry *dentry, struct iattr *attr)
 		ncp_inode_close(inode);
 		result = ncp_make_closed(inode);
 		if (!result)
-			vmtruncate(inode, attr->ia_size);
+			result = vmtruncate(inode, attr->ia_size);
 	}
 out:
 	return result;
@@ -730,3 +730,4 @@ EXPORT_NO_SYMBOLS;
 
 module_init(init_ncp_fs)
 module_exit(exit_ncp_fs)
+MODULE_LICENSE("GPL");

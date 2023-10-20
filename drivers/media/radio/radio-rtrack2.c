@@ -23,6 +23,7 @@
 #endif
 
 static int io = CONFIG_RADIO_RTRACK2_PORT; 
+static int radio_nr = -1;
 static int users = 0;
 static spinlock_t lock;
 
@@ -201,20 +202,19 @@ static int rt_open(struct video_device *dev, int flags)
 	if(users)
 		return -EBUSY;
 	users++;
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static void rt_close(struct video_device *dev)
 {
 	users--;
-	MOD_DEC_USE_COUNT;
 }
 
 static struct rt_device rtrack2_unit;
 
 static struct video_device rtrack2_radio=
 {
+	owner:		THIS_MODULE,
 	name:		"RadioTrack II radio",
 	type:		VID_TYPE_TUNER,
 	hardware:	VID_HARDWARE_RTRACK2,
@@ -239,7 +239,7 @@ static int __init rtrack2_init(void)
 	rtrack2_radio.priv=&rtrack2_unit;
 
 	spin_lock_init(&lock);	
-	if(video_register_device(&rtrack2_radio, VFL_TYPE_RADIO)==-1)
+	if(video_register_device(&rtrack2_radio, VFL_TYPE_RADIO, radio_nr)==-1)
 	{
 		release_region(io, 4);
 		return -EINVAL;
@@ -256,8 +256,11 @@ static int __init rtrack2_init(void)
 
 MODULE_AUTHOR("Ben Pfaff");
 MODULE_DESCRIPTION("A driver for the RadioTrack II radio card.");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(io, "i");
 MODULE_PARM_DESC(io, "I/O address of the RadioTrack card (0x20c or 0x30c)");
+MODULE_PARM(radio_nr, "i");
 
 EXPORT_NO_SYMBOLS;
 

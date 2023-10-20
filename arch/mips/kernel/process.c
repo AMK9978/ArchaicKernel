@@ -1,12 +1,12 @@
-/* $Id: process.c,v 1.18 2000/01/29 01:41:59 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1994 - 1999 by Ralf Baechle and others.
+ * Copyright (C) 1994 - 2000 by Ralf Baechle and others.
  * Copyright (C) 1999 Silicon Graphics, Inc.
  */
+#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -14,13 +14,14 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mman.h>
 #include <linux/sys.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 
 #include <asm/bootinfo.h>
+#include <asm/cpu.h>
 #include <asm/pgtable.h>
 #include <asm/system.h>
 #include <asm/mipsregs.h>
@@ -55,7 +56,7 @@ void exit_thread(void)
 {
 	/* Forget lazy fpu state */
 	if (last_task_used_math == current) {
-		set_cp0_status(ST0_CU1, ST0_CU1);
+		set_cp0_status(ST0_CU1);
 		__asm__ __volatile__("cfc1\t$0,$31");
 		last_task_used_math = NULL;
 	}
@@ -65,7 +66,7 @@ void flush_thread(void)
 {
 	/* Forget lazy fpu state */
 	if (last_task_used_math == current) {
-		set_cp0_status(ST0_CU1, ST0_CU1);
+		set_cp0_status(ST0_CU1);
 		__asm__ __volatile__("cfc1\t$0,$31");
 		last_task_used_math = NULL;
 	}
@@ -81,10 +82,11 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 
 	childksp = (unsigned long)p + KERNEL_STACK_SIZE - 32;
 
-	if (last_task_used_math == current) {
-		set_cp0_status(ST0_CU1, ST0_CU1);
-		save_fp(p);
-	}
+	if (last_task_used_math == current)
+		if (mips_cpu.options & MIPS_CPU_FPU) {
+			set_cp0_status(ST0_CU1);
+			save_fp(p);
+		}
 	/* set up new TSS. */
 	childregs = (struct pt_regs *) childksp - 1;
 	*childregs = *regs;
@@ -115,8 +117,8 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	 * switching for most programs since they don't use the fpu.
 	 */
 	p->thread.cp0_status = read_32bit_cp0_register(CP0_STATUS) &
-                            ~(ST0_CU3|ST0_CU2|ST0_CU1|KU_MASK);
-	childregs->cp0_status &= ~(ST0_CU3|ST0_CU2|ST0_CU1);
+                            ~(ST0_CU2|ST0_CU1|KU_MASK);
+	childregs->cp0_status &= ~(ST0_CU2|ST0_CU1);
 
 	return 0;
 }
@@ -157,21 +159,21 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 	long retval;
 
 	__asm__ __volatile__(
-		".set\tnoreorder\n\t"
-		"move\t$6,$sp\n\t"
-		"move\t$4,%5\n\t"
-		"li\t$2,%1\n\t"
-		"syscall\n\t"
-		"beq\t$6,$sp,1f\n\t"
-		"subu\t$sp,32\n\t"	/* delay slot */
-		"jalr\t%4\n\t"
-		"move\t$4,%3\n\t"	/* delay slot */
-		"move\t$4,$2\n\t"
-		"li\t$2,%2\n\t"
-		"syscall\n"
-		"1:\taddiu\t$sp,32\n\t"
-		"move\t%0,$2\n\t"
-		".set\treorder"
+		".set noreorder               \n"
+		"    move    $6,$sp           \n"
+		"    move    $4,%5            \n"
+		"    li      $2,%1            \n"
+		"    syscall                  \n"
+		"    beq     $6,$sp,1f        \n"
+		"    subu    $sp,32           \n"	/* delay slot */
+		"    jalr    %4               \n"
+		"    move    $4,%3            \n"	/* delay slot */
+		"    move    $4,$2            \n"
+		"    li      $2,%2            \n"
+		"    syscall                  \n"
+		"1:  addiu   $sp,32           \n"
+		"    move    %0,$2            \n"
+		".set reorder"
 		:"=r" (retval)
 		:"i" (__NR_clone), "i" (__NR_exit),
 		 "r" (arg), "r" (fn),
@@ -194,27 +196,47 @@ extern void scheduling_functions_end_here(void);
 #define first_sched	((unsigned long) scheduling_functions_start_here)
 #define last_sched	((unsigned long) scheduling_functions_end_here)
 
+/* get_wchan - a maintenance nightmare ...  */
 unsigned long get_wchan(struct task_struct *p)
 {
-	unsigned long schedule_frame;
-	unsigned long pc;
+	unsigned long frame, pc;
 
 	if (!p || p == current || p->state == TASK_RUNNING)
 		return 0;
 
 	pc = thread_saved_pc(&p->thread);
-	if (pc == (unsigned long) interruptible_sleep_on
-	    || pc == (unsigned long) sleep_on) {
-		schedule_frame = ((unsigned long *)p->thread.reg30)[9];
-		return ((unsigned long *)schedule_frame)[15];
+	if (pc < first_sched || pc >= last_sched) {
+		return pc;
 	}
-	if (pc == (unsigned long) interruptible_sleep_on_timeout
-	    || pc == (unsigned long) sleep_on_timeout) {
-		schedule_frame = ((unsigned long *)p->thread.reg30)[9];
-		return ((unsigned long *)schedule_frame)[16];
-	}
+
+	if (pc >= (unsigned long) sleep_on_timeout)
+		goto schedule_timeout_caller;
+	if (pc >= (unsigned long) sleep_on)
+		goto schedule_caller;
+	if (pc >= (unsigned long) interruptible_sleep_on_timeout)
+		goto schedule_timeout_caller;
+	if (pc >= (unsigned long)interruptible_sleep_on)
+		goto schedule_caller;
+	goto schedule_timeout_caller;
+
+schedule_caller:
+	frame = ((unsigned long *)p->thread.reg30)[9];
+	pc    = ((unsigned long *)frame)[11];
+	return pc;
+
+schedule_timeout_caller:
+	/* Must be schedule_timeout ...  */
+	pc    = ((unsigned long *)p->thread.reg30)[10];
+	frame = ((unsigned long *)p->thread.reg30)[9];
+
+	/* The schedule_timeout frame ...  */
+	pc    = ((unsigned long *)frame)[14];
+	frame = ((unsigned long *)frame)[13];
+
 	if (pc >= first_sched && pc < last_sched) {
-		printk(KERN_DEBUG "Bug in %s\n", __FUNCTION__);
+		/* schedule_timeout called by interruptible_sleep_on_timeout */
+		pc    = ((unsigned long *)frame)[11];
+		frame = ((unsigned long *)frame)[10];
 	}
 
 	return pc;

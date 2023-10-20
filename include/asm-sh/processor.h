@@ -23,20 +23,20 @@
 enum cpu_type {
 	CPU_SH7708,		/* Represents 7707, 7708, 7708S, 7708R, 7709 */
 	CPU_SH7729,		/* Represents 7709A, 7729 */
-	CPU_SH7750,
+	CPU_SH7750,     /* Represents 7750, 7751 */
+	CPU_ST40STB1,
 	CPU_SH_NONE
 };
 
 struct sh_cpuinfo {
 	enum cpu_type type;
+	char	hard_math;
 	unsigned long loops_per_jiffy;
 
-	char	hard_math;
-
-	unsigned long *pgd_quick;
-	unsigned long *pte_quick;
-	unsigned long pgtable_cache_sz;
 	unsigned int cpu_clock, master_clock, bus_clock, module_clock;
+#ifdef CONFIG_CPU_SUBTYPE_ST40STB1
+	unsigned int memory_clock;
+#endif
 };
 
 extern struct sh_cpuinfo boot_cpu_data;
@@ -75,7 +75,7 @@ extern struct sh_cpuinfo boot_cpu_data;
 
 struct sh_fpu_hard_struct {
 	unsigned long fp_regs[16];
-	unsigned long long xd_regs[8];
+	unsigned long xfp_regs[16];
 	unsigned long fpscr;
 	unsigned long fpul;
 
@@ -85,7 +85,7 @@ struct sh_fpu_hard_struct {
 /* Dummy fpu emulator  */
 struct sh_fpu_soft_struct {
 	unsigned long fp_regs[16];
-	unsigned long long xd_regs[8];
+	unsigned long xfp_regs[16];
 	unsigned long fpscr;
 	unsigned long fpul;
 
@@ -109,9 +109,6 @@ struct thread_struct {
 	/* floating point info */
 	union sh_fpu_union fpu;
 };
-
-#define INIT_MMAP \
-{ &init_mm, 0x80000000, 0xa0000000, NULL, PAGE_SHARED, VM_READ | VM_WRITE | VM_EXEC, 1, NULL, NULL }
 
 #define INIT_THREAD  {						\
 	sizeof(init_stack) + (long) &init_stack, /* sp */	\
@@ -159,7 +156,7 @@ extern int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
  * FPU lazy state save handling.
  */
 
-extern __inline__ void release_fpu(void)
+static __inline__ void release_fpu(void)
 {
 	unsigned long __dummy;
 
@@ -171,7 +168,7 @@ extern __inline__ void release_fpu(void)
 			     : "r" (SR_FD));
 }
 
-extern __inline__ void grab_fpu(void)
+static __inline__ void grab_fpu(void)
 {
 	unsigned long __dummy;
 
@@ -203,7 +200,7 @@ extern void save_fpu(struct task_struct *__tsk);
 /*
  * Return saved PC of a blocked thread.
  */
-extern __inline__ unsigned long thread_saved_pc(struct thread_struct *t)
+static __inline__ unsigned long thread_saved_pc(struct thread_struct *t)
 {
 	return t->pc;
 }
@@ -220,5 +217,7 @@ extern void free_task_struct(struct task_struct *);
 
 #define init_task	(init_task_union.task)
 #define init_stack	(init_task_union.stack)
+
+#define cpu_relax()	do { } while (0)
 
 #endif /* __ASM_SH_PROCESSOR_H */

@@ -1,12 +1,12 @@
 /******************************************************************************
  *
  * Name: achware.h -- hardware specific interfaces
- *       $Revision: 48 $
+ *       $Revision: 56 $
  *
  *****************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -27,22 +27,26 @@
 #define __ACHWARE_H__
 
 
+/* PM Timer ticks per second (HZ) */
+#define PM_TIMER_FREQUENCY  3579545
+
+
 /* Prototypes */
 
 
-ACPI_STATUS
+acpi_status
 acpi_hw_initialize (
 	void);
 
-ACPI_STATUS
+acpi_status
 acpi_hw_shutdown (
 	void);
 
-ACPI_STATUS
+acpi_status
 acpi_hw_initialize_system_info (
 	void);
 
-ACPI_STATUS
+acpi_status
 acpi_hw_set_mode (
 	u32                     mode);
 
@@ -78,132 +82,85 @@ acpi_hw_register_write (
 u32
 acpi_hw_low_level_read (
 	u32                     width,
-	ACPI_GAS                *reg,
+	acpi_generic_address    *reg,
 	u32                     offset);
 
 void
 acpi_hw_low_level_write (
 	u32                     width,
 	u32                     value,
-	ACPI_GAS                *reg,
+	acpi_generic_address    *reg,
 	u32                     offset);
 
 void
 acpi_hw_clear_acpi_status (
    void);
 
+u32
+acpi_hw_get_bit_shift (
+	u32                     mask);
+
 
 /* GPE support */
 
 void
 acpi_hw_enable_gpe (
-	u32                     gpe_index);
+	u32                     gpe_number);
+
+void
+acpi_hw_enable_gpe_for_wakeup (
+	u32                     gpe_number);
 
 void
 acpi_hw_disable_gpe (
-	u32                     gpe_index);
+	u32                     gpe_number);
+
+void
+acpi_hw_disable_gpe_for_wakeup (
+	u32                     gpe_number);
 
 void
 acpi_hw_clear_gpe (
-	u32                     gpe_index);
+	u32                     gpe_number);
 
 void
 acpi_hw_get_gpe_status (
 	u32                     gpe_number,
-	ACPI_EVENT_STATUS       *event_status);
+	acpi_event_status       *event_status);
+
+void
+acpi_hw_disable_non_wakeup_gpes (
+	void);
+
+void
+acpi_hw_enable_non_wakeup_gpes (
+	void);
+
 
 /* Sleep Prototypes */
 
-ACPI_STATUS
+acpi_status
 acpi_hw_obtain_sleep_type_register_data (
 	u8                      sleep_state,
 	u8                      *slp_typ_a,
 	u8                      *slp_typ_b);
 
 
-/* Cx State Prototypes */
-
-ACPI_STATUS
-acpi_hw_enter_c1(
-	ACPI_IO_ADDRESS         pblk_address,
-	u32                     *pm_timer_ticks);
-
-ACPI_STATUS
-acpi_hw_enter_c2(
-	ACPI_IO_ADDRESS         pblk_address,
-	u32                     *pm_timer_ticks);
-
-ACPI_STATUS
-acpi_hw_enter_c3(
-	ACPI_IO_ADDRESS         pblk_address,
-	u32                     *pm_timer_ticks);
-
-ACPI_STATUS
-acpi_hw_enter_cx (
-	ACPI_IO_ADDRESS         pblk_address,
-	u32                     *pm_timer_ticks);
-
-ACPI_STATUS
-acpi_hw_set_cx (
-	u32                     cx_state);
-
-ACPI_STATUS
-acpi_hw_get_cx_info (
-	u32                     cx_states[]);
-
-ACPI_STATUS
-acpi_hw_get_cx_handler (
-	u32                     cx_state,
-	ACPI_C_STATE_HANDLER    *handler);
-
-ACPI_STATUS
-acpi_hw_set_cx_handler (
-	u32                     cx_state,
-	ACPI_C_STATE_HANDLER    handler);
-
-
-/* Throttling Prototypes */
-
-void
-acpi_hw_enable_throttling (
-	ACPI_IO_ADDRESS         pblk_address);
-
-void
-acpi_hw_disable_throttling (
-	ACPI_IO_ADDRESS         pblk_address);
-
-u32
-acpi_hw_get_duty_cycle (
-	u8                      duty_offset,
-	ACPI_IO_ADDRESS         pblk_address,
-	u32                     num_throttle_states);
-
-void
-acpi_hw_program_duty_cycle (
-	u8                      duty_offset,
-	u32                     duty_cycle,
-	ACPI_IO_ADDRESS         pblk_address,
-	u32                     num_throttle_states);
-
-NATIVE_UINT
-acpi_hw_local_pow (
-	NATIVE_UINT             x,
-	NATIVE_UINT             y);
-
-
 /* ACPI Timer prototypes */
 
-u32
-acpi_hw_pmt_ticks (
-	void);
+acpi_status
+acpi_get_timer_resolution (
+	u32                     *resolution);
 
-u32
-acpi_hw_pmt_resolution (
-	void);
-
-ACPI_STATUS
+acpi_status
 acpi_get_timer (
-	u32                     *out_ticks);
+	u32                     *ticks);
+
+acpi_status
+acpi_get_timer_duration (
+	u32                     start_ticks,
+	u32                     end_ticks,
+	u32                     *time_elapsed);
 
 
 #endif /* __ACHWARE_H__ */

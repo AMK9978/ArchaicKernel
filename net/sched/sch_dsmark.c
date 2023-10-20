@@ -6,6 +6,8 @@
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
+#include <linux/string.h>
+#include <linux/errno.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h> /* for pkt_sched */
 #include <linux/rtnetlink.h>
@@ -39,8 +41,14 @@
  *   x:y y>0	 y+1		use entry [y]
  *   ...	 ...		...
  * x:indices-1	indices		use entry [indices-1]
+ *   ...	 ...		...
+ *   x:y	 y+1		use entry [y & (indices-1)]
+ *   ...	 ...		...
+ * 0xffff	0x10000		use entry [indices-1]
  */
 
+
+#define NO_DEFAULT_INDEX	(1 << 16)
 
 struct dsmark_qdisc_data {
 	struct Qdisc		*q;
@@ -48,7 +56,7 @@ struct dsmark_qdisc_data {
 	__u8			*mask;	/* "owns" the array */
 	__u8			*value;
 	__u16			indices;
-	__u16			default_index;
+	__u32			default_index;	/* index range is 0...0xffff */
 	int			set_tc_index;
 };
 
@@ -76,7 +84,9 @@ static int dsmark_graft(struct Qdisc *sch,unsigned long arg,
 
 static struct Qdisc *dsmark_leaf(struct Qdisc *sch, unsigned long arg)
 {
-	return NULL;
+	struct dsmark_qdisc_data *p = PRIV(sch);
+
+	return p->q;
 }
 
 
@@ -179,7 +189,7 @@ static int dsmark_enqueue(struct sk_buff *skb,struct Qdisc *sch)
 	struct dsmark_qdisc_data *p = PRIV(sch);
 	struct tcf_result res;
 	int result;
-	int ret;
+	int ret = NET_XMIT_POLICED;
 
 	D2PRINTK("dsmark_enqueue(skb %p,sch %p,[qdisc %p])\n",skb,sch,p);
 	if (p->set_tc_index) {
@@ -217,7 +227,7 @@ static int dsmark_enqueue(struct sk_buff *skb,struct Qdisc *sch)
 			case TC_POLICE_UNSPEC:
 				/* fall through */
 			default:
-				if (p->default_index)
+				if (p->default_index != NO_DEFAULT_INDEX)
 					skb->tc_index = p->default_index;
 				break;
 		};
@@ -229,7 +239,7 @@ static int dsmark_enqueue(struct sk_buff *skb,struct Qdisc *sch)
 
 	    ((ret = p->q->enqueue(skb,p->q)) != 0)) {
 		sch->stats.drops++;
-		return 0;
+		return ret;
 	}
 	sch->stats.bytes += skb->len;
 	sch->stats.packets++;
@@ -325,14 +335,12 @@ int dsmark_init(struct Qdisc *sch,struct rtattr *opt)
 		if (tmp & 1)
 			return -EINVAL;
 	}
-	p->default_index = 0;
+	p->default_index = NO_DEFAULT_INDEX;
 	if (tb[TCA_DSMARK_DEFAULT_INDEX-1]) {
 		if (RTA_PAYLOAD(tb[TCA_DSMARK_DEFAULT_INDEX-1]) < sizeof(__u16))
 			return -EINVAL;
 		p->default_index =
 		    *(__u16 *) RTA_DATA(tb[TCA_DSMARK_DEFAULT_INDEX-1]);
-		if (!p->default_index || p->default_index >= p->indices)
-			return -EINVAL;
 	}
 	p->set_tc_index = !!tb[TCA_DSMARK_SET_TC_INDEX-1];
 	p->mask = kmalloc(p->indices*2,GFP_KERNEL);
@@ -411,9 +419,11 @@ static int dsmark_dump(struct Qdisc *sch, struct sk_buff *skb)
 	rta = (struct rtattr *) b;
 	RTA_PUT(skb,TCA_OPTIONS,0,NULL);
 	RTA_PUT(skb,TCA_DSMARK_INDICES,sizeof(__u16),&p->indices);
-	if (p->default_index)
-		RTA_PUT(skb,TCA_DSMARK_DEFAULT_INDEX, sizeof(__u16),
-			&p->default_index);
+	if (p->default_index != NO_DEFAULT_INDEX) {
+		__u16 tmp = p->default_index;
+
+		RTA_PUT(skb,TCA_DSMARK_DEFAULT_INDEX, sizeof(__u16), &tmp);
+	}
 	if (p->set_tc_index)
 		RTA_PUT(skb, TCA_DSMARK_SET_TC_INDEX, 0, NULL);
 	rta->rta_len = skb->tail-b;
@@ -480,3 +490,4 @@ void cleanup_module(void)
 	unregister_qdisc(&dsmark_qdisc_ops);
 }
 #endif
+MODULE_LICENSE("GPL");

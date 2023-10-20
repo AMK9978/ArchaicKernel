@@ -30,8 +30,6 @@
  * Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-static const char version[] = "1.28";
-
 #define __NO_VERSION__
 
 #include <linux/config.h>
@@ -51,6 +49,13 @@ static const char version[] = "1.28";
 
 #include "ov511.h"
 
+/*
+ * Version Information
+ */
+#define DRIVER_VERSION "v1.28"
+#define DRIVER_AUTHOR "Mark McClelland <mwm@i.am> & Bret Wallach & Orion Sky Lawlor <olawlor@acm.org> & Kevin Moore & Charl P. Botha <cpbotha@ieee.org> & Claudio Matsuoka <claudio@conectiva.com>"
+#define DRIVER_DESC "OV511 USB Camera Driver"
+
 #define OV511_I2C_RETRIES 3
 
 /* Video Size 640 x 480 x 3 bytes for RGB */
@@ -61,6 +66,8 @@ static const char version[] = "1.28";
 
 /* PARAMETER VARIABLES: */
 static int autoadjust = 1;    /* CCD dynamically changes exposure, etc... */
+
+static int video_nr = -1;
 
 /* 0=no debug messages
  * 1=init/detection/unload and other significant messages,
@@ -145,11 +152,11 @@ MODULE_PARM(sensor_gbr, "i");
 MODULE_PARM_DESC(sensor_gbr, "Make sensor output GBR422 rather than YUV420");
 MODULE_PARM(dumppix, "i");
 MODULE_PARM_DESC(dumppix, "Dump raw pixel data, in one of 3 formats. See ov511_dumppix() for details");
+MODULE_PARM(video_nr,"i");
 
-MODULE_AUTHOR("Mark McClelland <mwm@i.am> & Bret Wallach & Orion Sky Lawlor <olawlor@acm.org> & Kevin Moore & Charl P. Botha <cpbotha@ieee.org> & Claudio Matsuoka <claudio@conectiva.com>");
-MODULE_DESCRIPTION("OV511 USB Camera Driver");
-
-char kernel_version[] = UTS_RELEASE;
+MODULE_AUTHOR( DRIVER_AUTHOR );
+MODULE_DESCRIPTION( DRIVER_DESC );
+MODULE_LICENSE("GPL");
 
 static struct usb_driver ov511_driver;
 
@@ -332,7 +339,7 @@ static int ov511_read_proc(char *page, char **start, off_t off,
 	/* IMPORTANT: This output MUST be kept under PAGE_SIZE
 	 *            or we need to get more sophisticated. */
 
-	out += sprintf (out, "driver_version  : %s\n", version);
+	out += sprintf (out, "driver_version  : %s\n", DRIVER_VERSION);
 	out += sprintf (out, "custom_id       : %d\n", ov511->customid);
 	out += sprintf (out, "model           : %s\n", ov511->desc ?
 		clist[ov511->desc].description : "unknown");
@@ -2248,6 +2255,7 @@ static int ov511_ioctl(struct video_device *vdev, unsigned int cmd, void *arg)
 
 		PDEBUG (4, "VIDIOCGCAP");
 
+		memset(&b, 0, sizeof(b));
 		strcpy(b.name, "OV511 USB Camera");
 		b.type = VID_TYPE_CAPTURE | VID_TYPE_SUBCAPTURE;
 		b.channels = 1;
@@ -2299,9 +2307,11 @@ static int ov511_ioctl(struct video_device *vdev, unsigned int cmd, void *arg)
 
 		PDEBUG (4, "VIDIOCGPICT");
 
+		memset(&p, 0, sizeof(p));
+
 		if (ov7610_get_picture(ov511, &p))
 			return -EIO;
-							
+
 		if (copy_to_user(arg, &p, sizeof(p)))
 			return -EFAULT;
 
@@ -2416,11 +2426,11 @@ static int ov511_ioctl(struct video_device *vdev, unsigned int cmd, void *arg)
 	{
 		struct video_window vw;
 
+		memset(&vw, 0, sizeof(vw));
 		vw.x = 0;		/* FIXME */
 		vw.y = 0;
 		vw.width = ov511->frame[0].width;
 		vw.height = ov511->frame[0].height;
-		vw.chromakey = 0;
 		vw.flags = 30;
 
 		PDEBUG (4, "VIDIOCGWIN: %dx%d", vw.width, vw.height);
@@ -2433,12 +2443,16 @@ static int ov511_ioctl(struct video_device *vdev, unsigned int cmd, void *arg)
 	case VIDIOCGMBUF:
 	{
 		struct video_mbuf vm;
-
+		int i;
+		
 		memset(&vm, 0, sizeof(vm));
 		vm.size = OV511_NUMFRAMES * MAX_DATA_SIZE;
 		vm.frames = OV511_NUMFRAMES;
 		vm.offsets[0] = 0;
-		vm.offsets[1] = MAX_FRAME_SIZE + sizeof (struct timeval);
+		for (i = 1; i < OV511_NUMFRAMES; i++) {
+			vm.offsets[i] = vm.offsets[i-1] + MAX_FRAME_SIZE
+				+ sizeof (struct timeval);
+		}
 
 		if (copy_to_user((void *)arg, (void *)&vm, sizeof(vm)))
 			return -EFAULT;
@@ -2463,7 +2477,7 @@ static int ov511_ioctl(struct video_device *vdev, unsigned int cmd, void *arg)
 			return -EINVAL;
 		}
 
-		if ((vm.frame != 0) && (vm.frame != 1)) {
+		if ((unsigned)vm.frame >= OV511_NUMFRAMES) {
 			err("VIDIOCMCAPTURE: invalid frame (%d)", vm.frame);
 			return -EINVAL;
 		}
@@ -2513,9 +2527,17 @@ static int ov511_ioctl(struct video_device *vdev, unsigned int cmd, void *arg)
 		if (copy_from_user((void *)&frame, arg, sizeof(int)))
 			return -EFAULT;
 
+		if ((unsigned)frame >= OV511_NUMFRAMES) {
+			err("VIDIOCSYNC: invalid frame (%d)", frame);
+			return -EINVAL;
+		}
+
 		PDEBUG(4, "syncing to frame %d, grabstate = %d", frame,
 		       ov511->frame[frame].grabstate);
 
+		if(frame < 0 || frame >= OV511_NUMFRAMES)
+			return -EINVAL;
+			
 		switch (ov511->frame[frame].grabstate) {
 		case FRAME_UNUSED:
 			return -EINVAL;
@@ -3141,11 +3163,6 @@ static int ov511_configure(struct usb_ov511 *ov511)
 
 	init_waitqueue_head(&ov511->wq);
 
-	if (video_register_device(&ov511->vdev, VFL_TYPE_GRABBER) < 0) {
-		err("video_register_device failed");
-		return -EBUSY;
-	}
-
 	if (ov511_write_regvals(dev, aRegvalsInit)) goto error;
 	if (ov511_write_regvals(dev, aRegvalsNorm511)) goto error;
 
@@ -3214,7 +3231,6 @@ static int ov511_configure(struct usb_ov511 *ov511)
 	return 0;
 	
 error:
-	video_unregister_device(&ov511->vdev);
 	usb_driver_release_interface(&ov511_driver,
 		&dev->actconfig->interface[ov511->iface]);
 
@@ -3326,6 +3342,11 @@ ov511_probe(struct usb_device *dev, unsigned int ifnum,
 		goto error;
 	}
 
+	if (video_register_device(&ov511->vdev, VFL_TYPE_GRABBER, video_nr) < 0) {
+		err("video_register_device failed");
+		goto error;
+	}
+
 	MOD_DEC_USE_COUNT;
      	return ov511;
 
@@ -3421,7 +3442,7 @@ static int __init usb_ov511_init(void)
 	if (usb_register(&ov511_driver) < 0)
 		return -1;
 
-	info("ov511 driver version %s registered", version);
+	info(DRIVER_VERSION ":" DRIVER_DESC);
 
 	return 0;
 }

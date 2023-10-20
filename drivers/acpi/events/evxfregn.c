@@ -2,12 +2,12 @@
  *
  * Module Name: evxfregn - External Interfaces, ACPI Operation Regions and
  *                         Address Spaces.
- *              $Revision: 26 $
+ *              $Revision: 40 $
  *
  *****************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -32,11 +32,11 @@
 #include "amlcode.h"
 #include "acinterp.h"
 
-#define _COMPONENT          EVENT_HANDLING
+#define _COMPONENT          ACPI_EVENTS
 	 MODULE_NAME         ("evxfregn")
 
 
-/******************************************************************************
+/*******************************************************************************
  *
  * FUNCTION:    Acpi_install_address_space_handler
  *
@@ -52,52 +52,52 @@
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_install_address_space_handler (
-	ACPI_HANDLE             device,
-	ACPI_ADDRESS_SPACE_TYPE space_id,
-	ADDRESS_SPACE_HANDLER   handler,
-	ADDRESS_SPACE_SETUP     setup,
+	acpi_handle             device,
+	ACPI_ADR_SPACE_TYPE     space_id,
+	acpi_adr_space_handler  handler,
+	acpi_adr_space_setup    setup,
 	void                    *context)
 {
-	ACPI_OPERAND_OBJECT     *obj_desc;
-	ACPI_OPERAND_OBJECT     *handler_obj;
-	ACPI_NAMESPACE_NODE     *node;
-	ACPI_STATUS             status = AE_OK;
-	OBJECT_TYPE_INTERNAL    type;
+	acpi_operand_object     *obj_desc;
+	acpi_operand_object     *handler_obj;
+	acpi_namespace_node     *node;
+	acpi_status             status = AE_OK;
+	acpi_object_type8       type;
 	u16                     flags = 0;
+
+
+	FUNCTION_TRACE ("Acpi_install_address_space_handler");
 
 
 	/* Parameter validation */
 
 	if ((!device)   ||
 		((!handler)  && (handler != ACPI_DEFAULT_HANDLER)) ||
-		(space_id > ACPI_MAX_ADDRESS_SPACE))
-	{
-		return (AE_BAD_PARAMETER);
+		(space_id > ACPI_MAX_ADDRESS_SPACE)) {
+		return_ACPI_STATUS (AE_BAD_PARAMETER);
 	}
 
-	acpi_cm_acquire_mutex (ACPI_MTX_NAMESPACE);
+	acpi_ut_acquire_mutex (ACPI_MTX_NAMESPACE);
 
 	/* Convert and validate the device handle */
 
-	node = acpi_ns_convert_handle_to_entry (device);
+	node = acpi_ns_map_handle_to_node (device);
 	if (!node) {
 		status = AE_BAD_PARAMETER;
 		goto unlock_and_exit;
 	}
 
 	/*
-	 *  This registration is valid for only the types below
-	 *  and the root.  This is where the default handlers
-	 *  get placed.
+	 * This registration is valid for only the types below
+	 * and the root.  This is where the default handlers
+	 * get placed.
 	 */
-
 	if ((node->type != ACPI_TYPE_DEVICE)     &&
 		(node->type != ACPI_TYPE_PROCESSOR)  &&
 		(node->type != ACPI_TYPE_THERMAL)    &&
-		(node != acpi_gbl_root_node))
-	{
+		(node != acpi_gbl_root_node)) {
 		status = AE_BAD_PARAMETER;
 		goto unlock_and_exit;
 	}
@@ -105,21 +105,30 @@ acpi_install_address_space_handler (
 	if (handler == ACPI_DEFAULT_HANDLER) {
 		flags = ADDR_HANDLER_DEFAULT_INSTALLED;
 
-		switch (space_id)
-		{
-		case ADDRESS_SPACE_SYSTEM_MEMORY:
-			handler = acpi_aml_system_memory_space_handler;
-			setup = acpi_ev_system_memory_region_setup;
+		switch (space_id) {
+		case ACPI_ADR_SPACE_SYSTEM_MEMORY:
+			handler = acpi_ex_system_memory_space_handler;
+			setup   = acpi_ev_system_memory_region_setup;
 			break;
 
-		case ADDRESS_SPACE_SYSTEM_IO:
-			handler = acpi_aml_system_io_space_handler;
-			setup = acpi_ev_io_space_region_setup;
+		case ACPI_ADR_SPACE_SYSTEM_IO:
+			handler = acpi_ex_system_io_space_handler;
+			setup   = acpi_ev_io_space_region_setup;
 			break;
 
-		case ADDRESS_SPACE_PCI_CONFIG:
-			handler = acpi_aml_pci_config_space_handler;
-			setup = acpi_ev_pci_config_region_setup;
+		case ACPI_ADR_SPACE_PCI_CONFIG:
+			handler = acpi_ex_pci_config_space_handler;
+			setup   = acpi_ev_pci_config_region_setup;
+			break;
+
+		case ACPI_ADR_SPACE_CMOS:
+			handler = acpi_ex_cmos_space_handler;
+			setup   = acpi_ev_cmos_region_setup;
+			break;
+
+		case ACPI_ADR_SPACE_PCI_BAR_TARGET:
+			handler = acpi_ex_pci_bar_space_handler;
+			setup   = acpi_ev_pci_bar_region_setup;
 			break;
 
 		default:
@@ -130,21 +139,20 @@ acpi_install_address_space_handler (
 	}
 
 	/*
-	 *  If the caller hasn't specified a setup routine, use the default
+	 * If the caller hasn't specified a setup routine, use the default
 	 */
 	if (!setup) {
 		setup = acpi_ev_default_region_setup;
 	}
 
 	/*
-	 *  Check for an existing internal object
+	 * Check for an existing internal object
 	 */
-
-	obj_desc = acpi_ns_get_attached_object ((ACPI_HANDLE) node);
+	obj_desc = acpi_ns_get_attached_object (node);
 	if (obj_desc) {
 		/*
-		 *  The object exists.
-		 *  Make sure the handler is not already installed.
+		 * The object exists.
+		 * Make sure the handler is not already installed.
 		 */
 
 		/* check the address handler the user requested */
@@ -152,8 +160,8 @@ acpi_install_address_space_handler (
 		handler_obj = obj_desc->device.addr_handler;
 		while (handler_obj) {
 			/*
-			 *  We have an Address handler, see if user requested this
-			 *  address space.
+			 * We have an Address handler, see if user requested this
+			 * address space.
 			 */
 			if(handler_obj->addr_handler.space_id == space_id) {
 				status = AE_EXIST;
@@ -161,24 +169,26 @@ acpi_install_address_space_handler (
 			}
 
 			/*
-			 *  Move through the linked list of handlers
+			 * Move through the linked list of handlers
 			 */
 			handler_obj = handler_obj->addr_handler.next;
 		}
 	}
 
 	else {
+		ACPI_DEBUG_PRINT ((ACPI_DB_OPREGION,
+			"Creating object on Device %p while installing handler\n", node));
+
 		/* Obj_desc does not exist, create one */
 
 		if (node->type == ACPI_TYPE_ANY) {
 			type = ACPI_TYPE_DEVICE;
 		}
-
 		else {
 			type = node->type;
 		}
 
-		obj_desc = acpi_cm_create_internal_object (type);
+		obj_desc = acpi_ut_create_internal_object (type);
 		if (!obj_desc) {
 			status = AE_NO_MEMORY;
 			goto unlock_and_exit;
@@ -192,19 +202,23 @@ acpi_install_address_space_handler (
 
 		status = acpi_ns_attach_object (node, obj_desc, (u8) type);
 		if (ACPI_FAILURE (status)) {
-			acpi_cm_remove_reference (obj_desc);
+			acpi_ut_remove_reference (obj_desc);
 			goto unlock_and_exit;
 		}
 	}
 
+	ACPI_DEBUG_PRINT ((ACPI_DB_OPREGION,
+		"Installing address handler for region %s(%X) on Device %p(%p)\n",
+		acpi_ut_get_region_name (space_id), space_id, node, obj_desc));
+
 	/*
-	 *  Now we can install the handler
+	 * Now we can install the handler
 	 *
-	 *  At this point we know that there is no existing handler.
-	 *  So, we just allocate the object for the handler and link it
-	 *  into the list.
+	 * At this point we know that there is no existing handler.
+	 * So, we just allocate the object for the handler and link it
+	 * into the list.
 	 */
-	handler_obj = acpi_cm_create_internal_object (INTERNAL_TYPE_ADDRESS_HANDLER);
+	handler_obj = acpi_ut_create_internal_object (INTERNAL_TYPE_ADDRESS_HANDLER);
 	if (!handler_obj) {
 		status = AE_NO_MEMORY;
 		goto unlock_and_exit;
@@ -220,16 +234,16 @@ acpi_install_address_space_handler (
 	handler_obj->addr_handler.setup     = setup;
 
 	/*
-	 *  Now walk the namespace finding all of the regions this
-	 *  handler will manage.
+	 * Now walk the namespace finding all of the regions this
+	 * handler will manage.
 	 *
-	 *  We start at the device and search the branch toward
-	 *  the leaf nodes until either the leaf is encountered or
-	 *  a device is detected that has an address handler of the
-	 *  same type.
+	 * We start at the device and search the branch toward
+	 * the leaf nodes until either the leaf is encountered or
+	 * a device is detected that has an address handler of the
+	 * same type.
 	 *
-	 *  In either case we back up and search down the remainder
-	 *  of the branch
+	 * In either case we back up and search down the remainder
+	 * of the branch
 	 */
 	status = acpi_ns_walk_namespace (ACPI_TYPE_ANY, device,
 			 ACPI_UINT32_MAX, NS_WALK_UNLOCK,
@@ -237,9 +251,8 @@ acpi_install_address_space_handler (
 			 handler_obj, NULL);
 
 	/*
-	 *  Place this handler 1st on the list
+	 * Place this handler 1st on the list
 	 */
-
 	handler_obj->common.reference_count =
 			 (u16) (handler_obj->common.reference_count +
 			 obj_desc->common.reference_count - 1);
@@ -247,12 +260,12 @@ acpi_install_address_space_handler (
 
 
 unlock_and_exit:
-	acpi_cm_release_mutex (ACPI_MTX_NAMESPACE);
-	return (status);
+	acpi_ut_release_mutex (ACPI_MTX_NAMESPACE);
+	return_ACPI_STATUS (status);
 }
 
 
-/******************************************************************************
+/*******************************************************************************
  *
  * FUNCTION:    Acpi_remove_address_space_handler
  *
@@ -265,34 +278,36 @@ unlock_and_exit:
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_remove_address_space_handler (
-	ACPI_HANDLE             device,
-	ACPI_ADDRESS_SPACE_TYPE space_id,
-	ADDRESS_SPACE_HANDLER   handler)
+	acpi_handle             device,
+	ACPI_ADR_SPACE_TYPE     space_id,
+	acpi_adr_space_handler  handler)
 {
-	ACPI_OPERAND_OBJECT     *obj_desc;
-	ACPI_OPERAND_OBJECT     *handler_obj;
-	ACPI_OPERAND_OBJECT     *region_obj;
-	ACPI_OPERAND_OBJECT     **last_obj_ptr;
-	ACPI_NAMESPACE_NODE     *node;
-	ACPI_STATUS             status = AE_OK;
+	acpi_operand_object     *obj_desc;
+	acpi_operand_object     *handler_obj;
+	acpi_operand_object     *region_obj;
+	acpi_operand_object     **last_obj_ptr;
+	acpi_namespace_node     *node;
+	acpi_status             status = AE_OK;
+
+
+	FUNCTION_TRACE ("Acpi_remove_address_space_handler");
 
 
 	/* Parameter validation */
 
 	if ((!device)   ||
 		((!handler)  && (handler != ACPI_DEFAULT_HANDLER)) ||
-		(space_id > ACPI_MAX_ADDRESS_SPACE))
-	{
-		return (AE_BAD_PARAMETER);
+		(space_id > ACPI_MAX_ADDRESS_SPACE)) {
+		return_ACPI_STATUS (AE_BAD_PARAMETER);
 	}
 
-	acpi_cm_acquire_mutex (ACPI_MTX_NAMESPACE);
+	acpi_ut_acquire_mutex (ACPI_MTX_NAMESPACE);
 
 	/* Convert and validate the device handle */
 
-	node = acpi_ns_convert_handle_to_entry (device);
+	node = acpi_ns_map_handle_to_node (device);
 	if (!node) {
 		status = AE_BAD_PARAMETER;
 		goto unlock_and_exit;
@@ -301,69 +316,69 @@ acpi_remove_address_space_handler (
 
 	/* Make sure the internal object exists */
 
-	obj_desc = acpi_ns_get_attached_object ((ACPI_HANDLE) node);
+	obj_desc = acpi_ns_get_attached_object (node);
 	if (!obj_desc) {
-		/*
-		 *  The object DNE.
-		 */
 		status = AE_NOT_EXIST;
 		goto unlock_and_exit;
 	}
 
 	/*
-	 *  find the address handler the user requested
+	 * find the address handler the user requested
 	 */
-
 	handler_obj = obj_desc->device.addr_handler;
 	last_obj_ptr = &obj_desc->device.addr_handler;
 	while (handler_obj) {
 		/*
-		 *  We have a handler, see if user requested this one
+		 * We have a handler, see if user requested this one
 		 */
-
-		if(handler_obj->addr_handler.space_id == space_id) {
+		if (handler_obj->addr_handler.space_id == space_id) {
 			/*
-			 *  Got it, first dereference this in the Regions
+			 * Got it, first dereference this in the Regions
 			 */
+			ACPI_DEBUG_PRINT ((ACPI_DB_OPREGION,
+				"Removing address handler %p(%p) for region %s on Device %p(%p)\n",
+				handler_obj, handler, acpi_ut_get_region_name (space_id),
+				node, obj_desc));
+
 			region_obj = handler_obj->addr_handler.region_list;
 
 			/* Walk the handler's region list */
 
 			while (region_obj) {
 				/*
-				 *  First disassociate the handler from the region.
+				 * First disassociate the handler from the region.
 				 *
-				 *  NOTE: this doesn't mean that the region goes away
-				 *  The region is just inaccessible as indicated to
-				 *  the _REG method
+				 * NOTE: this doesn't mean that the region goes away
+				 * The region is just inaccessible as indicated to
+				 * the _REG method
 				 */
-				acpi_ev_disassociate_region_from_handler(region_obj, FALSE);
+				acpi_ev_disassociate_region_from_handler(region_obj, TRUE);
 
 				/*
-				 *  Walk the list, since we took the first region and it
-				 *  was removed from the list by the dissassociate call
-				 *  we just get the first item on the list again
+				 * Walk the list, since we took the first region and it
+				 * was removed from the list by the dissassociate call
+				 * we just get the first item on the list again
 				 */
 				region_obj = handler_obj->addr_handler.region_list;
 
 			}
 
 			/*
-			 *  Remove this Handler object from the list
+			 * Remove this Handler object from the list
 			 */
 			*last_obj_ptr = handler_obj->addr_handler.next;
 
 			/*
-			 *  Now we can delete the handler object
+			 * Now we can delete the handler object
 			 */
-			acpi_cm_remove_reference (handler_obj);
-			acpi_cm_remove_reference (handler_obj);
+			acpi_ut_remove_reference (handler_obj);
+			acpi_ut_remove_reference (handler_obj);
 
 			goto unlock_and_exit;
 		}
 
 		/*
-		 *  Move through the linked list of handlers
+		 * Move through the linked list of handlers
 		 */
 		last_obj_ptr = &handler_obj->addr_handler.next;
 		handler_obj = handler_obj->addr_handler.next;
@@ -371,14 +386,18 @@ acpi_remove_address_space_handler (
 
 
 	/*
-	 *  The handler does not exist
+	 * The handler does not exist
 	 */
+	ACPI_DEBUG_PRINT ((ACPI_DB_OPREGION,
+		"Unable to remove address handler %p for %s(%X), Dev_node %p, obj %p\n",
+		handler, acpi_ut_get_region_name (space_id), space_id, node, obj_desc));
+
 	status = AE_NOT_EXIST;
 
 
 unlock_and_exit:
-	acpi_cm_release_mutex (ACPI_MTX_NAMESPACE);
-	return (status);
+	acpi_ut_release_mutex (ACPI_MTX_NAMESPACE);
+	return_ACPI_STATUS (status);
 }
 
 

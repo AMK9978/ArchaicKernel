@@ -28,7 +28,7 @@
 #define MAJOR_NR    Z2RAM_MAJOR
 
 #include <linux/major.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/blk.h>
 #include <linux/init.h>
@@ -167,8 +167,6 @@ z2_open( struct inode *inode, struct file *filp )
     int max_chip_map = ( amiga_chip_size / Z2RAM_CHUNKSIZE ) *
 	sizeof( z2ram_map[0] );
     int rc = -ENOMEM;
-
-    MOD_INC_USE_COUNT;
 
     device = DEVICE_NR( inode->i_rdev );
 
@@ -319,7 +317,6 @@ z2_open( struct inode *inode, struct file *filp )
 err_out_kfree:
     kfree( z2ram_map );
 err_out:
-    MOD_DEC_USE_COUNT;
     return rc;
 }
 
@@ -333,13 +330,12 @@ z2_release( struct inode *inode, struct file *filp )
      * FIXME: unmap memory
      */
 
-    MOD_DEC_USE_COUNT;
-
     return 0;
 }
 
 static struct block_device_operations z2_fops =
 {
+	owner:		THIS_MODULE,
 	open:		z2_open,
 	release:	z2_release,
 };
@@ -376,6 +372,9 @@ z2_init( void )
 }
 
 #if defined(MODULE)
+
+MODULE_LICENSE("GPL");
+
 int
 init_module( void )
 {

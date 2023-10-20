@@ -2,7 +2,7 @@
  * highmem.h: virtual kernel memory mappings for high memory
  *
  * Used in CONFIG_HIGHMEM systems for memory pages which
- * are not addressable by direct kernel virtual adresses.
+ * are not addressable by direct kernel virtual addresses.
  *
  * Copyright (C) 1999 Gerhard Wichert, Siemens AG
  *		      Gerhard.Wichert@pdb.siemens.de
@@ -111,14 +111,11 @@ static inline void *kmap_atomic(struct page *page, enum km_type type)
 
 static inline void kunmap_atomic(void *kvaddr, enum km_type type)
 {
-#if HIGHMEM_DEBUG
 	unsigned long vaddr = (unsigned long) kvaddr;
 	unsigned long idx = type + KM_TYPE_NR*smp_processor_id();
 
-#if 0
-	if (vaddr < FIXADDR_START) // FIXME
+	if (vaddr < FIX_KMAP_BEGIN) // FIXME
 		return;
-#endif
 
 	if (vaddr != FIX_KMAP_BEGIN + idx * PAGE_SIZE)
 		BUG();
@@ -130,6 +127,7 @@ static inline void kunmap_atomic(void *kvaddr, enum km_type type)
 	flush_cache_all();
 #endif
 
+#ifdef HIGHMEM_DEBUG
 	/*
 	 * force other mappings to Oops if they'll try to access
 	 * this pte without first remap it

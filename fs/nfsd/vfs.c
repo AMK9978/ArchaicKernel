@@ -29,7 +29,7 @@
 #include <linux/fcntl.h>
 #include <linux/net.h>
 #include <linux/unistd.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/in.h>
 #define __NO_VERSION__
 #include <linux/module.h>
@@ -98,7 +98,7 @@ nfsd_lookup(struct svc_rqst *rqstp, struct svc_fh *fhp, const char *name,
 	struct dentry		*dentry;
 	int			err;
 
-	dprintk("nfsd: nfsd_lookup(fh %s, %s)\n", SVCFH_fmt(fhp), name);
+	dprintk("nfsd: nfsd_lookup(fh %s, %.*s)\n", SVCFH_fmt(fhp), len,name);
 
 	/* Obtain dentry and export. */
 	err = fh_verify(rqstp, fhp, S_IFDIR, MAY_EXEC);
@@ -111,40 +111,42 @@ nfsd_lookup(struct svc_rqst *rqstp, struct svc_fh *fhp, const char *name,
 	err = nfserr_acces;
 
 	/* Lookup the name, but don't follow links */
-	if (strcmp(name, ".")==0) {
-		dentry = dget(dparent);
-	} else if (strcmp(name, "..")==0) {
-		/* checking mountpoint crossing is very different when stepping up */
-		if (dparent == exp->ex_dentry) {
-			if (!EX_CROSSMNT(exp))
-				dentry = dget(dparent); /* .. == . just like at / */
-			else
-			{
-				struct svc_export *exp2 = NULL;
-				struct dentry *dp;
-				struct vfsmount *mnt = mntget(exp->ex_mnt);
-				dentry = dget(dparent);
-				while(follow_up(&mnt, &dentry))
-					;
-				dp = dget(dentry->d_parent);
-				dput(dentry);
-				dentry = dp;
-				for ( ; exp2 == NULL && dp->d_parent != dp;
-				     dp=dp->d_parent)
-					exp2 = exp_get(exp->ex_client, dp->d_inode->i_dev, dp->d_inode->i_ino);
-				if (exp2==NULL) {
-					dput(dentry);
+	if (isdotent(name, len)) {
+		if (len==1)
+			dentry = dget(dparent);
+		else  { /* must be ".." */
+			/* checking mountpoint crossing is very different when stepping up */
+			if (dparent == exp->ex_dentry) {
+				if (!EX_CROSSMNT(exp))
+					dentry = dget(dparent); /* .. == . just like at / */
+				else
+				{
+					struct svc_export *exp2 = NULL;
+					struct dentry *dp;
+					struct vfsmount *mnt = mntget(exp->ex_mnt);
 					dentry = dget(dparent);
-				} else {
-					exp = exp2;
+					while(follow_up(&mnt, &dentry))
+						;
+					dp = dget(dentry->d_parent);
+					dput(dentry);
+					dentry = dp;
+					for ( ; exp2 == NULL && dp->d_parent != dp;
+					      dp=dp->d_parent)
+						exp2 = exp_get(exp->ex_client, dp->d_inode->i_dev, dp->d_inode->i_ino);
+					if (exp2==NULL) {
+						dput(dentry);
+						dentry = dget(dparent);
+					} else {
+						exp = exp2;
+					}
+					mntput(mnt);
 				}
-				mntput(mnt);
-			}
-		} else
-			dentry = dget(dparent->d_parent);
+			} else
+				dentry = dget(dparent->d_parent);
+		}
 	} else {
 		fh_lock(fhp);
-		dentry = lookup_one(name, dparent);
+		dentry = lookup_one_len(name, dparent, len);
 		err = PTR_ERR(dentry);
 		if (IS_ERR(dentry))
 			goto out_nfserr;
@@ -174,7 +176,7 @@ nfsd_lookup(struct svc_rqst *rqstp, struct svc_fh *fhp, const char *name,
 	 * Note: we compose the file handle now, but as the
 	 * dentry may be negative, it may need to be updated.
 	 */
-	err = fh_compose(resfh, exp, dentry);
+	err = fh_compose(resfh, exp, dentry, fhp);
 	if (!err && !dentry->d_inode)
 		err = nfserr_noent;
 out:
@@ -190,7 +192,8 @@ out_nfserr:
  * N.B. After this call fhp needs an fh_put
  */
 int
-nfsd_setattr(struct svc_rqst *rqstp, struct svc_fh *fhp, struct iattr *iap)
+nfsd_setattr(struct svc_rqst *rqstp, struct svc_fh *fhp, struct iattr *iap,
+	     int check_guard, time_t guardtime)
 {
 	struct dentry	*dentry;
 	struct inode	*inode;
@@ -224,7 +227,7 @@ nfsd_setattr(struct svc_rqst *rqstp, struct svc_fh *fhp, struct iattr *iap)
 #define	MAX_TOUCH_TIME_ERROR (30*60)
 	if (err
 	    && (iap->ia_valid & BOTH_TIME_SET) == BOTH_TIME_SET
-	    && iap->ia_mtime == iap->ia_ctime
+	    && iap->ia_mtime == iap->ia_atime
 	    ) {
 	    /* looks good.  now just make sure time is in the right ballpark.
 	     * solaris, at least, doesn't seem to care what the time request is
@@ -293,36 +296,23 @@ nfsd_setattr(struct svc_rqst *rqstp, struct svc_fh *fhp, struct iattr *iap)
 
 
 	iap->ia_valid |= ATTR_CTIME;
-#ifdef CONFIG_QUOTA
-	/* DQUOT_TRANSFER needs both ia_uid and ia_gid defined */
-	if (iap->ia_valid & (ATTR_UID|ATTR_GID)) {
-		if (! (iap->ia_valid & ATTR_UID))
-			iap->ia_uid = inode->i_uid;
-		if (! (iap->ia_valid & ATTR_GID))
-			iap->ia_gid = inode->i_gid;
-		iap->ia_valid |= ATTR_UID|ATTR_GID;
-	}
-#endif /* CONFIG_QUOTA */
 
 	if (iap->ia_valid & ATTR_SIZE) {
 		fh_lock(fhp);
 		size_change = 1;
 	}
-#ifdef CONFIG_QUOTA
-	if (iap->ia_valid & (ATTR_UID|ATTR_GID)) 
-		err = DQUOT_TRANSFER(dentry, iap);
-	else
-#endif
+	err = nfserr_notsync;
+	if (!check_guard || guardtime == inode->i_ctime) {
 		err = notify_change(dentry, iap);
+		err = nfserrno(err);
+	}
 	if (size_change) {
 		fh_unlock(fhp);
 		put_write_access(inode);
 	}
-	if (err)
-		goto out_nfserr;
-	if (EX_ISSYNC(fhp->fh_export))
-		write_inode_now(inode, 1);
-	err = 0;
+	if (!err)
+		if (EX_ISSYNC(fhp->fh_export))
+			write_inode_now(inode, 1);
 out:
 	return err;
 
@@ -476,6 +466,7 @@ nfsd_open(struct svc_rqst *rqstp, struct svc_fh *fhp, int type,
 	filp->f_op    = fops_get(inode->i_fop);
 	atomic_set(&filp->f_count, 1);
 	filp->f_dentry = dentry;
+	filp->f_vfsmnt = fhp->fh_export->ex_mnt;
 	if (access & MAY_WRITE) {
 		filp->f_flags = O_WRONLY|O_LARGEFILE;
 		filp->f_mode  = FMODE_WRITE;
@@ -737,27 +728,24 @@ nfsd_write(struct svc_rqst *rqstp, struct svc_fh *fhp, loff_t offset,
 		 * nice and simple solution (IMHO), and it seems to
 		 * work:-)
 		 */
-		if (EX_WGATHER(exp) && (atomic_read(&inode->i_writecount) > 1
-		 || (last_ino == inode->i_ino && last_dev == inode->i_dev))) {
-#if 0
-			interruptible_sleep_on_timeout(&inode->i_wait, 10 * HZ / 1000);
-#else
-			dprintk("nfsd: write defer %d\n", current->pid);
-/* FIXME: Olaf commented this out [gam3] */
-			set_current_state(TASK_UNINTERRUPTIBLE);
-			schedule_timeout((HZ+99)/100);
-			current->state = TASK_RUNNING;
-			dprintk("nfsd: write resume %d\n", current->pid);
-#endif
-		}
+		if (EX_WGATHER(exp)) {
+			if (atomic_read(&inode->i_writecount) > 1
+			    || (last_ino == inode->i_ino && last_dev == inode->i_dev)) {
+				dprintk("nfsd: write defer %d\n", current->pid);
+				set_current_state(TASK_UNINTERRUPTIBLE);
+				schedule_timeout((HZ+99)/100);
+				current->state = TASK_RUNNING;
+				dprintk("nfsd: write resume %d\n", current->pid);
+			}
 
-		if (inode->i_state & I_DIRTY) {
-			dprintk("nfsd: write sync %d\n", current->pid);
-			nfsd_sync(&file);
-		}
+			if (inode->i_state & I_DIRTY) {
+				dprintk("nfsd: write sync %d\n", current->pid);
+				nfsd_sync(&file);
+			}
 #if 0
-		wake_up(&inode->i_wait);
+			wake_up(&inode->i_wait);
 #endif
+		}
 		last_ino = inode->i_ino;
 		last_dev = inode->i_dev;
 	}
@@ -846,11 +834,11 @@ nfsd_create(struct svc_rqst *rqstp, struct svc_fh *fhp,
 	if (!resfhp->fh_dentry) {
 		/* called from nfsd_proc_mkdir, or possibly nfsd3_proc_create */
 		fh_lock(fhp);
-		dchild = lookup_one(fname, dentry);
+		dchild = lookup_one_len(fname, dentry, flen);
 		err = PTR_ERR(dchild);
 		if (IS_ERR(dchild))
 			goto out_nfserr;
-		err = fh_compose(resfhp, fhp->fh_export, dchild);
+		err = fh_compose(resfhp, fhp->fh_export, dchild, fhp);
 		if (err)
 			goto out;
 	} else {
@@ -917,7 +905,7 @@ nfsd_create(struct svc_rqst *rqstp, struct svc_fh *fhp,
 	 */
 	err = 0;
 	if ((iap->ia_valid &= ~(ATTR_UID|ATTR_GID|ATTR_MODE)) != 0)
-		err = nfsd_setattr(rqstp, resfhp, iap);
+		err = nfsd_setattr(rqstp, resfhp, iap, 0, (time_t)0);
 	/*
 	 * Update the file handle to get the new inode info.
 	 */
@@ -971,12 +959,12 @@ nfsd_create_v3(struct svc_rqst *rqstp, struct svc_fh *fhp,
 	/*
 	 * Compose the response file handle.
 	 */
-	dchild = lookup_one(fname, dentry);
+	dchild = lookup_one_len(fname, dentry, flen);
 	err = PTR_ERR(dchild);
 	if (IS_ERR(dchild))
 		goto out_nfserr;
 
-	err = fh_compose(resfhp, fhp->fh_export, dchild);
+	err = fh_compose(resfhp, fhp->fh_export, dchild, fhp);
 	if (err)
 		goto out;
 
@@ -1052,7 +1040,7 @@ nfsd_create_v3(struct svc_rqst *rqstp, struct svc_fh *fhp,
 	 */
  set_attr:
 	if ((iap->ia_valid &= ~(ATTR_UID|ATTR_GID)) != 0)
- 		err = nfsd_setattr(rqstp, resfhp, iap);
+ 		err = nfsd_setattr(rqstp, resfhp, iap, 0, (time_t)0);
 
  out:
 	fh_unlock(fhp);
@@ -1135,7 +1123,7 @@ nfsd_symlink(struct svc_rqst *rqstp, struct svc_fh *fhp,
 		goto out;
 	fh_lock(fhp);
 	dentry = fhp->fh_dentry;
-	dnew = lookup_one(fname, dentry);
+	dnew = lookup_one_len(fname, dentry, flen);
 	err = PTR_ERR(dnew);
 	if (IS_ERR(dnew))
 		goto out_nfserr;
@@ -1160,7 +1148,7 @@ nfsd_symlink(struct svc_rqst *rqstp, struct svc_fh *fhp,
 	fh_unlock(fhp);
 
 	/* Compose the fh so the dentry will be freed ... */
-	cerr = fh_compose(resfhp, fhp->fh_export, dnew);
+	cerr = fh_compose(resfhp, fhp->fh_export, dnew, fhp);
 	if (err==0) err = cerr;
 out:
 	return err;
@@ -1176,7 +1164,7 @@ out_nfserr:
  */
 int
 nfsd_link(struct svc_rqst *rqstp, struct svc_fh *ffhp,
-				char *fname, int len, struct svc_fh *tfhp)
+				char *name, int len, struct svc_fh *tfhp)
 {
 	struct dentry	*ddir, *dnew, *dold;
 	struct inode	*dirp, *dest;
@@ -1193,14 +1181,14 @@ nfsd_link(struct svc_rqst *rqstp, struct svc_fh *ffhp,
 	if (!len)
 		goto out;
 	err = nfserr_exist;
-	if (isdotent(fname, len))
+	if (isdotent(name, len))
 		goto out;
 
 	fh_lock(ffhp);
 	ddir = ffhp->fh_dentry;
 	dirp = ddir->d_inode;
 
-	dnew = lookup_one(fname, ddir);
+	dnew = lookup_one_len(name, ddir, len);
 	err = PTR_ERR(dnew);
 	if (IS_ERR(dnew))
 		goto out_nfserr;
@@ -1271,7 +1259,7 @@ nfsd_rename(struct svc_rqst *rqstp, struct svc_fh *ffhp, char *fname, int flen,
 	fill_pre_wcc(ffhp);
 	fill_pre_wcc(tfhp);
 
-	odentry = lookup_one(fname, fdentry);
+	odentry = lookup_one_len(fname, fdentry, flen);
 	err = PTR_ERR(odentry);
 	if (IS_ERR(odentry))
 		goto out_nfserr;
@@ -1280,7 +1268,7 @@ nfsd_rename(struct svc_rqst *rqstp, struct svc_fh *ffhp, char *fname, int flen,
 	if (!odentry->d_inode)
 		goto out_dput_old;
 
-	ndentry = lookup_one(tname, tdentry);
+	ndentry = lookup_one_len(tname, tdentry, tlen);
 	err = PTR_ERR(ndentry);
 	if (IS_ERR(ndentry))
 		goto out_dput_old;
@@ -1342,7 +1330,7 @@ nfsd_unlink(struct svc_rqst *rqstp, struct svc_fh *fhp, int type,
 	dentry = fhp->fh_dentry;
 	dirp = dentry->d_inode;
 
-	rdentry = lookup_one(fname, dentry);
+	rdentry = lookup_one_len(fname, dentry, flen);
 	err = PTR_ERR(rdentry);
 	if (IS_ERR(rdentry))
 		goto out_nfserr;

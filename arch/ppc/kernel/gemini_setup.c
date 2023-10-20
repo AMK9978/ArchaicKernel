@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.gemini_setup.c 1.14 10/18/01 11:16:28 trini
+ */
+/*
  *  linux/arch/ppc/kernel/setup.c
  *
  *  Copyright (C) 1995 Linus Torvalds
@@ -21,7 +24,7 @@
 #include <linux/major.h>
 #include <linux/blk.h>
 #include <linux/console.h>
-#include <linux/openpic.h>
+#include <linux/seq_file.h>
 
 #include <asm/system.h>
 #include <asm/pgtable.h>
@@ -30,12 +33,12 @@
 #include <asm/io.h>
 #include <asm/m48t35.h>
 #include <asm/gemini.h>
-
 #include <asm/time.h>
+
 #include "local_irq.h"
 #include "open_pic.h"
 
-void gemini_setup_pci_ptrs(void);
+void gemini_find_bridges(void);
 static int gemini_get_clock_speed(void);
 extern void gemini_pcibios_fixup(void);
 
@@ -52,21 +55,36 @@ static unsigned int cpu_6xx[16] = {
 	0, 0, 14, 0, 0, 13, 5, 9, 6, 11, 8, 10, 0, 12, 7, 0
 };
 
-int chrp_get_irq(struct pt_regs *);
-void chrp_post_irq(struct pt_regs* regs, int);
+/*
+ * prom_init is the Gemini version of prom.c:prom_init.  We only need
+ * the BSS clearing code, so I copied that out of prom.c.  This is a
+ * lot simpler than hacking prom.c so it will build with Gemini. -VAL
+ */
 
-static inline unsigned long _get_HID1(void)
+#define PTRRELOC(x)	((typeof(x))((unsigned long)(x) + offset))
+
+unsigned long
+prom_init(void)
 {
-	unsigned long val;
+	unsigned long offset = reloc_offset();
+	unsigned long phys;
+	extern char __bss_start, _end;
 
-	__asm__ __volatile__("mfspr %0,1009" : "=r" (val));
-	return val;
+	/* First zero the BSS -- use memset, some arches don't have
+	 * caches on yet */
+	memset_io(PTRRELOC(&__bss_start),0 , &_end - &__bss_start);
+
+ 	/* Default */
+ 	phys = offset + KERNELBASE;
+
+	gemini_prom_init();
+
+	return phys;
 }
 
 int
-gemini_get_cpuinfo(char *buffer)
+gemini_show_cpuinfo(struct seq_file *m)
 {
-	int len;
 	unsigned char reg, rev;
 	char *family;
 	unsigned int type;
@@ -82,22 +100,20 @@ gemini_get_cpuinfo(char *buffer)
 
 	reg = readb(GEMINI_BECO);
 
-	len = sprintf( buffer, "machine\t\t: Gemini %s%d, rev %c, eco %d\n", 
-		       family, type, (rev + 'A'), (reg & 0xf));
+	seq_printf(m, "machine\t\t: Gemini %s%d, rev %c, eco %d\n", 
+		   family, type, (rev + 'A'), (reg & 0xf));
 
-	len = sprintf(buffer, "board\t\t: Gemini %s", family);
+	seq_printf(m, "board\t\t: Gemini %s", family);
 	if (type > 9)
-		len += sprintf(buffer+len, "%c", (type - 10) + 'A');
+		seq_printf(m, "%c", (type - 10) + 'A');
 	else
-		len += sprintf(buffer+len, "%d", type);
+		seq_printf(m, "%d", type);
 
-	len += sprintf(buffer+len, ", rev %c, eco %d\n",
-		       (rev + 'A'), (reg & 0xf));
+	seq_printf(m, ", rev %c, eco %d\n", (rev + 'A'), (reg & 0xf));
 
-	len += sprintf(buffer+len, "clock\t\t: %dMhz\n", 
-		       gemini_get_clock_speed());
+	seq_printf(m, "clock\t\t: %dMhz\n", gemini_get_clock_speed());
 
-	return len;
+	return 0;
 }
 
 static u_char gemini_openpic_initsenses[] = {
@@ -116,23 +132,16 @@ static u_char gemini_openpic_initsenses[] = {
 void __init gemini_openpic_init(void)
 {
 
-	OpenPIC = (volatile struct OpenPIC *)
-		grackle_read(0x80005800 + 0x10);
-#if 0	
-	grackle_write(GEMINI_MPIC_PCI_CFG + PCI_BASE_ADDRESS_0, 
-		      GEMINI_MPIC_ADDR);
-	grackle_write(GEMINI_MPIC_PCI_CFG + PCI_COMMAND, PCI_COMMAND_MEMORY);
-
-	OpenPIC = (volatile struct OpenPIC *) GEMINI_MPIC_ADDR;
-#endif
+	OpenPIC_Addr = (volatile struct OpenPIC *)
+		grackle_read(GEMINI_MPIC_PCI_CFG + 0x10);
 	OpenPIC_InitSenses = gemini_openpic_initsenses;
 	OpenPIC_NumInitSenses = sizeof( gemini_openpic_initsenses );
 
-	ioremap( GEMINI_MPIC_ADDR, sizeof( struct OpenPIC ));
+	ioremap( GEMINI_MPIC_ADDR, OPENPIC_SIZE);
 }
 
 
-extern unsigned long loops_per_sec;
+extern unsigned long loops_per_jiffy;
 extern int root_mountflags;
 extern char cmd_line[];
 
@@ -141,6 +150,10 @@ gemini_heartbeat(void)
 {
 	static unsigned long led = GEMINI_LEDBASE+(4*8);
 	static char direction = 8;
+
+	/* We only want to do this on 1 CPU */
+	if (smp_processor_id())
+		return;
 	*(char *)led = 0;
 	if ( (led + direction) > (GEMINI_LEDBASE+(7*8)) ||
 	     (led + direction) < (GEMINI_LEDBASE+(4*8)) )
@@ -155,7 +168,7 @@ void __init gemini_setup_arch(void)
 	extern char cmd_line[];
 
 
-	loops_per_sec = 50000000;
+	loops_per_jiffy = 50000000/HZ;
 
 #ifdef CONFIG_BLK_DEV_INITRD
 	/* bootable off CDROM */
@@ -165,7 +178,7 @@ void __init gemini_setup_arch(void)
 #endif
 		ROOT_DEV = to_kdev_t(0x0801);
 
-	/* nothing but serial consoles... */  
+	/* nothing but serial consoles... */
 	sprintf(cmd_line, "%s console=ttyS0", cmd_line);
 
 	printk("Boot arguments: %s\n", cmd_line);
@@ -174,6 +187,8 @@ void __init gemini_setup_arch(void)
 	ppc_md.heartbeat_reset = HZ/8;
 	ppc_md.heartbeat_count = 1;
 	
+	/* Lookup PCI hosts */
+	gemini_find_bridges();
 	/* take special pains to map the MPIC, since it isn't mapped yet */
 	gemini_openpic_init();
 	/* start the L2 */
@@ -184,10 +199,11 @@ void __init gemini_setup_arch(void)
 int
 gemini_get_clock_speed(void)
 {
-	unsigned long hid1, pvr = _get_PVR();
+	unsigned long hid1, pvr;
 	int clock;
 
-	hid1 = (_get_HID1() >> 28) & 0xf;
+	pvr = mfspr(PVR);
+	hid1 = (mfspr(HID1) >> 28) & 0xf;
 	if (PVR_VER(pvr) == 8 ||
 	    PVR_VER(pvr) == 12)
 		hid1 = cpu_7xx[hid1];
@@ -213,22 +229,16 @@ gemini_get_clock_speed(void)
 	return clock;
 }
 
-#define L2CR_PIPE_LATEWR   (0x01800000)   /* late-write SRAM */
-#define L2CR_L2CTL         (0x00100000)   /* RAM control */
-#define L2CR_INST_DISABLE  (0x00400000)   /* disable for insn's */
-#define L2CR_L2I           (0x00200000)   /* global invalidate */
-#define L2CR_L2E           (0x80000000)   /* enable */
-#define L2CR_L2WT          (0x00080000)   /* write-through */
-
 void __init gemini_init_l2(void)
 {
         unsigned char reg, brev, fam, creg;
         unsigned long cache;
-        unsigned long pvr = _get_PVR();
+        unsigned long pvr;
 
         reg = readb(GEMINI_L2CFG);
         brev = readb(GEMINI_BREV);
         fam = readb(GEMINI_FEAT);
+        pvr = mfspr(PVR);
 
         switch(PVR_VER(pvr)) {
 
@@ -284,9 +294,9 @@ void __init gemini_init_l2(void)
         }
 
         cache |= ((1<<reg) << 25);
-        cache |= (L2CR_PIPE_LATEWR|L2CR_L2CTL|L2CR_INST_DISABLE);
+        cache |= (L2CR_L2RAM_MASK|L2CR_L2CTL|L2CR_L2DO);
         _set_L2CR(0);
-        _set_L2CR(cache | L2CR_L2I | L2CR_L2E);
+        _set_L2CR(cache | L2CR_L2E);
 
 }
 
@@ -313,23 +323,8 @@ gemini_halt(void)
 
 void __init gemini_init_IRQ(void)
 {
-	int i;
-
 	/* gemini has no 8259 */
-	open_pic_irq_offset = 0;
-	for( i=0; i < NR_IRQS; i++ ) 
-		irq_desc[i].handler = &open_pic;
-	openpic_init(1);
-#ifdef CONFIG_SMP
- 	request_irq(OPENPIC_VEC_IPI, openpic_ipi_action,
- 		    0, "IPI0", 0);
- 	request_irq(OPENPIC_VEC_IPI+1, openpic_ipi_action,
- 		    0, "IPI1 (invalidate TLB)", 0);
- 	request_irq(OPENPIC_VEC_IPI+2, openpic_ipi_action,
- 		    0, "IPI2 (stop CPU)", 0);
- 	request_irq(OPENPIC_VEC_IPI+3, openpic_ipi_action,
- 		    0, "IPI3 (reschedule)", 0);
-#endif	/* CONFIG_SMP */
+	openpic_init(1, 0, 0, -1);
 }
 
 #define gemini_rtc_read(x)       (readb(GEMINI_RTC+(x)))
@@ -456,68 +451,92 @@ void __init gemini_calibrate_decr(void)
 	switch(((reg & 0x0c)>>2)&0x3) {
 	case 0:
 	default:
-		freq = 66;
+		freq = 66667;
 		break;
 	case 1:
-		freq = 83;
+		freq = 83000;
 		break;
 	case 2:
-		freq = 100;
+		freq = 100000;
 		break;
 	}
 
-	freq *= 1000000;
+	freq *= 1000;
 	divisor = 4;
-	decrementer_count = freq / HZ / divisor;
-	count_period_num = divisor;
-	count_period_den = freq / 1000000;
+	tb_ticks_per_jiffy = freq / HZ / divisor;
+	tb_to_us = mulhwu_scale_factor(freq/divisor, 1000000);
 }
 
-int gemini_get_irq( struct pt_regs *regs )
+unsigned long __init gemini_find_end_of_memory(void)
 {
-        int irq;
+	unsigned long total;
+	unsigned char reg;
 
-        irq = openpic_irq( smp_processor_id() );
-        if (irq == OPENPIC_VEC_SPURIOUS)
-                /*
-                 * Spurious interrupts should never be
-                 * acknowledged
-                 */
-		irq = -1;
-	/*
-	 * I would like to openpic_eoi here but there seem to be timing problems
-	 * between the openpic ack and the openpic eoi.
-	 *   -- Cort
-	 */
-	return irq;
+	reg = readb(GEMINI_MEMCFG);
+	total = ((1<<((reg & 0x7) - 1)) *
+		 (8<<((reg >> 3) & 0x7)));
+	total *= (1024*1024);
+	return total;
 }
 
-void gemini_post_irq(struct pt_regs* regs, int irq)
+static void __init
+gemini_map_io(void)
 {
-	/*
-	 * If it's an i8259 irq then we've already done the
-	 * openpic irq.  So we just check to make sure the controller
-	 * is an openpic and if it is then eoi
-	 *
-	 * We do it this way since our irq_desc[irq].handler can change
-	 * with RTL and no longer be open_pic -- Cort
-	 */
-	if ( irq >= open_pic_irq_offset)
-		openpic_eoi( smp_processor_id() );
+	io_block_mapping(0xf0000000, 0xf0000000, 0x10000000, _PAGE_IO);
+	io_block_mapping(0x80000000, 0x80000000, 0x10000000, _PAGE_IO);
 }
 
+#ifdef CONFIG_SMP
+static int
+smp_gemini_probe(void)
+{
+	int i, nr;
 
-void __init gemini_init(unsigned long r3, unsigned long r4, unsigned long r5,
-			unsigned long r6, unsigned long r7)
+        nr = (readb(GEMINI_CPUSTAT) & GEMINI_CPU_COUNT_MASK) >> 2;
+	if (nr == 0)
+		nr = 4;
+
+	if (nr > 1) {
+		openpic_request_IPIs();
+		for (i = 1; i < nr; ++i)
+			smp_hw_index[i] = i;
+	}
+
+	return nr;
+}
+
+static void
+smp_gemini_kick_cpu(int nr)
+{
+	openpic_reset_processor_phys(1 << nr);
+	openpic_reset_processor_phys(0);
+}
+
+static void
+smp_gemini_setup_cpu(int cpu_nr)
+{
+	if (OpenPIC_Addr)
+		do_openpic_setup_cpu();
+	if (cpu_nr > 0)
+		gemini_init_l2();
+}
+
+static struct smp_ops_t gemini_smp_ops = {
+	smp_openpic_message_pass,
+	smp_gemini_probe,
+	smp_gemini_kick_cpu,
+	smp_gemini_setup_cpu,
+};
+#endif /* CONFIG_SMP */
+
+void __init platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
+			  unsigned long r6, unsigned long r7)
 {
 	int i;
-	int chrp_get_irq( struct pt_regs * );
 
 	for(i = 0; i < GEMINI_LEDS; i++)
 		gemini_led_off(i);
  
-	gemini_setup_pci_ptrs();
-
 	ISA_DMA_THRESHOLD = 0;
 	DMA_MODE_READ = 0;
 	DMA_MODE_WRITE = 0;
@@ -531,12 +550,10 @@ void __init gemini_init(unsigned long r3, unsigned long r4, unsigned long r5,
 #endif
 
 	ppc_md.setup_arch = gemini_setup_arch;
-	ppc_md.setup_residual = NULL;
-	ppc_md.get_cpuinfo = gemini_get_cpuinfo;
+	ppc_md.show_cpuinfo = gemini_show_cpuinfo;
 	ppc_md.irq_cannonicalize = NULL;
 	ppc_md.init_IRQ = gemini_init_IRQ;
-	ppc_md.get_irq = gemini_get_irq;
-	ppc_md.post_irq = gemini_post_irq;
+	ppc_md.get_irq = openpic_get_irq;
 	ppc_md.init = NULL;
 
 	ppc_md.restart = gemini_restart;
@@ -548,6 +565,9 @@ void __init gemini_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ppc_md.get_rtc_time = gemini_get_rtc_time;
 	ppc_md.calibrate_decr = gemini_calibrate_decr;
 
+	ppc_md.find_end_of_memory = gemini_find_end_of_memory;
+	ppc_md.setup_io_mappings = gemini_map_io;
+
 	/* no keyboard/mouse/video stuff yet.. */
 	ppc_md.kbd_setkeycode = NULL;
 	ppc_md.kbd_getkeycode = NULL;
@@ -555,8 +575,10 @@ void __init gemini_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ppc_md.kbd_unexpected_up = NULL;
 	ppc_md.kbd_leds = NULL;
 	ppc_md.kbd_init_hw = NULL;
-#ifdef CONFIG_MAGIC_SYSRQ
 	ppc_md.ppc_kbd_sysrq_xlate = NULL;
-#endif
 	ppc_md.pcibios_fixup_bus = gemini_pcibios_fixup;
+
+#ifdef CONFIG_SMP
+	ppc_md.smp_ops = &gemini_smp_ops;
+#endif /* CONFIG_SMP */
 }

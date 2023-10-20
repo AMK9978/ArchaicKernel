@@ -1,4 +1,4 @@
-/* $Id: entry.S,v 1.120 2000/09/08 13:58:12 jj Exp $
+/* $Id: entry.S,v 1.137 2001/10/18 09:06:36 davem Exp $
  * arch/sparc64/kernel/entry.S:  Sparc64 trap low-level entry points.
  *
  * Copyright (C) 1995,1997 David S. Miller (davem@caip.rutgers.edu)
@@ -19,8 +19,9 @@
 #include <asm/pgtable.h>
 #include <asm/processor.h>
 #include <asm/visasm.h>
+#include <asm/estate.h>
 
-/* #define SYSCALL_TRACING */
+/* #define SYSCALL_TRACING	1 */
 
 #define curptr      g6
 
@@ -31,7 +32,25 @@
 
 	.globl		sparc64_vpte_patchme1
 	.globl		sparc64_vpte_patchme2
+/*
+ * On a second level vpte miss, check whether the original fault is to the OBP 
+ * range (note that this is only possible for instruction miss, data misses to
+ * obp range do not use vpte). If so, go back directly to the faulting address.
+ * This is because we want to read the tpc, otherwise we have no way of knowing
+ * the 8k aligned faulting address if we are using >8k kernel pagesize. This also
+ * ensures no vpte range addresses are dropped into tlb while obp is executing
+ * (see inherit_locked_prom_mappings() rant).
+ */
 sparc64_vpte_nucleus:
+	mov		0xf, %g5
+	sllx		%g5, 28, %g5			! Load 0xf0000000
+	cmp		%g4, %g5			! Is addr >= LOW_OBP_ADDRESS?
+	blu,pn		%xcc, sparc64_vpte_patchme1
+	 mov		0x1, %g5
+	sllx		%g5, 32, %g5			! Load 0x100000000
+	cmp		%g4, %g5			! Is addr < HI_OBP_ADDRESS?
+	blu,pn		%xcc, obp_iaddr_patch
+	 nop
 sparc64_vpte_patchme1:
 	sethi		%hi(0), %g5			! This has to be patched
 sparc64_vpte_patchme2:
@@ -39,16 +58,105 @@ sparc64_vpte_patchme2:
 	ba,pt		%xcc, sparc64_kpte_continue	! Part of dtlb_backend
 	 add		%g1, %g1, %g1			! Finish PMD offset adjustment
 
+vpte_noent:
+	mov		TLB_SFSR, %g1			! Restore %g1 value
+	stxa		%g4, [%g1 + %g1] ASI_DMMU	! Restore previous TAG_ACCESS
+	done						! Slick trick
+
+	.globl		obp_iaddr_patch
+	.globl		obp_daddr_patch
+
+obp_iaddr_patch:
+	sethi		%hi(0), %g5			! This and following is patched
+	or		%g5, %lo(0), %g5		! g5 now holds obp pmd base physaddr
+	wrpr		%g0, 1, %tl			! Behave as if we are at TL0
+	rdpr		%tpc, %g4			! Find original faulting iaddr
+	srlx		%g4, 13, %g4			! Throw out context bits
+	sllx		%g4, 13, %g4			! g4 has vpn + ctx0 now
+	mov		TLB_SFSR, %g1			! Restore %g1 value
+	stxa		%g4, [%g1 + %g1] ASI_IMMU	! Restore previous TAG_ACCESS
+	srlx		%g4, 23, %g6			! Find pmd number
+	and		%g6, 0x7ff, %g6			! Find pmd number
+	sllx		%g6, 2, %g6			! Find pmd offset
+	lduwa		[%g5 + %g6] ASI_PHYS_USE_EC, %g5! Load pmd, ie pagetable physaddr
+	brz,pn		%g5, longpath			! Kill the PROM ? :-)
+	 sllx		%g5, 11, %g5			! Shift into place
+	srlx		%g4, 13, %g6			! find pte number in pagetable
+	and		%g6, 0x3ff, %g6			! find pte number in pagetable
+	sllx		%g6, 3, %g6			! find pte offset in pagetable
+	ldxa		[%g5 + %g6] ASI_PHYS_USE_EC, %g5! Load pte
+	brgez,pn	%g5, longpath			! Kill the PROM ? :-)
+	 nop
+	stxa		%g5, [%g0] ASI_ITLB_DATA_IN	! put into tlb
+	retry						! go back to original fault
+
+obp_daddr_patch:
+	sethi		%hi(0), %g5			! This and following is patched
+	or		%g5, %lo(0), %g5		! g5 now holds obp pmd base physaddr
+	srlx		%g4, 23, %g6			! Find pmd number
+	and		%g6, 0x7ff, %g6			! Find pmd number
+	sllx		%g6, 2, %g6			! Find pmd offset
+	lduwa		[%g5 + %g6] ASI_PHYS_USE_EC, %g5! Load pmd, ie pagetable physaddr
+	brz,pn		%g5, longpath
+	 sllx		%g5, 11, %g5			! Shift into place
+	srlx		%g4, 13, %g6			! find pte number in pagetable
+	and		%g6, 0x3ff, %g6			! find pte number in pagetable
+	sllx		%g6, 3, %g6			! find pte offset in pagetable
+	ldxa		[%g5 + %g6] ASI_PHYS_USE_EC, %g5! Load pte
+	brgez,pn	%g5, longpath
+	 nop
+	stxa		%g5, [%g0] ASI_DTLB_DATA_IN	! put into tlb
+	retry
+
+/*
+ * On a first level data miss, check whether this is to the OBP range (note that
+ * such accesses can be made by prom, as well as by kernel using prom_getproperty
+ * on "address"), and if so, do not use vpte access ... rather, use information
+ * saved during inherit_prom_mappings() using 8k pagesize.
+ */
+kvmap:
+	mov		0xf, %g5
+	sllx		%g5, 28, %g5			! Load 0xf0000000
+	cmp		%g4, %g5			! Is addr >= LOW_OBP_ADDRESS?
+	blu,pn		%xcc, vmalloc_addr
+	 mov		0x1, %g5
+	sllx		%g5, 32, %g5			! Load 0x100000000
+	cmp		%g4, %g5			! Is addr < HI_OBP_ADDRESS?
+	blu,pn		%xcc, obp_daddr_patch
+	 nop
+vmalloc_addr:						! vmalloc addr accessed
+	ldxa		[%g3 + %g6] ASI_N, %g5		! Yep, load k-vpte
+	brgez,pn	%g5, longpath			! Valid, load into TLB
+	 nop
+	stxa		%g5, [%g0] ASI_DTLB_DATA_IN	! Reload TLB
+	retry
+
 	/* This is trivial with the new code... */
 	.globl		do_fpdis
 do_fpdis:
-	ldub		[%g6 + AOFF_task_thread + AOFF_thread_fpsaved], %g5	! Load	Group
 	sethi		%hi(TSTATE_PEF), %g4					! IEU0
+	rdpr		%tstate, %g5
+	andcc		%g5, %g4, %g0
+	be,pt		%xcc, 1f
+	 nop
+	rd		%fprs, %g5
+	andcc		%g5, FPRS_FEF, %g0
+	be,pt		%xcc, 1f
+	 nop
+
+	/* Legal state when DCR_IFPOE is set in Cheetah %dcr. */
+	sethi		%hi(109f), %g7
+	ba,pt		%xcc, etrap
+109:	 or		%g7, %lo(109b), %g7
+	add		%g0, %g0, %g0
+	ba,a,pt		%xcc, rtrap_clr_l6
+
+1:	ldub		[%g6 + AOFF_task_thread + AOFF_thread_fpsaved], %g5	! Load	Group
 	wr		%g0, FPRS_FEF, %fprs					! LSU	Group+4bubbles
 	andcc		%g5, FPRS_FEF, %g0					! IEU1	Group
 	be,a,pt		%icc, 1f						! CTI
 	 clr		%g7							! IEU0
-	ldub		[%g6 + AOFF_task_thread + AOFF_thread_gsr], %g7		! Load	Group
+	ldx		[%g6 + AOFF_task_thread + AOFF_thread_gsr], %g7		! Load	Group
 1:	andcc		%g5, FPRS_DL, %g0					! IEU1
 	bne,pn		%icc, 2f						! CTI
 	 fzero		%f0							! FPA
@@ -92,10 +200,9 @@ do_fpdis:
 	ldxa		[%g3] ASI_DMMU, %g5
 	add		%g6, AOFF_task_fpregs + 0xc0, %g2
 	stxa		%g0, [%g3] ASI_DMMU
+	membar		#Sync
 	faddd		%f0, %f2, %f8
 	fmuld		%f0, %f2, %f10
-	flush		%g6
-	membar		#StoreLoad | #LoadLoad
 	ldda		[%g1] ASI_BLK_S, %f32	! grrr, where is ASI_BLK_NUCLEUS 8-(
 	ldda		[%g2] ASI_BLK_S, %f48
 	faddd		%f0, %f2, %f12
@@ -118,11 +225,10 @@ do_fpdis:
 	ldxa		[%g3] ASI_DMMU, %g5
 	add		%g6, AOFF_task_fpregs, %g1
 	stxa		%g0, [%g3] ASI_DMMU
+	membar		#Sync
 	add		%g6, AOFF_task_fpregs + 0x40, %g2
 	faddd		%f32, %f34, %f36
 	fmuld		%f32, %f34, %f38
-	flush		%g6
-	membar		#StoreLoad | #LoadLoad
 	ldda		[%g1] ASI_BLK_S, %f0	! grrr, where is ASI_BLK_NUCLEUS 8-(
 	ldda		[%g2] ASI_BLK_S, %f16
 	faddd		%f32, %f34, %f40
@@ -137,15 +243,14 @@ do_fpdis:
 	fmuld		%f32, %f34, %f58
 	faddd		%f32, %f34, %f60
 	fmuld		%f32, %f34, %f62
-	b,pt		%xcc, fpdis_exit
+	ba,pt		%xcc, fpdis_exit
 	 membar		#Sync
 3:	mov		SECONDARY_CONTEXT, %g3
 	add		%g6, AOFF_task_fpregs, %g1
 	ldxa		[%g3] ASI_DMMU, %g5
 	mov		0x40, %g2
 	stxa		%g0, [%g3] ASI_DMMU
-	flush		%g6
-	membar		#StoreLoad | #LoadLoad
+	membar		#Sync
 	ldda		[%g1] ASI_BLK_S, %f0		! grrr, where is ASI_BLK_NUCLEUS 8-(
 	ldda		[%g1 + %g2] ASI_BLK_S, %f16
 	add		%g1, 0x80, %g1
@@ -154,7 +259,7 @@ do_fpdis:
 	membar		#Sync
 fpdis_exit:
 	stxa		%g5, [%g3] ASI_DMMU
-	flush		%g6
+	membar		#Sync
 fpdis_exit2:
 	wr		%g7, 0, %gsr
 	ldx		[%g6 + AOFF_task_thread + AOFF_thread_xfsr], %fsr
@@ -164,22 +269,152 @@ fpdis_exit2:
 	wr		%g0, FPRS_FEF, %fprs	! clean DU/DL bits
 	retry
 
+	.align		32
+fp_other_bounce:
+	call		do_fpother
+	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	ba,pt		%xcc, rtrap
+	 clr		%l6
+
+	.globl		do_fpother_check_fitos
+	.align		32
+do_fpother_check_fitos:
+	sethi		%hi(fp_other_bounce - 4), %g7
+	or		%g7, %lo(fp_other_bounce - 4), %g7
+
+	/* NOTE: Need to preserve %g7 until we fully commit
+	 *       to the fitos fixup.
+	 */
+	stx		%fsr, [%g6 + AOFF_task_thread + AOFF_thread_xfsr]
+	rdpr		%tstate, %g3
+	andcc		%g3, TSTATE_PRIV, %g0
+	bne,pn		%xcc, do_fptrap_after_fsr
+	 nop
+	ldx		[%g6 + AOFF_task_thread + AOFF_thread_xfsr], %g3
+	srlx		%g3, 14, %g1
+	and		%g1, 7, %g1
+	cmp		%g1, 2			! Unfinished FP-OP
+	bne,pn		%xcc, do_fptrap_after_fsr
+	 sethi		%hi(1 << 23), %g1	! Inexact
+	andcc		%g3, %g1, %g0
+	bne,pn		%xcc, do_fptrap_after_fsr
+	 rdpr		%tpc, %g1
+	lduwa		[%g1] ASI_AIUP, %g3	! This cannot ever fail
+#define FITOS_MASK	0xc1f83fe0
+#define FITOS_COMPARE	0x81a01880
+	sethi		%hi(FITOS_MASK), %g1
+	or		%g1, %lo(FITOS_MASK), %g1
+	and		%g3, %g1, %g1
+	sethi		%hi(FITOS_COMPARE), %g2
+	or		%g2, %lo(FITOS_COMPARE), %g2
+	cmp		%g1, %g2
+	bne,pn		%xcc, do_fptrap_after_fsr
+	 nop
+	std		%f62, [%g6 + AOFF_task_fpregs + (62 * 4)]
+	sethi		%hi(fitos_table_1), %g1
+	and		%g3, 0x1f, %g2
+	or		%g1, %lo(fitos_table_1),  %g1
+	sllx		%g2, 2, %g2
+	jmpl		%g1 + %g2, %g0
+	 ba,pt		%xcc, fitos_emul_continue
+
+fitos_table_1:
+	fitod		%f0, %f62
+	fitod		%f1, %f62
+	fitod		%f2, %f62
+	fitod		%f3, %f62
+	fitod		%f4, %f62
+	fitod		%f5, %f62
+	fitod		%f6, %f62
+	fitod		%f7, %f62
+	fitod		%f8, %f62
+	fitod		%f9, %f62
+	fitod		%f10, %f62
+	fitod		%f11, %f62
+	fitod		%f12, %f62
+	fitod		%f13, %f62
+	fitod		%f14, %f62
+	fitod		%f15, %f62
+	fitod		%f16, %f62
+	fitod		%f17, %f62
+	fitod		%f18, %f62
+	fitod		%f19, %f62
+	fitod		%f20, %f62
+	fitod		%f21, %f62
+	fitod		%f22, %f62
+	fitod		%f23, %f62
+	fitod		%f24, %f62
+	fitod		%f25, %f62
+	fitod		%f26, %f62
+	fitod		%f27, %f62
+	fitod		%f28, %f62
+	fitod		%f29, %f62
+	fitod		%f30, %f62
+	fitod		%f31, %f62
+
+fitos_emul_continue:
+	sethi		%hi(fitos_table_2), %g1
+	srl		%g3, 25, %g2
+	or		%g1, %lo(fitos_table_2), %g1
+	and		%g2, 0x1f, %g2
+	sllx		%g2, 2, %g2
+	jmpl		%g1 + %g2, %g0
+	 ba,pt		%xcc, fitos_emul_fini
+
+fitos_table_2:
+	fdtos		%f62, %f0
+	fdtos		%f62, %f1
+	fdtos		%f62, %f2
+	fdtos		%f62, %f3
+	fdtos		%f62, %f4
+	fdtos		%f62, %f5
+	fdtos		%f62, %f6
+	fdtos		%f62, %f7
+	fdtos		%f62, %f8
+	fdtos		%f62, %f9
+	fdtos		%f62, %f10
+	fdtos		%f62, %f11
+	fdtos		%f62, %f12
+	fdtos		%f62, %f13
+	fdtos		%f62, %f14
+	fdtos		%f62, %f15
+	fdtos		%f62, %f16
+	fdtos		%f62, %f17
+	fdtos		%f62, %f18
+	fdtos		%f62, %f19
+	fdtos		%f62, %f20
+	fdtos		%f62, %f21
+	fdtos		%f62, %f22
+	fdtos		%f62, %f23
+	fdtos		%f62, %f24
+	fdtos		%f62, %f25
+	fdtos		%f62, %f26
+	fdtos		%f62, %f27
+	fdtos		%f62, %f28
+	fdtos		%f62, %f29
+	fdtos		%f62, %f30
+	fdtos		%f62, %f31
+
+fitos_emul_fini:
+	ldd		[%g6 + AOFF_task_fpregs + (62 * 4)], %f62
+	done
+
 	.globl		do_fptrap
 	.align		32
 do_fptrap:
-	ldub		[%g6 + AOFF_task_thread + AOFF_thread_fpsaved], %g3
 	stx		%fsr, [%g6 + AOFF_task_thread + AOFF_thread_xfsr]
+do_fptrap_after_fsr:
+	ldub		[%g6 + AOFF_task_thread + AOFF_thread_fpsaved], %g3
 	rd		%fprs, %g1
 	or		%g3, %g1, %g3
 	stb		%g3, [%g6 + AOFF_task_thread + AOFF_thread_fpsaved]
 	rd		%gsr, %g3
-	stb		%g3, [%g6 + AOFF_task_thread + AOFF_thread_gsr]
+	stx		%g3, [%g6 + AOFF_task_thread + AOFF_thread_gsr]
 	mov		SECONDARY_CONTEXT, %g3
 	add		%g6, AOFF_task_fpregs, %g2
 	ldxa		[%g3] ASI_DMMU, %g5
 	stxa		%g0, [%g3] ASI_DMMU
-	flush		%g6
-	membar		#StoreStore | #LoadStore
+	membar		#Sync
 	andcc		%g1, FPRS_DL, %g0
 	be,pn		%icc, 4f
 	 mov		0x40, %g3
@@ -193,7 +428,7 @@ do_fptrap:
 5:	mov		SECONDARY_CONTEXT, %g1
 	membar		#Sync
 	stxa		%g5, [%g1] ASI_DMMU
-	flush		%g6
+	membar		#Sync
 	ba,pt		%xcc, etrap
 	 wr		%g0, 0, %fprs
 
@@ -215,7 +450,7 @@ do_fptrap:
 	.globl		do_ivec
 do_ivec:
 	mov		0x40, %g3
-	ldxa		[%g3 + %g0] ASI_UDB_INTR_R, %g3
+	ldxa		[%g3 + %g0] ASI_INTR_R, %g3
 	sethi		%hi(KERNBASE), %g4
 	cmp		%g3, %g4
 	bgeu,pn		%xcc, do_ivec_xcall
@@ -242,10 +477,10 @@ do_ivec:
 do_ivec_xcall:
 	mov		0x50, %g1
 
-	ldxa		[%g1 + %g0] ASI_UDB_INTR_R, %g1
+	ldxa		[%g1 + %g0] ASI_INTR_R, %g1
 	srl		%g3, 0, %g3
 	mov		0x60, %g7
-	ldxa		[%g7 + %g0] ASI_UDB_INTR_R, %g7
+	ldxa		[%g7 + %g0] ASI_INTR_R, %g7
 	stxa		%g0, [%g0] ASI_INTR_RECEIVE
 	membar		#Sync
 	jmpl		%g3, %g0
@@ -490,19 +725,14 @@ netbsd_syscall:
 __do_data_access_exception_tl1:
 	rdpr		%pstate, %g4
 	wrpr		%g4, PSTATE_MG|PSTATE_AG, %pstate
-	rdpr		%tl, %g3
-	cmp		%g3, 1
 	mov		TLB_SFSR, %g3
 	mov		DMMU_SFAR, %g5
 	ldxa		[%g3] ASI_DMMU, %g4	! Get SFSR
 	ldxa		[%g5] ASI_DMMU, %g5	! Get SFAR
 	stxa		%g0, [%g3] ASI_DMMU	! Clear SFSR.FaultValid bit
 	membar		#Sync
-	bgu,pn		%icc, winfix_dax
+	ba,pt		%xcc, winfix_dax
 	 rdpr		%tpc, %g3
-	sethi		%hi(109f), %g7
-	ba,pt		%xcc, etraptl1
-	 or		%g7, %lo(109f), %g7	! Merge in below
 __do_data_access_exception:
 	rdpr		%pstate, %g4
 	wrpr		%g4, PSTATE_MG|PSTATE_AG, %pstate
@@ -646,6 +876,284 @@ cee_trap:
 	 add	%sp, STACK_BIAS + REGWIN_SZ, %o2
 	ba,a,pt	%xcc, rtrap_clr_l6
 
+	/* Capture I/D/E-cache state into per-cpu error scoreboard.
+	 *
+	 * %g1:		(TL>=0) ? 1 : 0
+	 * %g2:		scratch
+	 * %g3:		scratch
+	 * %g4:		AFSR
+	 * %g5:		AFAR
+	 * %g6:		current thread ptr
+	 * %g7:		scratch
+	 */
+#define CHEETAH_LOG_ERROR						\
+	/* Put "TL1" software bit into AFSR. */				\
+	and		%g1, 0x1, %g1;					\
+	sllx		%g1, 63, %g2;					\
+	or		%g4, %g2, %g4;					\
+	/* Get log entry pointer for this cpu at this trap level. */	\
+	ldxa		[%g0] ASI_SAFARI_CONFIG, %g2;			\
+	srlx		%g2, 17, %g2;					\
+	and		%g2, 0x3ff, %g2;				\
+	sllx		%g2, 9, %g2;					\
+	sethi		%hi(cheetah_error_log), %g3;			\
+	ldx		[%g3 + %lo(cheetah_error_log)], %g3;		\
+	brz,pn		%g3, 80f;					\
+	 nop;								\
+	add		%g3, %g2, %g3;					\
+	sllx		%g1, 8, %g1;					\
+	add		%g3, %g1, %g1;					\
+	/* %g1 holds pointer to the top of the logging scoreboard */	\
+	ldx		[%g1 + 0x0], %g7;				\
+	cmp		%g7, -1;					\
+	bne,pn		%xcc, 80f;					\
+	 nop;								\
+	stx		%g4, [%g1 + 0x0];				\
+	stx		%g5, [%g1 + 0x8];				\
+	add		%g1, 0x10, %g1;					\
+	/* %g1 now points to D-cache logging area */			\
+	set		0x3ff8, %g2;	/* DC_addr mask		*/	\
+	and		%g5, %g2, %g2;	/* DC_addr bits of AFAR	*/	\
+	srlx		%g5, 12, %g3;					\
+	or		%g3, 1, %g3;	/* PHYS tag + valid	*/	\
+10:	ldxa		[%g2] ASI_DCACHE_TAG, %g7;			\
+	cmp		%g3, %g7;	/* TAG match?		*/	\
+	bne,pt		%xcc, 13f;					\
+	 nop;								\
+	/* Yep, what we want, capture state. */				\
+	stx		%g2, [%g1 + 0x20];				\
+	stx		%g7, [%g1 + 0x28];				\
+	/* A membar Sync is required before and after utag access. */	\
+	membar		#Sync;						\
+	ldxa		[%g2] ASI_DCACHE_UTAG, %g7;			\
+	membar		#Sync;						\
+	stx		%g7, [%g1 + 0x30];				\
+	ldxa		[%g2] ASI_DCACHE_SNOOP_TAG, %g7;		\
+	stx		%g7, [%g1 + 0x38];				\
+	clr		%g3;						\
+12:	ldxa		[%g2 + %g3] ASI_DCACHE_DATA, %g7;		\
+	stx		%g7, [%g1];					\
+	add		%g3, (1 << 5), %g3;				\
+	cmp		%g3, (4 << 5);					\
+	bl,pt		%xcc, 12b;					\
+	 add		%g1, 0x8, %g1;					\
+	ba,pt		%xcc, 20f;					\
+	 add		%g1, 0x20, %g1;					\
+13:	sethi		%hi(1 << 14), %g7;				\
+	add		%g2, %g7, %g2;					\
+	srlx		%g2, 14, %g7;					\
+	cmp		%g7, 4;						\
+	bl,pt		%xcc, 10b;					\
+	 nop;								\
+	add		%g1, 0x40, %g1;					\
+20:	/* %g1 now points to I-cache logging area */			\
+	set		0x1fe0, %g2;	/* IC_addr mask		*/	\
+	and		%g5, %g2, %g2;	/* IC_addr bits of AFAR	*/	\
+	sllx		%g2, 1, %g2;	/* IC_addr[13:6]==VA[12:5] */	\
+	srlx		%g5, (13 - 8), %g3; /* Make PTAG */		\
+	andn		%g3, 0xff, %g3;	/* Mask off undefined bits */	\
+21:	ldxa		[%g2] ASI_IC_TAG, %g7;				\
+	andn		%g7, 0xff, %g7;					\
+	cmp		%g3, %g7;					\
+	bne,pt		%xcc, 23f;					\
+	 nop;								\
+	/* Yep, what we want, capture state. */				\
+	stx		%g2, [%g1 + 0x40];				\
+	stx		%g7, [%g1 + 0x48];				\
+	add		%g2, (1 << 3), %g2;				\
+	ldxa		[%g2] ASI_IC_TAG, %g7;				\
+	add		%g2, (1 << 3), %g2;				\
+	stx		%g7, [%g1 + 0x50];				\
+	ldxa		[%g2] ASI_IC_TAG, %g7;				\
+	add		%g2, (1 << 3), %g2;				\
+	stx		%g7, [%g1 + 0x60];				\
+	ldxa		[%g2] ASI_IC_TAG, %g7;				\
+	stx		%g7, [%g1 + 0x68];				\
+	sub		%g2, (3 << 3), %g2;				\
+	ldxa		[%g2] ASI_IC_STAG, %g7;				\
+	stx		%g7, [%g1 + 0x58];				\
+	clr		%g3;						\
+	srlx		%g2, 2, %g2;					\
+22:	ldxa		[%g2 + %g3] ASI_IC_INSTR, %g7;			\
+	stx		%g7, [%g1];					\
+	add		%g3, (1 << 3), %g3;				\
+	cmp		%g3, (8 << 3);					\
+	bl,pt		%xcc, 22b;					\
+	 add		%g1, 0x8, %g1;					\
+	ba,pt		%xcc, 30f;					\
+	 add		%g1, 0x30, %g1;					\
+23:	sethi		%hi(1 << 14), %g7;				\
+	add		%g2, %g7, %g2;					\
+	srlx		%g2, 14, %g7;					\
+	cmp		%g7, 4;						\
+	bl,pt		%xcc, 21b;					\
+	 nop;								\
+	add		%g1, 0x70, %g1;					\
+30:	/* %g1 now points to E-cache logging area */			\
+	andn		%g5, (32 - 1), %g2;	/* E-cache subblock */	\
+	stx		%g2, [%g1 + 0x20];				\
+	ldxa		[%g2] ASI_EC_TAG_DATA, %g7;			\
+	stx		%g7, [%g1 + 0x28];				\
+	ldxa		[%g2] ASI_EC_R, %g0;				\
+	clr		%g3;						\
+31:	ldxa		[%g3] ASI_EC_DATA, %g7;				\
+	stx		%g7, [%g1 + %g3];				\
+	add		%g3, 0x8, %g3;					\
+	cmp		%g3, 0x20;					\
+	bl,pt		%xcc, 31b;					\
+	 nop;								\
+80:	/* DONE */
+
+	/* These get patched into the trap table at boot time
+	 * once we know we have a cheetah processor.
+	 */
+	.globl		cheetah_fecc_trap_vector, cheetah_fecc_trap_vector_tl1
+cheetah_fecc_trap_vector:
+	membar		#Sync
+	ldxa		[%g0] ASI_DCU_CONTROL_REG, %g1
+	andn		%g1, DCU_DC | DCU_IC, %g1
+	stxa		%g1, [%g0] ASI_DCU_CONTROL_REG
+	membar		#Sync
+	sethi		%hi(cheetah_fast_ecc), %g2
+	jmpl		%g2 + %lo(cheetah_fast_ecc), %g0
+	 mov		0, %g1
+cheetah_fecc_trap_vector_tl1:
+	membar		#Sync
+	ldxa		[%g0] ASI_DCU_CONTROL_REG, %g1
+	andn		%g1, DCU_DC | DCU_IC, %g1
+	stxa		%g1, [%g0] ASI_DCU_CONTROL_REG
+	membar		#Sync
+	sethi		%hi(cheetah_fast_ecc), %g2
+	jmpl		%g2 + %lo(cheetah_fast_ecc), %g0
+	 mov		1, %g1
+	.globl	cheetah_cee_trap_vector, cheetah_cee_trap_vector_tl1
+cheetah_cee_trap_vector:
+	membar		#Sync
+	ldxa		[%g0] ASI_DCU_CONTROL_REG, %g1
+	andn		%g1, DCU_IC, %g1
+	stxa		%g1, [%g0] ASI_DCU_CONTROL_REG
+	membar		#Sync
+	sethi		%hi(cheetah_cee), %g2
+	jmpl		%g2 + %lo(cheetah_cee), %g0
+	 mov		0, %g1
+cheetah_cee_trap_vector_tl1:
+	membar		#Sync
+	ldxa		[%g0] ASI_DCU_CONTROL_REG, %g1
+	andn		%g1, DCU_IC, %g1
+	stxa		%g1, [%g0] ASI_DCU_CONTROL_REG
+	membar		#Sync
+	sethi		%hi(cheetah_cee), %g2
+	jmpl		%g2 + %lo(cheetah_cee), %g0
+	 mov		1, %g1
+	.globl	cheetah_deferred_trap_vector, cheetah_deferred_trap_vector_tl1
+cheetah_deferred_trap_vector:
+	membar		#Sync
+	ldxa		[%g0] ASI_DCU_CONTROL_REG, %g1;
+	andn		%g1, DCU_DC | DCU_IC, %g1;
+	stxa		%g1, [%g0] ASI_DCU_CONTROL_REG;
+	membar		#Sync;
+	sethi		%hi(cheetah_deferred_trap), %g2
+	jmpl		%g2 + %lo(cheetah_deferred_trap), %g0
+	 mov		0, %g1
+cheetah_deferred_trap_vector_tl1:
+	membar		#Sync;
+	ldxa		[%g0] ASI_DCU_CONTROL_REG, %g1;
+	andn		%g1, DCU_DC | DCU_IC, %g1;
+	stxa		%g1, [%g0] ASI_DCU_CONTROL_REG;
+	membar		#Sync;
+	sethi		%hi(cheetah_deferred_trap), %g2
+	jmpl		%g2 + %lo(cheetah_deferred_trap), %g0
+	 mov		1, %g1
+
+	/* Cheetah FECC trap handling, we get here from tl{0,1}_fecc
+	 * in the trap table.  That code has done a memory barrier
+	 * and has disabled both the I-cache and D-cache in the DCU
+	 * control register.  The I-cache is disabled so that we may
+	 * capture the corrupted cache line, and the D-cache is disabled
+	 * because corrupt data may have been placed there and we don't
+	 * want to reference it.
+	 *
+	 * %g1 is one if this trap occured at %tl >= 1.
+	 *
+	 * Next, we turn off error reporting so that we don't recurse.
+	 */
+	.globl		cheetah_fast_ecc
+cheetah_fast_ecc:
+	ldxa		[%g0] ASI_ESTATE_ERROR_EN, %g2
+	andn		%g2, ESTATE_ERROR_NCEEN | ESTATE_ERROR_CEEN, %g2
+	stxa		%g2, [%g0] ASI_ESTATE_ERROR_EN
+	membar		#Sync
+
+	/* Fetch and clear AFSR/AFAR */
+	ldxa		[%g0] ASI_AFSR, %g4
+	ldxa		[%g0] ASI_AFAR, %g5
+	stxa		%g4, [%g0] ASI_AFSR
+	membar		#Sync
+
+	CHEETAH_LOG_ERROR
+
+	rdpr		%pil, %g2
+	wrpr		%g0, 15, %pil
+	ba,pt		%xcc, etrap_irq
+	 rd		%pc, %g7
+	mov		%l4, %o1
+	mov		%l5, %o2
+	call		cheetah_fecc_handler
+	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	ba,a,pt		%xcc, rtrap_clr_l6
+
+	/* Our caller has disabled I-cache and performed membar Sync. */
+	.globl		cheetah_cee
+cheetah_cee:
+	ldxa		[%g0] ASI_ESTATE_ERROR_EN, %g2
+	andn		%g2, ESTATE_ERROR_CEEN, %g2
+	stxa		%g2, [%g0] ASI_ESTATE_ERROR_EN
+	membar		#Sync
+
+	/* Fetch and clear AFSR/AFAR */
+	ldxa		[%g0] ASI_AFSR, %g4
+	ldxa		[%g0] ASI_AFAR, %g5
+	stxa		%g4, [%g0] ASI_AFSR
+	membar		#Sync
+
+	CHEETAH_LOG_ERROR
+
+	rdpr		%pil, %g2
+	wrpr		%g0, 15, %pil
+	ba,pt		%xcc, etrap_irq
+	 rd		%pc, %g7
+	mov		%l4, %o1
+	mov		%l5, %o2
+	call		cheetah_cee_handler
+	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	ba,a,pt		%xcc, rtrap_clr_l6
+
+	/* Our caller has disabled I-cache+D-cache and performed membar Sync. */
+	.globl		cheetah_deferred_trap
+cheetah_deferred_trap:
+	ldxa		[%g0] ASI_ESTATE_ERROR_EN, %g2
+	andn		%g2, ESTATE_ERROR_NCEEN | ESTATE_ERROR_CEEN, %g2
+	stxa		%g2, [%g0] ASI_ESTATE_ERROR_EN
+	membar		#Sync
+
+	/* Fetch and clear AFSR/AFAR */
+	ldxa		[%g0] ASI_AFSR, %g4
+	ldxa		[%g0] ASI_AFAR, %g5
+	stxa		%g4, [%g0] ASI_AFSR
+	membar		#Sync
+
+	CHEETAH_LOG_ERROR
+
+	rdpr		%pil, %g2
+	wrpr		%g0, 15, %pil
+	ba,pt		%xcc, etrap_irq
+	 rd		%pc, %g7
+	mov		%l4, %o1
+	mov		%l5, %o2
+	call		cheetah_deferred_handler
+	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	ba,a,pt		%xcc, rtrap_clr_l6
+
 	.globl		__do_privact
 __do_privact:
 	mov		TLB_SFSR, %g3
@@ -673,7 +1181,7 @@ do_mna:
 	ldxa		[%g3] ASI_DMMU, %g5
 	stxa		%g0, [%g3] ASI_DMMU	! Clear FaultValid bit
 	membar		#Sync
-	bgu,pn		%icc, winfix_dax
+	bgu,pn		%icc, winfix_mna
 	 rdpr		%tpc, %g3
 
 1:	sethi		%hi(109f), %g7
@@ -986,9 +1494,8 @@ linux_sparc_syscall32:
 	 srl		%i0, 0, %o0				! IEU0
 	sll		%g1, 2, %l4				! IEU0	Group
 #ifdef SYSCALL_TRACING
-	add		%sp, STACK_BIAS + REGWIN_SZ, %o1
 	call		syscall_trace_entry
-	 mov		%g1, %o0
+	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
 	srl		%i0, 0, %o0
 #endif
 	mov		%i4, %o4				! IEU1
@@ -1015,9 +1522,8 @@ linux_sparc_syscall:
 	 mov		%i0, %o0				! IEU0
 	sll		%g1, 2, %l4				! IEU0	Group
 #ifdef SYSCALL_TRACING
-	add		%sp, STACK_BIAS + REGWIN_SZ, %o1
 	call		syscall_trace_entry
-	 mov		%g1, %o0
+	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
 	mov		%i0, %o0
 #endif
 	mov		%i1, %o1				! IEU1
@@ -1037,8 +1543,10 @@ linux_sparc_syscall:
 3:	stx		%o0, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_I0]
 ret_sys_call:
 #ifdef SYSCALL_TRACING
+	mov		%o0, %o1
 	call		syscall_trace_exit
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o1
+	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	mov		%o1, %o0
 #endif
 	ldx		[%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TSTATE], %g3
 	ldx		[%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TNPC], %l1 ! pc = npc
@@ -1114,9 +1622,18 @@ do_gettimeofday:	/* %o0 = timevalp */
 	ldx	[%g3 + %lo(timer_tick_offset)], %g3
 	or	%g2, %lo(xtime), %g2
 	or	%g1, %lo(timer_tick_compare), %g1
-1:	ldda	[%g2] ASI_NUCLEUS_QUAD_LDD, %o4
-	rd	%tick, %o1
-	ldx	[%g1], %g7
+1:	rdpr	%ver, %o2
+	sethi	%hi(0x003e0014), %o1
+	srlx	%o2, 32, %o2
+	or	%o1, %lo(0x003e0014), %o1
+	ldda	[%g2] ASI_NUCLEUS_QUAD_LDD, %o4
+	cmp	%o2, %o1
+	bne,pt	%xcc, 2f
+	 nop
+	ba,pt	%xcc, 3f
+	 rd	%asr24, %o1
+2:	rd	%tick, %o1
+3:	ldx	[%g1], %g7
 	ldda	[%g2] ASI_NUCLEUS_QUAD_LDD, %o2
 	xor	%o4, %o2, %o2
 	xor	%o5, %o3, %o3

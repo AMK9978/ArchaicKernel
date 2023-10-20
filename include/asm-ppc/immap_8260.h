@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.immap_8260.h 1.8 07/18/01 15:46:50 trini
+ */
 
 /*
  * MPC8260 Internal Memory Map
@@ -428,10 +431,7 @@ typedef struct immap {
 	char		res11[4096];
 } immap_t;
 
-/* The 8260 relies heavily on the IMMR, so we keep it around as a
- * kernel global symbol now.  Should have done this for the 8xx......
- */
-immap_t	*immr;
+extern immap_t	*immr;
 
 #endif /* __IMMAP_82XX__ */
 #endif /* __KERNEL__ */

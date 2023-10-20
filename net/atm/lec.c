@@ -51,6 +51,11 @@ static unsigned char bridge_ula_lec[] = {0x01, 0x80, 0xc2, 0x00, 0x00};
 #define DPRINTK(format,args...)
 #endif
 
+extern struct net_bridge_fdb_entry *(*br_fdb_get_hook)(struct net_bridge *br,
+	unsigned char *addr);
+extern void (*br_fdb_put_hook)(struct net_bridge_fdb_entry *ent);
+
+
 #define DUMP_PACKETS 0 /* 0 = None,
                         * 1 = 30 first bytes
                         * 2 = Whole packet
@@ -276,6 +281,10 @@ lec_send_packet(struct sk_buff *skb, struct net_device *dev)
                                dev->name,
                                skb->len,skb->truesize);
                         nb=(unsigned char*)kmalloc(64, GFP_ATOMIC);
+                        if (nb == NULL) {
+                                dev_kfree_skb(skb);
+                                return 0;
+                        }
                         memcpy(nb,skb->data,skb->len);
                         kfree(skb->head);
                         skb->head = skb->data = nb;
@@ -853,8 +862,11 @@ static void __exit lane_module_cleanup(void)
                 if (dev_lec[i] != NULL) {
                         priv = (struct lec_priv *)dev_lec[i]->priv;
 #if defined(CONFIG_TR)
-                        unregister_trdev(dev_lec[i]);
+                	if (priv->is_trdev)
+                        	unregister_trdev(dev_lec[i]);
+                	else
 #endif
+                        unregister_netdev(dev_lec[i]);
                         kfree(dev_lec[i]);
                         dev_lec[i] = NULL;
                 }
@@ -1788,6 +1800,10 @@ lec_arp_update(struct lec_priv *priv, unsigned char *mac_addr,
         entry = lec_arp_find(priv, mac_addr);
         if (!entry) {
                 entry = make_entry(priv, mac_addr);
+                if (!entry) {
+                        lec_arp_unlock(priv);
+                        return;
+                }
                 entry->status = ESI_UNKNOWN;
                 lec_arp_put(priv->lec_arp_tables, entry);
                 /* Temporary, changes before end of function */
@@ -1882,6 +1898,10 @@ lec_vcc_added(struct lec_priv *priv, struct atmlec_ioc *ioc_data,
                         ioc_data->atm_addr[16],ioc_data->atm_addr[17],
                         ioc_data->atm_addr[18],ioc_data->atm_addr[19]);
                 entry = make_entry(priv, bus_mac);
+                if (entry == NULL) {
+                        lec_arp_unlock(priv);
+                        return;
+                }
                 memcpy(entry->atm_addr, ioc_data->atm_addr, ATM_ESA_LEN);
                 memset(entry->mac_addr, 0, ETH_ALEN);
                 entry->recv_vcc = vcc;
@@ -1959,6 +1979,10 @@ lec_vcc_added(struct lec_priv *priv, struct atmlec_ioc *ioc_data,
         /* Not found, snatch address from first data packet that arrives from
            this vcc */
         entry = make_entry(priv, bus_mac);
+        if (!entry) {
+                lec_arp_unlock(priv);
+                return;
+        }
         entry->vcc = vcc;
         entry->old_push = old_push;
         memcpy(entry->atm_addr, ioc_data->atm_addr, ATM_ESA_LEN);
@@ -2169,3 +2193,4 @@ lec_arp_check_empties(struct lec_priv *priv,
         lec_arp_put(priv->lec_arp_tables,entry);
         lec_arp_unlock(priv);  
 }
+MODULE_LICENSE("GPL");

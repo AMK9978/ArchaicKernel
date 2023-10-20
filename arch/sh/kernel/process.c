@@ -1,4 +1,4 @@
-/* $Id: process.c,v 1.33 2000/03/25 00:06:15 gniibe Exp $
+/* $Id: process.c,v 1.35 2001/10/11 09:18:17 gniibe Exp $
  *
  *  linux/arch/sh/kernel/process.c
  *
@@ -11,36 +11,13 @@
  * This file handles the architecture-dependent parts of process handling..
  */
 
-#define __KERNEL_SYSCALLS__
-#include <stdarg.h>
-
-#include <linux/errno.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/mm.h>
-#include <linux/smp.h>
-#include <linux/smp_lock.h>
-#include <linux/stddef.h>
-#include <linux/ptrace.h>
-#include <linux/malloc.h>
-#include <linux/vmalloc.h>
-#include <linux/user.h>
-#include <linux/a.out.h>
-#include <linux/interrupt.h>
 #include <linux/unistd.h>
-#include <linux/delay.h>
-#include <linux/reboot.h>
-#include <linux/init.h>
+#include <linux/slab.h>
 
-#include <asm/uaccess.h>
-#include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/io.h>
-#include <asm/processor.h>
+#include <asm/uaccess.h>
 #include <asm/mmu_context.h>
 #include <asm/elf.h>
-
-#include <linux/irq.h>
 
 static int hlt_counter=0;
 
@@ -67,11 +44,17 @@ void cpu_idle(void *unused)
 	current->counter = -100;
 
 	while (1) {
-		while (!current->need_resched) {
-			if (hlt_counter)
-				continue;
+		if (hlt_counter) {
+			if (current->need_resched)
+				break;
+		} else {
+			__cli();
+			while (!current->need_resched) {
+				__sti();
+				asm volatile("sleep" : : : "memory");
+				__cli();
+			}
 			__sti();
-			asm volatile("sleep" : : : "memory");
 		}
 		schedule();
 		check_pgt_cache();
@@ -79,11 +62,16 @@ void cpu_idle(void *unused)
 }
 
 void machine_restart(char * __unused)
-{ /* Need to set MMU_TTB?? */
+{
+	/* SR.BL=1 and invoke address error to let CPU reset (manual reset) */
+	asm volatile("ldc %0, sr\n\t"
+		     "mov.l @%1, %0" : : "r" (0x10000000), "r" (0x80000001));
 }
 
 void machine_halt(void)
 {
+	while (1)
+		asm volatile("sleep" : : : "memory");
 }
 
 void machine_power_off(void)
@@ -93,8 +81,8 @@ void machine_power_off(void)
 void show_regs(struct pt_regs * regs)
 {
 	printk("\n");
-	printk("PC  : %08lx SP  : %08lx SR  : %08lx TEA : %08lx\n",
-	       regs->pc, regs->regs[15], regs->sr, ctrl_inl(MMU_TEA));
+	printk("PC  : %08lx SP  : %08lx SR  : %08lx TEA : %08x    %s\n",
+	       regs->pc, regs->regs[15], regs->sr, ctrl_inl(MMU_TEA), print_tainted());
 	printk("R0  : %08lx R1  : %08lx R2  : %08lx R3  : %08lx\n",
 	       regs->regs[0],regs->regs[1],
 	       regs->regs[2],regs->regs[3]);
@@ -129,10 +117,6 @@ void free_task_struct(struct task_struct *p)
 /*
  * This is the mechanism for creating a new kernel thread.
  *
- * NOTE! Only a kernel-only process(ie the swapper or direct descendants
- * who haven't done an "execve()") should use this: it will work within
- * a system call from a "real" process, but the process memory space will
- * not be free'd until both the parent and the child have exited.
  */
 int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {	/* Don't use this in BL=1(cli).  Or else, CPU resets! */
@@ -144,12 +128,12 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 	register unsigned long __sc9 __asm__ ("r9") = (long) fn;
 
 	__asm__("trapa	#0x12\n\t" 	/* Linux/SH system call */
-		"tst	#0xff, $r0\n\t"	/* child or parent? */
+		"tst	r0, r0\n\t"	/* child or parent? */
 		"bf	1f\n\t"		/* parent - jump */
-		"jsr	@$r9\n\t"	/* call fn */
-		" mov	$r8, $r4\n\t"	/* push argument */
-		"mov	$r0, $r4\n\t"	/* return value to arg of exit */
-		"mov	%1, $r3\n\t"	/* exit */
+		"jsr	@r9\n\t"	/* call fn */
+		" mov	r8, r4\n\t"	/* push argument */
+		"mov	r0, r4\n\t"	/* return value to arg of exit */
+		"mov	%1, r3\n\t"	/* exit */
 		"trapa	#0x11\n"
 		"1:"
 		: "=z" (__sc0)
@@ -285,7 +269,7 @@ void __switch_to(struct task_struct *prev, struct task_struct *next)
 	 * Restore the kernel mode register
 	 *   	k7 (r7_bank1)
 	 */
-	asm volatile("ldc	%0, $r7_bank"
+	asm volatile("ldc	%0, r7_bank"
 		     : /* no output */
 		     :"r" (next));
 }
@@ -376,7 +360,7 @@ unsigned long get_wchan(struct task_struct *p)
 asmlinkage void print_syscall(int x)
 {
 	unsigned long flags, sr;
-	asm("stc	$sr, %0": "=r" (sr));
+	asm("stc	sr, %0": "=r" (sr));
 	save_and_cli(flags);
 	printk("%c: %c %c, %c: SYSCALL\n", (x&63)+32,
 	       (current->flags&PF_USEDFPU)?'C':' ',

@@ -1,12 +1,12 @@
 /******************************************************************************
  *
  * Module Name: pstree - Parser op tree manipulation/traversal/search
- *              $Revision: 25 $
+ *              $Revision: 35 $
  *
  *****************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -28,7 +28,7 @@
 #include "acparser.h"
 #include "amlcode.h"
 
-#define _COMPONENT          PARSER
+#define _COMPONENT          ACPI_PARSER
 	 MODULE_NAME         ("pstree")
 
 
@@ -45,19 +45,22 @@
  *
  ******************************************************************************/
 
-ACPI_PARSE_OBJECT *
+acpi_parse_object *
 acpi_ps_get_arg (
-	ACPI_PARSE_OBJECT       *op,
+	acpi_parse_object       *op,
 	u32                     argn)
 {
-	ACPI_PARSE_OBJECT       *arg = NULL;
-	ACPI_OPCODE_INFO        *op_info;
+	acpi_parse_object       *arg = NULL;
+	const acpi_opcode_info  *op_info;
+
+
+	FUNCTION_ENTRY ();
 
 
 	/* Get the info structure for this opcode */
 
 	op_info = acpi_ps_get_opcode_info (op->opcode);
-	if (ACPI_GET_OP_TYPE (op_info) != ACPI_OP_TYPE_OPCODE) {
+	if (op_info->class == AML_CLASS_UNKNOWN) {
 		/* Invalid opcode or ASCII character */
 
 		return (NULL);
@@ -65,7 +68,7 @@ acpi_ps_get_arg (
 
 	/* Check if this opcode requires argument sub-objects */
 
-	if (!(ACPI_GET_OP_ARGS (op_info))) {
+	if (!(op_info->flags & AML_HAS_ARGS)) {
 		/* Has no linked argument objects */
 
 		return (NULL);
@@ -98,11 +101,14 @@ acpi_ps_get_arg (
 
 void
 acpi_ps_append_arg (
-	ACPI_PARSE_OBJECT       *op,
-	ACPI_PARSE_OBJECT       *arg)
+	acpi_parse_object       *op,
+	acpi_parse_object       *arg)
 {
-	ACPI_PARSE_OBJECT       *prev_arg;
-	ACPI_OPCODE_INFO        *op_info;
+	acpi_parse_object       *prev_arg;
+	const acpi_opcode_info  *op_info;
+
+
+	FUNCTION_ENTRY ();
 
 
 	if (!op) {
@@ -112,15 +118,16 @@ acpi_ps_append_arg (
 	/* Get the info structure for this opcode */
 
 	op_info = acpi_ps_get_opcode_info (op->opcode);
-	if (ACPI_GET_OP_TYPE (op_info) != ACPI_OP_TYPE_OPCODE) {
+	if (op_info->class == AML_CLASS_UNKNOWN) {
 		/* Invalid opcode */
 
+		REPORT_ERROR (("Ps_append_arg: Invalid AML Opcode: 0x%2.2X\n", op->opcode));
 		return;
 	}
 
 	/* Check if this opcode requires argument sub-objects */
 
-	if (!(ACPI_GET_OP_ARGS (op_info))) {
+	if (!(op_info->flags & AML_HAS_ARGS)) {
 		/* Has no linked argument objects */
 
 		return;
@@ -167,20 +174,22 @@ acpi_ps_append_arg (
  *
  ******************************************************************************/
 
-ACPI_PARSE_OBJECT *
+acpi_parse_object *
 acpi_ps_get_child (
-	ACPI_PARSE_OBJECT       *op)
+	acpi_parse_object       *op)
 {
-	ACPI_PARSE_OBJECT       *child = NULL;
+	acpi_parse_object       *child = NULL;
 
 
-	switch (op->opcode)
-	{
+	FUNCTION_ENTRY ();
+
+
+	switch (op->opcode) {
 	case AML_SCOPE_OP:
 	case AML_ELSE_OP:
 	case AML_DEVICE_OP:
 	case AML_THERMAL_ZONE_OP:
-	case AML_METHODCALL_OP:
+	case AML_INT_METHODCALL_OP:
 
 		child = acpi_ps_get_arg (op, 0);
 		break;
@@ -191,7 +200,7 @@ acpi_ps_get_child (
 	case AML_METHOD_OP:
 	case AML_IF_OP:
 	case AML_WHILE_OP:
-	case AML_DEF_FIELD_OP:
+	case AML_FIELD_OP:
 
 		child = acpi_ps_get_arg (op, 1);
 		break;
@@ -230,14 +239,17 @@ acpi_ps_get_child (
  *
  ******************************************************************************/
 
-ACPI_PARSE_OBJECT *
+acpi_parse_object *
 acpi_ps_get_depth_next (
-	ACPI_PARSE_OBJECT       *origin,
-	ACPI_PARSE_OBJECT       *op)
+	acpi_parse_object       *origin,
+	acpi_parse_object       *op)
 {
-	ACPI_PARSE_OBJECT       *next = NULL;
-	ACPI_PARSE_OBJECT       *parent;
-	ACPI_PARSE_OBJECT       *arg;
+	acpi_parse_object       *next = NULL;
+	acpi_parse_object       *parent;
+	acpi_parse_object       *arg;
+
+
+	FUNCTION_ENTRY ();
 
 
 	if (!op) {

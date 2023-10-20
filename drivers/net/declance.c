@@ -73,7 +73,7 @@ static char *lancestr = "LANCE";
 #include <linux/string.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/utsname.h>
 #include <linux/a.out.h>
@@ -83,7 +83,7 @@ static char *lancestr = "LANCE";
 #include <linux/etherdevice.h>
 
 #ifndef CONFIG_TC
-unsigned long system_base = 0;
+unsigned long system_base;
 unsigned long dmaptr;
 #endif
 static int type;
@@ -554,6 +554,7 @@ static int lance_rx(struct net_device *dev)
 	ib = (struct lance_init_block *) (dev->mem_start);
 
 #ifdef TEST_HITS
+	{
 	int i;
 
 	printk("[");
@@ -566,7 +567,9 @@ static int lance_rx(struct net_device *dev)
 			       ib->brx_ring[i].rmd1_bits & LE_R1_OWN ? "." : "1");
 	}
 	printk("]");
+	}
 #endif
+
 
 	for (rd = &ib->brx_ring[lp->rx_new];
 	     !((bits = rd->rmd1_bits) & LE_R1_OWN);
@@ -608,11 +611,14 @@ static int lance_rx(struct net_device *dev)
 			skb->dev = dev;
 			skb_reserve(skb, 2);	/* 16 byte align */
 			skb_put(skb, len);	/* make room */
+
 			cp_from_buf(skb->data,
 				 (char *) lp->rx_buf_ptr_cpu[lp->rx_new],
 				    len);
+
 			skb->protocol = eth_type_trans(skb, dev);
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
 		}
 
@@ -655,7 +661,7 @@ static void lance_tx(struct net_device *dev)
 
 			if (status & LE_T3_CLOS) {
 				lp->stats.tx_carrier_errors++;
-				printk("%s: Carrier Lost", dev->name);
+				printk("%s: Carrier Lost\n", dev->name);
 				/* Stop the lance */
 				writereg(&ll->rap, LE_CSR0);
 				writereg(&ll->rdp, LE_C0_STOP);
@@ -740,7 +746,7 @@ static void lance_interrupt(const int irq, void *dev_id, struct pt_regs *regs)
 	if (csr0 & LE_C0_MERR) {
 		volatile unsigned long int_stat = *(unsigned long *) (system_base + IOCTL + SIR);
 
-		printk("%s: Memory error, status %04x", dev->name, csr0);
+		printk("%s: Memory error, status %04x\n", dev->name, csr0);
 
 		if (int_stat & LANCE_DMA_MEMRDERR) {
 			printk("%s: DMA error\n", dev->name);
@@ -758,6 +764,7 @@ static void lance_interrupt(const int irq, void *dev_id, struct pt_regs *regs)
 		init_restart_lance(lp);
 		netif_wake_queue(dev);
 	}
+
 	writereg(&ll->rdp, LE_C0_INEA);
 	writereg(&ll->rdp, LE_C0_INEA);
 }
@@ -773,11 +780,6 @@ static int lance_open(struct net_device *dev)
 
 	last_dev = dev;
 
-	/* Associate IRQ with lance_interrupt */
-	if (request_irq(dev->irq, &lance_interrupt, 0, lp->name, dev)) {
-		printk("Lance: Can't get irq %d\n", dev->irq);
-		return -EAGAIN;
-	}
 	/* Stop the Lance */
 	writereg(&ll->rap, LE_CSR0);
 	writereg(&ll->rdp, LE_C0_STOP);
@@ -796,6 +798,12 @@ static int lance_open(struct net_device *dev)
 	load_csrs(lp);
 
 	netif_start_queue(dev);
+
+	/* Associate IRQ with lance_interrupt */
+	if (request_irq(dev->irq, &lance_interrupt, 0, lp->name, dev)) {
+		printk("Lance: Can't get irq %d\n", dev->irq);
+		return -EAGAIN;
+	}
 
 	status = init_restart_lance(lp);
 
@@ -1034,10 +1042,13 @@ static int __init dec_lance_init(struct net_device *dev, const int type)
 		/*
 		 * FIXME: ugly hack!
 		 */
-		dev->mem_start = KSEG1ADDR(0x0020000);
+		dev->mem_start = KSEG1ADDR(0x00020000);
 		dev->mem_end = dev->mem_start + 0x00020000;
 		dev->irq = ETHER;
 		esar_base = system_base + ESAR;
+	
+		/* Workaround crash with booting KN04 2.1k from Disk */
+		memset(dev->mem_start, 0, dev->mem_end - dev->mem_start);
 
 		/*
 		 * setup the pointer arrays, this sucks [tm] :-(
@@ -1206,11 +1217,12 @@ err_out:
 static int __init dec_lance_probe(void)
 {
 	struct net_device *dev = NULL;
-	static int called = 0;
+	static int called;
 
 #ifdef MODULE
 	root_lance_dev = NULL;
 #endif
+
 
 #ifdef CONFIG_TC
 	int slot = -1;

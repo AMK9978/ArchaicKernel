@@ -28,6 +28,9 @@
  *   Recovered DMA access. Abridged messages. Added support for DTC5051CX,
  *   WD1002-27X & XEBEC controllers. Driver uses now some jumper settings.
  *   Extended ioctl() support.
+ *
+ * Bugfix: 15/02/01, Paul G. - inform queue layer of tiny xd_maxsect.
+ *
  */
 
 #include <linux/module.h>
@@ -59,7 +62,7 @@
 #define XD_INIT_DISK_DELAY	(30*HZ/1000)  /* 30 ms delay during disk initialization */
 
 /* Above may need to be increased if a problem with the 2nd drive detection
-   (ST11M controller) or resetting a controler (WD) appears */
+   (ST11M controller) or resetting a controller (WD) appears */
 
 XD_INFO xd_info[XD_MAXDRIVES];
 
@@ -118,22 +121,23 @@ static unsigned int xd_bases[] __initdata =
 static struct hd_struct xd_struct[XD_MAXDRIVES << 6];
 static int xd_sizes[XD_MAXDRIVES << 6], xd_access[XD_MAXDRIVES];
 static int xd_blocksizes[XD_MAXDRIVES << 6];
+static int xd_maxsect[XD_MAXDRIVES << 6];
 
 extern struct block_device_operations xd_fops;
 
 static struct gendisk xd_gendisk = {
-	MAJOR_NR,	/* Major number */
-	"xd",		/* Major name */
-	6,		/* Bits to shift to get real from partition */
-	1 << 6,		/* Number of partitions per real */
-	xd_struct,	/* hd struct */
-	xd_sizes,	/* block sizes */
-	0,		/* number */
-	(void *) xd_info,	/* internal */
-	NULL,		/* next */
-	&xd_fops,	/* file operations */
+	major:		MAJOR_NR,
+	major_name:	"xd",
+	minor_shift:	6,
+	max_p:		1 << 6,
+	part:		xd_struct,
+	sizes:		xd_sizes,
+	real_devices:	(void *)xd_info,
+	fops:		&xd_fops,
 };
+
 static struct block_device_operations xd_fops = {
+	owner:		THIS_MODULE,
 	open:		xd_open,
 	release:	xd_release,
 	ioctl:		xd_ioctl,
@@ -169,8 +173,7 @@ int __init xd_init (void)
 	devfs_handle = devfs_mk_dir (NULL, xd_gendisk.major_name, NULL);
 	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
 	read_ahead[MAJOR_NR] = 8;	/* 8 sector (4kB) read ahead */
-	xd_gendisk.next = gendisk_head;
-	gendisk_head = &xd_gendisk;
+	add_gendisk(&xd_gendisk);
 	xd_geninit();
 
 	return 0;
@@ -242,6 +245,10 @@ static void __init xd_geninit (void)
 			printk("xd: unable to get IRQ%d\n",xd_irq);
 	}
 
+	/* xd_maxsectors depends on controller - so set after detection */
+	for(i=0; i<(XD_MAXDRIVES << 6); i++) xd_maxsect[i] = xd_maxsectors;
+	max_sectors[MAJOR_NR] = xd_maxsect;
+
 	for (i = 0; i < xd_drives; i++) {
 		xd_valid[i] = 1;
 		register_disk(&xd_gendisk, MKDEV(MAJOR_NR,i<<6), 1<<6, &xd_fops,
@@ -258,8 +265,6 @@ static int xd_open (struct inode *inode,struct file *file)
 {
 	int dev = DEVICE_NR(inode->i_rdev);
 
-	MOD_INC_USE_COUNT;
-
 	if (dev < xd_drives) {
 		while (!xd_valid[dev])
 			sleep_on(&xd_wait_open);
@@ -269,7 +274,6 @@ static int xd_open (struct inode *inode,struct file *file)
 		return (0);
 	}
 
-	MOD_DEC_USE_COUNT;
 	return -ENXIO;
 }
 
@@ -328,9 +332,6 @@ static int xd_ioctl (struct inode *inode,struct file *file,u_int cmd,u_long arg)
 			g.start = xd_struct[MINOR(inode->i_rdev)].start_sect;
 			return copy_to_user(geometry, &g, sizeof g) ? -EFAULT : 0;
 		}
-		case BLKGETSIZE:
-			if (!arg) return -EINVAL;
-			return put_user(xd_struct[MINOR(inode->i_rdev)].nr_sects,(long *) arg);
 		case HDIO_SET_DMA:
 			if (!capable(CAP_SYS_ADMIN)) return -EACCES;
 			if (xdc_busy) return -EBUSY;
@@ -349,6 +350,8 @@ static int xd_ioctl (struct inode *inode,struct file *file,u_int cmd,u_long arg)
 				return -EACCES;
 			return xd_reread_partitions(inode->i_rdev);
 
+		case BLKGETSIZE:
+		case BLKGETSIZE64:
 		case BLKFLSBUF:
 		case BLKROSET:
 		case BLKROGET:
@@ -366,12 +369,8 @@ static int xd_ioctl (struct inode *inode,struct file *file,u_int cmd,u_long arg)
 static int xd_release (struct inode *inode, struct file *file)
 {
 	int target = DEVICE_NR(inode->i_rdev);
-	if (target < xd_drives) {
+	if (target < xd_drives)
 		xd_access[target]--;
-#ifdef MODULE
-		MOD_DEC_USE_COUNT;
-#endif /* MODULE */
-	}
 	return 0;
 }
 
@@ -393,13 +392,7 @@ static int xd_reread_partitions(kdev_t dev)
 
 	for (partition = xd_gendisk.max_p - 1; partition >= 0; partition--) {
 		int minor = (start | partition);
-		kdev_t devp = MKDEV(MAJOR_NR, minor);
-		struct super_block * sb = get_super(devp);
-		
-		sync_dev(devp);
-		if (sb)
-			invalidate_inodes(sb);
-		invalidate_buffers(devp);
+		invalidate_device(MKDEV(MAJOR_NR, minor), 1);
 		xd_gendisk.part[minor].start_sect = 0;
 		xd_gendisk.part[minor].nr_sects = 0;
 	};
@@ -877,7 +870,7 @@ static void __init xd_wd_init_drive (u_char drive)
 				xd_setparam(CMD_WDSETPARAM,drive,xd_info[drive].heads,xd_info[drive].cylinders,
 					((u_short *) (buf))[0xD8],((u_short *) (buf))[0xDA],buf[0x1B4]);
 		}
-	/* 1002 based RLL controler requests converted addressing, but reports physical 
+	/* 1002 based RLL controller requests converted addressing, but reports physical 
 	   (physical 26 sec., logical 17 sec.) 
 	   1004 based ???? */
 		if (rll & wd_1002) {
@@ -1058,7 +1051,7 @@ static void __init xd_override_init_drive (u_char drive)
 	xd_info[drive].control = 0;
 }
 
-/* xd_setup: initialise controler from command line parameters */
+/* xd_setup: initialise controller from command line parameters */
 void __init do_xd_setup (int *integers)
 {
 	switch (integers[0]) {
@@ -1108,20 +1101,16 @@ MODULE_PARM(xd, "1-4i");
 MODULE_PARM(xd_geo, "3-6i");
 MODULE_PARM(nodma, "i");
 
+MODULE_LICENSE("GPL");
+
 static void xd_done (void)
 {
-	struct gendisk ** gdp;
-	
 	blksize_size[MAJOR_NR] = NULL;
 	blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
 	blk_size[MAJOR_NR] = NULL;
 	hardsect_size[MAJOR_NR] = NULL;
 	read_ahead[MAJOR_NR] = 0;
-	for (gdp = &gendisk_head; *gdp; gdp = &((*gdp)->next))
-		if (*gdp == &xd_gendisk)
-			break;
-	if (*gdp)
-		*gdp = (*gdp)->next;
+	del_gendisk(&xd_gendisk);
 	release_region(xd_iobase,4);
 }
 
@@ -1152,19 +1141,7 @@ int init_module(void)
 
 void cleanup_module(void)
 {
-	int partition,dev,start;
-
 	devfs_unregister_blkdev(MAJOR_NR, "xd");
-	for (dev = 0; dev < xd_drives; dev++) {
-		start = dev << xd_gendisk.minor_shift; 
-		for (partition = xd_gendisk.max_p - 1; partition >= 0; partition--) {
-			int minor = (start | partition);
-			kdev_t devp = MKDEV(MAJOR_NR, minor);
-			start = dev << xd_gendisk.minor_shift; 
-			sync_dev(devp);
-			invalidate_buffers(devp);
-		}
-	}
 	xd_done();
 	devfs_unregister (devfs_handle);
 	if (xd_drives) {

@@ -1,12 +1,12 @@
 /******************************************************************************
  *
  * Module Name: evxfevnt - External Interfaces, ACPI event disable/enable
- *              $Revision: 26 $
+ *              $Revision: 38 $
  *
  *****************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -31,11 +31,11 @@
 #include "amlcode.h"
 #include "acinterp.h"
 
-#define _COMPONENT          EVENT_HANDLING
+#define _COMPONENT          ACPI_EVENTS
 	 MODULE_NAME         ("evxfevnt")
 
 
-/**************************************************************************
+/*******************************************************************************
  *
  * FUNCTION:    Acpi_enable
  *
@@ -45,38 +45,46 @@
  *
  * DESCRIPTION: Transfers the system into ACPI mode.
  *
- *************************************************************************/
+ ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_enable (void)
 {
-	ACPI_STATUS             status;
+	acpi_status             status;
+
+
+	FUNCTION_TRACE ("Acpi_enable");
 
 
 	/* Make sure we've got ACPI tables */
 
 	if (!acpi_gbl_DSDT) {
-		return (AE_NO_ACPI_TABLES);
+		ACPI_DEBUG_PRINT ((ACPI_DB_WARN, "No ACPI tables present!\n"));
+		return_ACPI_STATUS (AE_NO_ACPI_TABLES);
 	}
 
 	/* Make sure the BIOS supports ACPI mode */
 
 	if (SYS_MODE_LEGACY == acpi_hw_get_mode_capabilities()) {
-		return (AE_ERROR);
+		ACPI_DEBUG_PRINT ((ACPI_DB_WARN, "Only legacy mode supported!\n"));
+		return_ACPI_STATUS (AE_ERROR);
 	}
 
 	/* Transition to ACPI mode */
 
 	status = acpi_hw_set_mode (SYS_MODE_ACPI);
 	if (ACPI_FAILURE (status)) {
-		return (status);
+		ACPI_DEBUG_PRINT ((ACPI_DB_FATAL, "Could not transition to ACPI mode.\n"));
+		return_ACPI_STATUS (status);
 	}
 
-	return (status);
+	ACPI_DEBUG_PRINT ((ACPI_DB_OK, "Transition to ACPI mode successful\n"));
+
+	return_ACPI_STATUS (status);
 }
 
 
-/**************************************************************************
+/*******************************************************************************
  *
  * FUNCTION:    Acpi_disable
  *
@@ -87,19 +95,23 @@ acpi_enable (void)
  * DESCRIPTION: Returns the system to original ACPI/legacy mode, and
  *              uninstalls the SCI interrupt handler.
  *
- *************************************************************************/
+ ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_disable (void)
 {
-	ACPI_STATUS             status;
+	acpi_status             status;
+
+
+	FUNCTION_TRACE ("Acpi_disable");
 
 
 	/* Restore original mode  */
 
 	status = acpi_hw_set_mode (acpi_gbl_original_mode);
 	if (ACPI_FAILURE (status)) {
-		return (status);
+		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "Unable to transition to original mode"));
+		return_ACPI_STATUS (status);
 	}
 
 	/* Unload the SCI interrupt handler  */
@@ -107,16 +119,17 @@ acpi_disable (void)
 	acpi_ev_remove_sci_handler ();
 	acpi_ev_restore_acpi_state ();
 
-	return (status);
+	return_ACPI_STATUS (status);
 }
 
 
-/******************************************************************************
+/*******************************************************************************
  *
  * FUNCTION:    Acpi_enable_event
  *
  * PARAMETERS:  Event           - The fixed event or GPE to be enabled
  *              Type            - The type of event
+ *              Flags           - Just enable, or also wake enable?
  *
  * RETURN:      Status
  *
@@ -124,26 +137,28 @@ acpi_disable (void)
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_enable_event (
 	u32                     event,
-	u32                     type)
+	u32                     type,
+	u32                     flags)
 {
-	ACPI_STATUS             status = AE_OK;
+	acpi_status             status = AE_OK;
 	u32                     register_id;
+
+
+	FUNCTION_TRACE ("Acpi_enable_event");
 
 
 	/* The Type must be either Fixed Acpi_event or GPE */
 
-	switch (type)
-	{
+	switch (type) {
 
 	case ACPI_EVENT_FIXED:
 
 		/* Decode the Fixed Acpi_event */
 
-		switch (event)
-		{
+		switch (event) {
 		case ACPI_EVENT_PMTIMER:
 			register_id = TMR_EN;
 			break;
@@ -165,7 +180,7 @@ acpi_enable_event (
 			break;
 
 		default:
-			return (AE_BAD_PARAMETER);
+			return_ACPI_STATUS (AE_BAD_PARAMETER);
 			break;
 		}
 
@@ -173,11 +188,12 @@ acpi_enable_event (
 		 * Enable the requested fixed event (by writing a one to the
 		 * enable register bit)
 		 */
-
 		acpi_hw_register_bit_access (ACPI_WRITE, ACPI_MTX_LOCK, register_id, 1);
 
 		if (1 != acpi_hw_register_bit_access(ACPI_READ, ACPI_MTX_LOCK, register_id)) {
-			return (AE_ERROR);
+			ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
+				"Fixed event bit clear when it should be set\n"));
+			return_ACPI_STATUS (AE_NO_HARDWARE_RESPONSE);
 		}
 
 		break;
@@ -187,16 +203,21 @@ acpi_enable_event (
 
 		/* Ensure that we have a valid GPE number */
 
-		if ((event >= NUM_GPE) ||
-			(acpi_gbl_gpe_valid[event] == ACPI_GPE_INVALID))
-		{
-			return (AE_BAD_PARAMETER);
+		if ((event > ACPI_GPE_MAX) ||
+			(acpi_gbl_gpe_valid[event] == ACPI_GPE_INVALID)) {
+			return_ACPI_STATUS (AE_BAD_PARAMETER);
 		}
 
 
 		/* Enable the requested GPE number */
 
-		acpi_hw_enable_gpe (event);
+		if (flags & ACPI_EVENT_ENABLE) {
+			acpi_hw_enable_gpe (event);
+		}
+		if (flags & ACPI_EVENT_WAKE_ENABLE) {
+			acpi_hw_enable_gpe_for_wakeup (event);
+		}
+
 		break;
 
 
@@ -206,16 +227,17 @@ acpi_enable_event (
 	}
 
 
-	return (status);
+	return_ACPI_STATUS (status);
 }
 
 
-/******************************************************************************
+/*******************************************************************************
  *
  * FUNCTION:    Acpi_disable_event
  *
  * PARAMETERS:  Event           - The fixed event or GPE to be enabled
- *              Type            - The type of event
+ *              Type            - The type of event, fixed or general purpose
+ *              Flags           - Wake disable vs. non-wake disable
  *
  * RETURN:      Status
  *
@@ -223,26 +245,28 @@ acpi_enable_event (
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_disable_event (
 	u32                     event,
-	u32                     type)
+	u32                     type,
+	u32                     flags)
 {
-	ACPI_STATUS             status = AE_OK;
+	acpi_status             status = AE_OK;
 	u32                     register_id;
+
+
+	FUNCTION_TRACE ("Acpi_disable_event");
 
 
 	/* The Type must be either Fixed Acpi_event or GPE */
 
-	switch (type)
-	{
+	switch (type) {
 
 	case ACPI_EVENT_FIXED:
 
 		/* Decode the Fixed Acpi_event */
 
-		switch (event)
-		{
+		switch (event) {
 		case ACPI_EVENT_PMTIMER:
 			register_id = TMR_EN;
 			break;
@@ -264,7 +288,7 @@ acpi_disable_event (
 			break;
 
 		default:
-			return (AE_BAD_PARAMETER);
+			return_ACPI_STATUS (AE_BAD_PARAMETER);
 			break;
 		}
 
@@ -272,11 +296,12 @@ acpi_disable_event (
 		 * Disable the requested fixed event (by writing a zero to the
 		 * enable register bit)
 		 */
-
 		acpi_hw_register_bit_access (ACPI_WRITE, ACPI_MTX_LOCK, register_id, 0);
 
 		if (0 != acpi_hw_register_bit_access(ACPI_READ, ACPI_MTX_LOCK, register_id)) {
-			return (AE_ERROR);
+			ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
+				"Fixed event bit set when it should be clear,\n"));
+			return_ACPI_STATUS (AE_NO_HARDWARE_RESPONSE);
 		}
 
 		break;
@@ -286,15 +311,20 @@ acpi_disable_event (
 
 		/* Ensure that we have a valid GPE number */
 
-		if ((event >= NUM_GPE) ||
-			(acpi_gbl_gpe_valid[event] == ACPI_GPE_INVALID))
-		{
-			return (AE_BAD_PARAMETER);
+		if ((event > ACPI_GPE_MAX) ||
+			(acpi_gbl_gpe_valid[event] == ACPI_GPE_INVALID)) {
+			return_ACPI_STATUS (AE_BAD_PARAMETER);
 		}
 
 		/* Disable the requested GPE number */
 
-		acpi_hw_disable_gpe (event);
+		if (flags & ACPI_EVENT_DISABLE) {
+			acpi_hw_disable_gpe (event);
+		}
+		if (flags & ACPI_EVENT_WAKE_DISABLE) {
+			acpi_hw_disable_gpe_for_wakeup (event);
+		}
+
 		break;
 
 
@@ -302,11 +332,11 @@ acpi_disable_event (
 		status = AE_BAD_PARAMETER;
 	}
 
-	return (status);
+	return_ACPI_STATUS (status);
 }
 
 
-/******************************************************************************
+/*******************************************************************************
  *
  * FUNCTION:    Acpi_clear_event
  *
@@ -319,26 +349,27 @@ acpi_disable_event (
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_clear_event (
 	u32                     event,
 	u32                     type)
 {
-	ACPI_STATUS             status = AE_OK;
+	acpi_status             status = AE_OK;
 	u32                     register_id;
+
+
+	FUNCTION_TRACE ("Acpi_clear_event");
 
 
 	/* The Type must be either Fixed Acpi_event or GPE */
 
-	switch (type)
-	{
+	switch (type) {
 
 	case ACPI_EVENT_FIXED:
 
 		/* Decode the Fixed Acpi_event */
 
-		switch (event)
-		{
+		switch (event) {
 		case ACPI_EVENT_PMTIMER:
 			register_id = TMR_STS;
 			break;
@@ -360,7 +391,7 @@ acpi_clear_event (
 			break;
 
 		default:
-			return (AE_BAD_PARAMETER);
+			return_ACPI_STATUS (AE_BAD_PARAMETER);
 			break;
 		}
 
@@ -368,7 +399,6 @@ acpi_clear_event (
 		 * Clear the requested fixed event (By writing a one to the
 		 * status register bit)
 		 */
-
 		acpi_hw_register_bit_access (ACPI_WRITE, ACPI_MTX_LOCK, register_id, 1);
 		break;
 
@@ -377,10 +407,9 @@ acpi_clear_event (
 
 		/* Ensure that we have a valid GPE number */
 
-		if ((event >= NUM_GPE) ||
-			(acpi_gbl_gpe_valid[event] == ACPI_GPE_INVALID))
-		{
-			return (AE_BAD_PARAMETER);
+		if ((event > ACPI_GPE_MAX) ||
+			(acpi_gbl_gpe_valid[event] == ACPI_GPE_INVALID)) {
+			return_ACPI_STATUS (AE_BAD_PARAMETER);
 		}
 
 
@@ -393,11 +422,11 @@ acpi_clear_event (
 		status = AE_BAD_PARAMETER;
 	}
 
-	return (status);
+	return_ACPI_STATUS (status);
 }
 
 
-/******************************************************************************
+/*******************************************************************************
  *
  * FUNCTION:    Acpi_get_event_status
  *
@@ -413,32 +442,33 @@ acpi_clear_event (
  ******************************************************************************/
 
 
-ACPI_STATUS
+acpi_status
 acpi_get_event_status (
 	u32                     event,
 	u32                     type,
-	ACPI_EVENT_STATUS       *event_status)
+	acpi_event_status       *event_status)
 {
-	ACPI_STATUS             status = AE_OK;
+	acpi_status             status = AE_OK;
 	u32                     register_id;
 
 
+	FUNCTION_TRACE ("Acpi_get_event_status");
+
+
 	if (!event_status) {
-		return (AE_BAD_PARAMETER);
+		return_ACPI_STATUS (AE_BAD_PARAMETER);
 	}
 
 
 	/* The Type must be either Fixed Acpi_event or GPE */
 
-	switch (type)
-	{
+	switch (type) {
 
 	case ACPI_EVENT_FIXED:
 
 		/* Decode the Fixed Acpi_event */
 
-		switch (event)
-		{
+		switch (event) {
 		case ACPI_EVENT_PMTIMER:
 			register_id = TMR_STS;
 			break;
@@ -460,7 +490,7 @@ acpi_get_event_status (
 			break;
 
 		default:
-			return (AE_BAD_PARAMETER);
+			return_ACPI_STATUS (AE_BAD_PARAMETER);
 			break;
 		}
 
@@ -474,10 +504,9 @@ acpi_get_event_status (
 
 		/* Ensure that we have a valid GPE number */
 
-		if ((event >= NUM_GPE) ||
-			(acpi_gbl_gpe_valid[event] == ACPI_GPE_INVALID))
-		{
-			return (AE_BAD_PARAMETER);
+		if ((event > ACPI_GPE_MAX) ||
+			(acpi_gbl_gpe_valid[event] == ACPI_GPE_INVALID)) {
+			return_ACPI_STATUS (AE_BAD_PARAMETER);
 		}
 
 
@@ -491,7 +520,6 @@ acpi_get_event_status (
 		status = AE_BAD_PARAMETER;
 	}
 
-
-	return (status);
+	return_ACPI_STATUS (status);
 }
 

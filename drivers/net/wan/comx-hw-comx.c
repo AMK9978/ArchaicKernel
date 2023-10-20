@@ -63,6 +63,7 @@
 
 MODULE_AUTHOR("Gergely Madarasz <gorgo@itc.hu>, Tivadar Szemethy <tiv@itc.hu>, Arpad Bakay");
 MODULE_DESCRIPTION("Hardware-level driver for the COMX and HICOMX adapters\n");
+MODULE_LICENSE("GPL");
 
 #define	COMX_readw(dev, offset)	(readw(dev->mem_start + offset + \
 	(unsigned int)(((struct comx_privdata *)\
@@ -1044,10 +1045,20 @@ static int comxhw_write_proc(struct file *file, const char *buffer,
 		if (!(page = (char *)__get_free_page(GFP_KERNEL))) {
 			return -ENOMEM;
 		}
-		copy_from_user(page, buffer, count = (min(count, PAGE_SIZE)));
-		if (*(page + count - 1) == '\n') {
-			*(page + count - 1) = 0;
+		if(copy_from_user(page, buffer, count = (min_t(int, count, PAGE_SIZE))))
+		{
+			count = -EFAULT;
+			goto out;
 		}
+		if (page[count-1] == '\n')
+			page[count-1] = '\0';
+		else if (count < PAGE_SIZE)
+			page[count] = '\0';
+		else if (page[count]) {
+ 			count = -EINVAL;
+			goto out;
+		}
+		page[count]=0;	/* Null terminate */
 	} else {
 		byte *tmp;
 
@@ -1140,7 +1151,7 @@ static int comxhw_write_proc(struct file *file, const char *buffer,
 			hw->clock = kbps ? COMX_CLOCK_CONST/kbps : 0;
 		}
 	}
-
+out:
 	free_page((unsigned long)page);
 	return count;
 }
@@ -1172,8 +1183,10 @@ static int comxhw_read_proc(char *page, char **start, off_t off, int count,
 			len = sprintf(page, "external\n");
 		}
 	} else if (strcmp(file->name, FILENAME_FIRMWARE) == 0) {
-		len = min(FILE_PAGESIZE, min(count, 
-			hw->firmware ? (hw->firmware->len - off) :  0));
+		len = min_t(int, FILE_PAGESIZE,
+			  min_t(int, count, 
+			      hw->firmware ?
+			      (hw->firmware->len - off) : 0));
 		if (len < 0) {
 			len = 0;
 		}
@@ -1193,7 +1206,7 @@ static int comxhw_read_proc(char *page, char **start, off_t off, int count,
 	if (count >= len - off) {
 		*eof = 1;
 	}
-	return(min(count, len - off));
+	return min_t(int, count, len - off);
 }
 
 /* Called on echo comx >boardtype */

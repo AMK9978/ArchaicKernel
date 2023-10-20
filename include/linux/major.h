@@ -117,6 +117,8 @@
 #define COMPAQ_CISS_MAJOR6      110
 #define COMPAQ_CISS_MAJOR7      111
 
+#define ATARAID_MAJOR		114
+
 #define DASD_MAJOR      94	/* Official assignations from Peter */
 
 #define MDISK_MAJOR     95	/* Official assignations from Peter */
@@ -127,6 +129,8 @@
 #define IDE7_MAJOR	89
 #define IDE8_MAJOR	90
 #define IDE9_MAJOR	91
+
+#define UBD_MAJOR	98
 
 #define AURORA_MAJOR 79
 
@@ -156,6 +160,9 @@
 
 #define OSST_MAJOR	206	/* OnStream-SCx0 SCSI tape */
 
+#define IBM_TTY3270_MAJOR       227	/* Official allocations now */
+#define IBM_FS3270_MAJOR        228
+
 /*
  * Tests for SCSI devices.
  */
@@ -169,6 +176,20 @@
 
 static __inline__ int scsi_blk_major(int m) {
 	return SCSI_BLK_MAJOR(m);
+}
+
+/*
+ * Tests for IDE devices
+ */
+#define IDE_DISK_MAJOR(M)	((M) == IDE0_MAJOR || (M) == IDE1_MAJOR || \
+				(M) == IDE2_MAJOR || (M) == IDE3_MAJOR || \
+				(M) == IDE4_MAJOR || (M) == IDE5_MAJOR || \
+				(M) == IDE6_MAJOR || (M) == IDE7_MAJOR || \
+				(M) == IDE8_MAJOR || (M) == IDE9_MAJOR)
+
+static __inline__ int ide_blk_major(int m)
+{
+	return IDE_DISK_MAJOR(m);
 }
 
 #endif

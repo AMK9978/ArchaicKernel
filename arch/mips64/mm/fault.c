@@ -6,6 +6,7 @@
  * Copyright (C) 1995 - 2000 by Ralf Baechle
  * Copyright (C) 1999, 2000 by Silicon Graphics, Inc.
  */
+#include <linux/config.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
@@ -57,17 +58,33 @@ dodebug2(abi64_no_regargs, struct pt_regs regs)
 	printk("Got exception 0x%lx at 0x%lx\n", retaddr, regs.cp0_epc);
 }
 
-extern spinlock_t console_lock, timerlist_lock;
+extern spinlock_t timerlist_lock;
 
 /*
  * Unlock any spinlocks which will prevent us from getting the
- * message out (timerlist_lock is aquired through the
+ * message out (timerlist_lock is acquired through the
  * console unblank code)
  */
-void bust_spinlocks(void)
+void bust_spinlocks(int yes)
 {
-	spin_lock_init(&console_lock);
 	spin_lock_init(&timerlist_lock);
+	if (yes) {
+		oops_in_progress = 1;
+	} else {
+		int loglevel_save = console_loglevel;
+#ifdef CONFIG_VT
+		unblank_screen();
+#endif
+		oops_in_progress = 0;
+		/*
+		 * OK, the message is on the console.  Now we call printk()
+		 * without oops_in_progress set so that printk will give klogd
+		 * a poke.  Hold onto your hats...
+		 */
+		console_loglevel = 15;		/* NMI oopser may have shut the console up */
+		printk(" ");
+		console_loglevel = loglevel_save;
+	}
 }
 
 /*
@@ -84,6 +101,18 @@ do_page_fault(struct pt_regs *regs, unsigned long write, unsigned long address)
 	unsigned long fixup;
 	siginfo_t info;
 
+	/*
+	 * We fault-in kernel-space virtual memory on-demand. The
+	 * 'reference' page table is init_mm.pgd.
+	 *
+	 * NOTE! We MUST NOT take any locks for this case. We may
+	 * be in an interrupt or a critical region, and should
+	 * only copy the information from the master page table,
+	 * nothing more.
+	 */
+	if (address >= TASK_SIZE)
+		goto vmalloc_fault;
+
 	info.si_code = SEGV_MAPERR;
 	/*
 	 * If we're in an interrupt or have no user
@@ -95,7 +124,7 @@ do_page_fault(struct pt_regs *regs, unsigned long write, unsigned long address)
 	printk("Cpu%d[%s:%d:%08lx:%ld:%08lx]\n", smp_processor_id(), current->comm,
 		current->pid, address, write, regs->cp0_epc);
 #endif
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 	vma = find_vma(mm, address);
 	if (!vma)
 		goto bad_area;
@@ -138,7 +167,7 @@ good_area:
 		goto out_of_memory;
 	}
 
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	return;
 
 /*
@@ -146,15 +175,9 @@ good_area:
  * Fix it, but check if it's kernel or user first..
  */
 bad_area:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
-	/*
-	 * Quickly check for vmalloc range faults.
-	 */
-	if ((!vma) && (address >= VMALLOC_START) && (address < VMALLOC_END)) {
-		printk("Fix vmalloc invalidate fault\n");
-		while(1);
-	}
+bad_area_nosemaphore:
 	if (user_mode(regs)) {
 		tsk->thread.cp0_badvaddr = address;
 		tsk->thread.error_code = write;
@@ -195,7 +218,7 @@ no_context:
 	 * terminate things with extreme prejudice.
 	 */
 
-	bust_spinlocks();
+	bust_spinlocks(1);
 
 	printk(KERN_ALERT "Cpu %d Unable to handle kernel paging request at "
 	       "address %08lx, epc == %08x, ra == %08x\n",
@@ -203,20 +226,21 @@ no_context:
                (unsigned int) regs->regs[31]);
 	die("Oops", regs, write);
 	do_exit(SIGKILL);
+	bust_spinlocks(0);
 
 /*
  * We ran out of memory, or some other thing happened to us that made
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	printk("VM: killing process %s\n", tsk->comm);
 	if (user_mode(regs))
 		do_exit(SIGKILL);
 	goto no_context;
 
 do_sigbus:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
 	/*
 	 * Send a sigbus, regardless of whether we were in kernel
@@ -232,4 +256,9 @@ do_sigbus:
 	/* Kernel mode? Handle exceptions or die */
 	if (!user_mode(regs))
 		goto no_context;
+
+	return;
+
+vmalloc_fault:
+	panic("Pagefault for kernel virtual memory");
 }

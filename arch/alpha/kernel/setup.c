@@ -16,7 +16,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/tty.h>
@@ -29,6 +29,8 @@
 #include <linux/string.h>
 #include <linux/ioport.h>
 #include <linux/bootmem.h>
+#include <linux/pci.h>
+#include <linux/seq_file.h>
 
 #ifdef CONFIG_BLK_DEV_INITRD
 #include <linux/blk.h>
@@ -49,7 +51,6 @@ static struct notifier_block alpha_panic_block = {
 #include <asm/hwrpb.h>
 #include <asm/dma.h>
 #include <asm/io.h>
-#include <asm/pci.h>
 #include <asm/mmu_context.h>
 #include <asm/console.h>
 
@@ -63,12 +64,20 @@ unsigned long srm_hae;
 /* Which processor we booted from.  */
 int boot_cpuid;
 
-/* Using SRM callbacks for initial console output. This works from
-   setup_arch() time through the end of init_IRQ(), as those places
-   are under our control.
+/*
+ * Using SRM callbacks for initial console output. This works from
+ * setup_arch() time through the end of time_init(), as those places
+ * are under our (Alpha) control.
 
-   By default, OFF; set it with a bootcommand arg of "srmcons".
-*/
+ * "srmcons" specified in the boot command arguments allows us to
+ * see kernel messages during the period of time before the true
+ * console device is "registered" during console_init(). As of this
+ * version (2.4.10), time_init() is the last Alpha-specific code
+ * called before console_init(), so we put "unregister" code
+ * there to prevent schizophrenic console behavior later... ;-}
+ *
+ * By default, OFF; set it with a bootcommand arg of "srmcons".
+ */
 int srmcons_output = 0;
 
 /* Enforce a memory size limit; useful for testing. By default, none. */
@@ -85,19 +94,7 @@ unsigned char aux_device_present = 0xaa;
 
 static struct alpha_machine_vector *get_sysvec(long, long, long);
 static struct alpha_machine_vector *get_sysvec_byname(const char *);
-static void get_sysnames(long, long, char **, char **);
-
-/*
- * This is setup by the secondary bootstrap loader.  Because
- * the zero page is zeroed out as soon as the vm system is
- * initialized, we need to copy things out into a more permanent
- * place.
- */
-#define PARAM			ZERO_PGE
-#define COMMAND_LINE		((char*)(PARAM + 0x0000))
-#define COMMAND_LINE_SIZE	256
-#define INITRD_START		(*(unsigned long *) (PARAM+0x100))
-#define INITRD_SIZE		(*(unsigned long *) (PARAM+0x108))
+static void get_sysnames(long, long, long, char **, char **);
 
 static char command_line[COMMAND_LINE_SIZE];
 char saved_command_line[COMMAND_LINE_SIZE];
@@ -166,6 +163,7 @@ WEAK(ruffian_mv);
 WEAK(rx164_mv);
 WEAK(sable_mv);
 WEAK(sable_gamma_mv);
+WEAK(shark_mv);
 WEAK(sx164_mv);
 WEAK(takara_mv);
 WEAK(webbrick_mv);
@@ -201,7 +199,7 @@ reserve_std_resources(void)
 	long i;
 
 	if (hose_head) {
-		struct pci_controler *hose;
+		struct pci_controller *hose;
 		for (hose = hose_head; hose; hose = hose->next)
 			if (hose->index == 0) {
 				io = hose->io_space;
@@ -245,6 +243,7 @@ get_mem_size_limit(char *s)
         return end >> PAGE_SHIFT; /* Return the PFN of the limit. */
 }
 
+#ifndef CONFIG_DISCONTIGMEM
 static void __init
 setup_memory(void *kernel_end)
 {
@@ -362,6 +361,7 @@ setup_memory(void *kernel_end)
 
 	/* Reserve the bootmap memory.  */
 	reserve_bootmem(PFN_PHYS(bootmap_start), bootmap_size);
+	printk("reserving pages %ld:%ld\n", bootmap_start, bootmap_start+PFN_UP(bootmap_size));
 
 #ifdef CONFIG_BLK_DEV_INITRD
 	initrd_start = INITRD_START;
@@ -383,6 +383,9 @@ setup_memory(void *kernel_end)
 	}
 #endif /* CONFIG_BLK_DEV_INITRD */
 }
+#else
+extern void setup_memory(void *);
+#endif /* !CONFIG_DISCONTIGMEM */
 
 int __init
 page_is_ram(unsigned long pfn)
@@ -543,14 +546,14 @@ setup_arch(char **cmdline_p)
 	/*
 	 * Indentify and reconfigure for the current system.
 	 */
+	cpu = (struct percpu_struct*)((char*)hwrpb + hwrpb->processor_offset);
+
 	get_sysnames(hwrpb->sys_type, hwrpb->sys_variation,
-		     &type_name, &var_name);
+		     cpu->type, &type_name, &var_name);
 	if (*var_name == '0')
 		var_name = "";
 
 	if (!vec) {
-		cpu = (struct percpu_struct*)
-			((char*)hwrpb + hwrpb->processor_offset);
 		vec = get_sysvec(hwrpb->sys_type, hwrpb->sys_variation,
 				 cpu->type);
 	}
@@ -672,9 +675,10 @@ static int titan_indices[] = {0,1};
 
 static char tsunami_names[][16] = {
 	"0", "DP264", "Warhol", "Windjammer", "Monet", "Clipper",
-	"Goldrush", "Webbrick", "Catamaran"
+	"Goldrush", "Webbrick", "Catamaran", "Brisbane", "Melbourne",
+	"Flying Clipper", "Shark"
 };
-static int tsunami_indices[] = {0,1,2,3,4,5,6,7,8};
+static int tsunami_indices[] = {0,1,2,3,4,5,6,7,8,9,10,11,12};
 
 static struct alpha_machine_vector * __init
 get_sysvec(long type, long variation, long cpu)
@@ -774,6 +778,10 @@ get_sysvec(long type, long variation, long cpu)
 		&dp264_mv,		/* goldrush */
 		&webbrick_mv,		/* webbrick */
 		&dp264_mv,		/* catamaran */
+		NULL,			/* brisbane? */
+		NULL,			/* melbourne? */
+		NULL,			/* flying clipper? */
+		&shark_mv,		/* shark */
 	};
 
 	/* ??? Do we need to distinguish between Rawhides?  */
@@ -802,6 +810,8 @@ get_sysvec(long type, long variation, long cpu)
 		/* Member ID is a bit-field. */
 		long member = (variation >> 10) & 0x3f;
 
+		cpu &= 0xffffffff; /* make it usable */
+
 		switch (type) {
 		case ST_DEC_ALCOR:
 			if (member < N(alcor_indices))
@@ -810,6 +820,10 @@ get_sysvec(long type, long variation, long cpu)
 		case ST_DEC_EB164:
 			if (member < N(eb164_indices))
 				vec = eb164_vecs[eb164_indices[member]];
+			/* PC164 may show as EB164 variation with EV56 CPU,
+			   but, since no true EB164 had anything but EV5... */
+			if (vec == &eb164_mv && cpu == EV56_CPU)
+				vec = &pc164_mv;
 			break;
 		case ST_DEC_EB64P:
 			if (member < N(eb64p_indices))
@@ -828,21 +842,18 @@ get_sysvec(long type, long variation, long cpu)
 				vec = tsunami_vecs[tsunami_indices[member]];
 			break;
 		case ST_DEC_1000:
-			cpu &= 0xffffffff;
 			if (cpu == EV5_CPU || cpu == EV56_CPU)
 				vec = &mikasa_primo_mv;
 			else
 				vec = &mikasa_mv;
 			break;
 		case ST_DEC_NORITAKE:
-			cpu &= 0xffffffff;
 			if (cpu == EV5_CPU || cpu == EV56_CPU)
 				vec = &noritake_primo_mv;
 			else
 				vec = &noritake_mv;
 			break;
 		case ST_DEC_2100_A500:
-			cpu &= 0xffffffff;
 			if (cpu == EV5_CPU || cpu == EV56_CPU)
 				vec = &sable_gamma_mv;
 			else
@@ -887,6 +898,7 @@ get_sysvec_byname(const char *name)
 		&rx164_mv,
 		&sable_mv,
 		&sable_gamma_mv,
+		&shark_mv,
 		&sx164_mv,
 		&takara_mv,
 		&webbrick_mv,
@@ -905,7 +917,7 @@ get_sysvec_byname(const char *name)
 }
 
 static void
-get_sysnames(long type, long variation,
+get_sysnames(long type, long variation, long cpu,
 	     char **type_name, char **variation_name)
 {
 	long member;
@@ -938,12 +950,18 @@ get_sysnames(long type, long variation,
 
 	member = (variation >> 10) & 0x3f; /* member ID is a bit-field */
 
+	cpu &= 0xffffffff; /* make it usable */
+
 	switch (type) { /* select by family */
 	default: /* default to variation "0" for now */
 		break;
 	case ST_DEC_EB164:
 		if (member < N(eb164_indices))
 			*variation_name = eb164_names[eb164_indices[member]];
+		/* PC164 may show as EB164 variation, but with EV56 CPU,
+		   so, since no true EB164 had anything but EV5... */
+		if (eb164_indices[member] == 0 && cpu == EV56_CPU)
+			*variation_name = eb164_names[1]; /* make it PC164 */
 		break;
 	case ST_DEC_ALCOR:
 		if (member < N(alcor_indices))
@@ -1026,10 +1044,8 @@ get_nr_processors(struct percpu_struct *cpubase, unsigned long num)
 }
 
 
-/*
- * BUFFER is PAGE_SIZE bytes long.
- */
-int get_cpuinfo(char *buffer)
+static int
+show_cpuinfo(struct seq_file *f, void *slot)
 {
 	extern struct unaligned_stat {
 		unsigned long count, va, pc;
@@ -1037,29 +1053,28 @@ int get_cpuinfo(char *buffer)
 
 	static char cpu_names[][8] = {
 		"EV3", "EV4", "Simulate", "LCA4", "EV5", "EV45", "EV56",
-		"EV6", "PCA56", "PCA57", "EV67", "EV68CB", "EV68AL"
+		"EV6", "PCA56", "PCA57", "EV67", "EV68CB", "EV68AL",
+		"EV68CX", "EV7", "EV79", "EV69"
 	};
 
-	struct percpu_struct *cpu;
+	struct percpu_struct *cpu = slot;
 	unsigned int cpu_index;
 	char *cpu_name;
 	char *systype_name;
 	char *sysvariation_name;
-	int len, nr_processors;
+	int nr_processors;
 
-	cpu = (struct percpu_struct*)((char*)hwrpb + hwrpb->processor_offset);
 	cpu_index = (unsigned) (cpu->type - 1);
 	cpu_name = "Unknown";
 	if (cpu_index < N(cpu_names))
 		cpu_name = cpu_names[cpu_index];
 
 	get_sysnames(hwrpb->sys_type, hwrpb->sys_variation,
-		     &systype_name, &sysvariation_name);
+		     cpu->type, &systype_name, &sysvariation_name);
 
 	nr_processors = get_nr_processors(cpu, hwrpb->nr_processors);
 
-	len = sprintf(buffer,
-		      "cpu\t\t\t: Alpha\n"
+	seq_printf(f, "cpu\t\t\t: Alpha\n"
 		      "cpu model\t\t: %s\n"
 		      "cpu variation\t\t: %ld\n"
 		      "cpu revision\t\t: %ld\n"
@@ -1096,11 +1111,41 @@ int get_cpuinfo(char *buffer)
 		       platform_string(), nr_processors);
 
 #ifdef CONFIG_SMP
-	len += smp_info(buffer+len);
+	seq_printf(f, "cpus active\t\t: %d\n"
+		      "cpu active mask\t\t: %016lx\n",
+		       smp_num_cpus, cpu_present_mask);
 #endif
 
-	return len;
+	return 0;
 }
+
+/*
+ * We show only CPU #0 info.
+ */
+static void *
+c_start(struct seq_file *f, loff_t *pos)
+{
+	return *pos ? NULL : (char *)hwrpb + hwrpb->processor_offset;
+}
+
+static void *
+c_next(struct seq_file *f, void *v, loff_t *pos)
+{
+	return NULL;
+}
+
+static void
+c_stop(struct seq_file *f, void *v)
+{
+}
+
+struct seq_operations cpuinfo_op = {
+	start:	c_start,
+	next:	c_next,
+	stop:	c_stop,
+	show:	show_cpuinfo,
+};
+
 
 static int alpha_panic_event(struct notifier_block *this,
 			     unsigned long event,

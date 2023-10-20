@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.ppc_asm.h 1.18 10/18/01 15:02:09 trini
+ */
+/*
  * arch/ppc/kernel/ppc_asm.h
  *
  * Definitions used by various bits of low-level assembly code on PowerPC.
@@ -50,7 +53,7 @@
  */
 #define LVX(r,a,b)	.long	(31<<26)+((r)<<21)+((a)<<16)+((b)<<11)+(103<<1)
 #define STVX(r,a,b)	.long	(31<<26)+((r)<<21)+((a)<<16)+((b)<<11)+(231<<1)
-#define MFVSCR(r)	.long	(4<<26)+((r)<<21)+(1540<<1)
+#define MFVSCR(r)	.long	(4<<26)+((r)<<21)+(770<<1)
 #define MTVSCR(r)	.long	(4<<26)+((r)<<11)+(802<<1)
 
 #define SAVE_VR(n,b,base)	li b,THREAD_VR0+(16*(n)); STVX(n,b,base)
@@ -66,9 +69,36 @@
 #define REST_16VR(n,b,base)	REST_8VR(n,b,base); REST_8VR(n+8,b,base) 
 #define REST_32VR(n,b,base)	REST_16VR(n,b,base); REST_16VR(n+16,b,base)
 
-#define SYNC \
-	sync; \
-	isync
+#ifdef CONFIG_PPC601_SYNC_FIX
+#define SYNC				\
+BEGIN_FTR_SECTION			\
+	sync;				\
+	isync;				\
+END_FTR_SECTION_IFSET(CPU_FTR_601)
+#define SYNC_601			\
+BEGIN_FTR_SECTION			\
+	sync;				\
+END_FTR_SECTION_IFSET(CPU_FTR_601)
+#define ISYNC_601			\
+BEGIN_FTR_SECTION			\
+	isync;				\
+END_FTR_SECTION_IFSET(CPU_FTR_601)
+#else
+#define	SYNC
+#define SYNC_601
+#define ISYNC_601
+#endif
+
+#ifndef CONFIG_SMP
+#define TLBSYNC
+#else /* CONFIG_SMP */
+/* tlbsync is not implemented on 601 */
+#define TLBSYNC				\
+BEGIN_FTR_SECTION			\
+	tlbsync;			\
+	sync;				\
+END_FTR_SECTION_IFCLR(CPU_FTR_601)
+#endif
 
 /*
  * This instruction is not implemented on the PPC 603 or 601; however, on

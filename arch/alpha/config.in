@@ -5,6 +5,8 @@
 
 define_bool CONFIG_ALPHA y
 define_bool CONFIG_UID16 n
+define_bool CONFIG_RWSEM_GENERIC_SPINLOCK n
+define_bool CONFIG_RWSEM_XCHGADD_ALGORITHM y
 
 mainmenu_name "Kernel configuration of Linux for Alpha machines"
 
@@ -52,6 +54,7 @@ choice 'Alpha system type' \
 	 RX164			CONFIG_ALPHA_RX164		\
 	 SX164			CONFIG_ALPHA_SX164		\
 	 Sable			CONFIG_ALPHA_SABLE		\
+	 Shark			CONFIG_ALPHA_SHARK		\
 	 Takara			CONFIG_ALPHA_TAKARA		\
 	 Titan			CONFIG_ALPHA_TITAN		\
 	 Wildfire		CONFIG_ALPHA_WILDFIRE" Generic
@@ -141,9 +144,15 @@ then
 	define_bool CONFIG_ALPHA_TSUNAMI y
 	bool 'EV67 (or later) CPU (speed > 600MHz)?' CONFIG_ALPHA_EV67
 fi
+if [ "$CONFIG_ALPHA_SHARK" = "y" ]
+then
+	define_bool CONFIG_ALPHA_EV6 y
+	define_bool CONFIG_ALPHA_EV67 y
+	define_bool CONFIG_ALPHA_TSUNAMI y
+fi
 if [ "$CONFIG_ALPHA_WILDFIRE" = "y" -o "$CONFIG_ALPHA_TITAN" = "y" ]
 then
-        define_bool CONFIG_ALPHA_EV6 y
+	define_bool CONFIG_ALPHA_EV6 y
 	define_bool CONFIG_ALPHA_EV67 y
 fi
 if [ "$CONFIG_ALPHA_RAWHIDE" = "y" ]
@@ -171,7 +180,7 @@ if [ "$CONFIG_ALPHA_JENSEN" = "y" -o "$CONFIG_ALPHA_MIKASA" = "y" \
 	-o "$CONFIG_ALPHA_SABLE" = "y" -o "$CONFIG_ALPHA_NORITAKE" = "y" \
 	-o "$CONFIG_ALPHA_DP264" = "y" -o "$CONFIG_ALPHA_RAWHIDE" = "y" \
 	-o "$CONFIG_ALPHA_EIGER" = "y" -o "$CONFIG_ALPHA_WILDFIRE" = "y" \
-	-o "$CONFIG_ALPHA_TITAN" = "y" ]
+	-o "$CONFIG_ALPHA_TITAN" = "y" -o "$CONFIG_ALPHA_SHARK" = "y" ]
 then
 	define_bool CONFIG_ALPHA_SRM y
 fi
@@ -180,7 +189,7 @@ if [ "$CONFIG_ALPHA_CABRIOLET" = "y" -o "$CONFIG_ALPHA_AVANTI" = "y" \
 	-o "$CONFIG_ALPHA_TAKARA" = "y" -o "$CONFIG_ALPHA_EB164" = "y" \
 	-o "$CONFIG_ALPHA_ALCOR" = "y"  -o "$CONFIG_ALPHA_MIATA" = "y" \
 	-o "$CONFIG_ALPHA_LX164" = "y"  -o "$CONFIG_ALPHA_SX164" = "y" \
-	-o "$CONFIG_ALPHA_NAUTILUS" = "y" ]
+	-o "$CONFIG_ALPHA_NAUTILUS" = "y" -o "$CONFIG_ALPHA_NONAME" = "y" ]
 then
   bool 'Use SRM as bootloader' CONFIG_ALPHA_SRM
 fi
@@ -202,20 +211,25 @@ fi
 
 if [ "$CONFIG_ALPHA_SABLE" = "y" -o "$CONFIG_ALPHA_RAWHIDE" = "y" \
 	-o "$CONFIG_ALPHA_DP264" = "y" -o "$CONFIG_ALPHA_WILDFIRE" = "y" \
-	-o "$CONFIG_ALPHA_TITAN" = "y" -o "$CONFIG_ALPHA_GENERIC" = "y" ]
+	-o "$CONFIG_ALPHA_TITAN" = "y" -o "$CONFIG_ALPHA_GENERIC" = "y" \
+	-o "$CONFIG_ALPHA_SHARK" = "y" ]
 then
 	bool 'Symmetric multi-processing support' CONFIG_SMP
 fi
 
-# The machine must be able to support more than 8GB physical memory
-# before large vmalloc might even pretend to be an issue.
-if [ "$CONFIG_ALPHA_GENERIC" = "y" -o "$CONFIG_ALPHA_DP264" = "y" \
-	-o "$CONFIG_ALPHA_WILDFIRE" = "y" -o "$CONFIG_ALPHA_TITAN" = "y" ]
-then
-	bool 'Large VMALLOC support' CONFIG_ALPHA_LARGE_VMALLOC
-else
-	define_bool CONFIG_ALPHA_LARGE_VMALLOC n
+if [ "$CONFIG_SMP" = "y" ]; then
+   define_bool CONFIG_HAVE_DEC_LOCK y
 fi
+
+if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
+   bool 'Discontiguous Memory Support' CONFIG_DISCONTIGMEM
+   if [ "$CONFIG_DISCONTIGMEM" = "y" ]; then
+      bool ' NUMA Support' CONFIG_NUMA
+   fi
+fi
+
+# LARGE_VMALLOC is racy, if you *really* need it then fix it first
+define_bool CONFIG_ALPHA_LARGE_VMALLOC n
 
 source drivers/pci/Config.in
 
@@ -236,6 +250,10 @@ if [ "$CONFIG_PROC_FS" = "y" ]; then
 	"ELF		CONFIG_KCORE_ELF	\
 	 A.OUT		CONFIG_KCORE_AOUT" ELF
 fi
+if [ "$CONFIG_PROC_FS" != "n" -a "$CONFIG_ALPHA_SRM" = "y" ]; then
+   tristate 'SRM environment through procfs' CONFIG_SRM_ENV
+fi
+ 
 tristate 'Kernel support for a.out (ECOFF) binaries' CONFIG_BINFMT_AOUT
 tristate 'Kernel support for ELF binaries' CONFIG_BINFMT_ELF
 tristate 'Kernel support for MISC binaries' CONFIG_BINFMT_MISC
@@ -277,6 +295,10 @@ if [ "$CONFIG_SCSI" != "n" ]; then
   source drivers/scsi/Config.in
 fi
 endmenu
+
+if [ "$CONFIG_PCI" = "y" ]; then
+  source drivers/message/fusion/Config.in
+fi
 
 if [ "$CONFIG_NET" = "y" ]; then
   mainmenu_option next_comment
@@ -349,17 +371,25 @@ endmenu
 source drivers/usb/Config.in
 source drivers/input/Config.in
 
+if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
+   source net/bluetooth/Config.in
+fi
+
 mainmenu_option next_comment
 comment 'Kernel hacking'
 
-if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
-  tristate 'Kernel FP software completion' CONFIG_MATHEMU
-else
-  define_tristate CONFIG_MATHEMU y
-fi
-
-bool 'Magic SysRq key' CONFIG_MAGIC_SYSRQ
-
 bool 'Legacy kernel start address' CONFIG_ALPHA_LEGACY_START_ADDRESS
+
+bool 'Kernel debugging' CONFIG_DEBUG_KERNEL
+if [ "$CONFIG_DEBUG_KERNEL" != "n" ]; then
+   tristate '  Kernel FP software completion' CONFIG_MATHEMU
+   bool '  Debug memory allocations' CONFIG_DEBUG_SLAB
+   bool '  Magic SysRq key' CONFIG_MAGIC_SYSRQ
+   bool '  Spinlock debugging' CONFIG_DEBUG_SPINLOCK
+   bool '  Read-write spinlock debugging' CONFIG_DEBUG_RWLOCK
+   bool '  Semaphore debugging' CONFIG_DEBUG_SEMAPHORE
+else
+   define_tristate CONFIG_MATHEMU y
+fi
 
 endmenu

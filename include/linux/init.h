@@ -34,6 +34,8 @@
  * Don't forget to initialize data not at file scope, i.e. within a function,
  * as gcc otherwise puts the data into the bss section and not into the init
  * section.
+ * 
+ * Also note, that this data cannot be "const".
  */
 
 #ifndef MODULE
@@ -86,7 +88,27 @@ extern struct kernel_param __setup_start, __setup_end;
 #define __FINIT		.previous
 #define __INITDATA	.section	".data.init","aw"
 
+/**
+ * module_init() - driver initialization entry point
+ * @x: function to be run at kernel boot time or module insertion
+ * 
+ * module_init() will add the driver initialization routine in
+ * the "__initcall.int" code segment if the driver is checked as
+ * "y" or static, or else it will wrap the driver initialization
+ * routine with init_module() which is used by insmod and
+ * modprobe when the driver is used as a module.
+ */
 #define module_init(x)	__initcall(x);
+
+/**
+ * module_exit() - driver exit entry point
+ * @x: function to be run when driver is removed
+ * 
+ * module_exit() will wrap the driver clean-up code
+ * with cleanup_module() when used with rmmod when
+ * the driver is a module.  If the driver is statically
+ * compiled into the kernel, module_exit() has no effect.
+ */
 #define module_exit(x)	__exitcall(x);
 
 #else
@@ -110,11 +132,11 @@ typedef int (*__init_module_func_t)(void);
 typedef void (*__cleanup_module_func_t)(void);
 #define module_init(x) \
 	int init_module(void) __attribute__((alias(#x))); \
-	extern inline __init_module_func_t __init_module_inline(void) \
+	static inline __init_module_func_t __init_module_inline(void) \
 	{ return x; }
 #define module_exit(x) \
 	void cleanup_module(void) __attribute__((alias(#x))); \
-	extern inline __cleanup_module_func_t __cleanup_module_inline(void) \
+	static inline __cleanup_module_func_t __cleanup_module_inline(void) \
 	{ return x; }
 
 #define __setup(str,func) /* nothing */

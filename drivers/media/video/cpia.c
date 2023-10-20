@@ -3,9 +3,9 @@
  *
  * Supports CPiA based Video Camera's.
  *
- * (C) Copyright 1999-2000 Peter Pregler,
- * (C) Copyright 1999-2000 Scott J. Bertin,
- * (C) Copyright 1999-2000 Johannes Erdfelt, jerdfelt@valinux.com
+ * (C) Copyright 1999-2000 Peter Pregler
+ * (C) Copyright 1999-2000 Scott J. Bertin
+ * (C) Copyright 1999-2000 Johannes Erdfelt <johannes@erdfelt.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -52,9 +52,13 @@ extern int cpia_pp_init(void);
 extern int cpia_usb_init(void);
 #endif
 
+static int video_nr = -1;
+
 #ifdef MODULE
+MODULE_PARM(video_nr,"i");
 MODULE_AUTHOR("Scott J. Bertin <sbertin@mindspring.com> & Peter Pregler <Peter_Pregler@email.com> & Johannes Erdfelt <jerdfelt@valinux.com>");
 MODULE_DESCRIPTION("V4L-driver for Vision CPiA based cameras");
+MODULE_LICENSE("GPL");
 MODULE_SUPPORTED_DEVICE("video");
 #endif
 
@@ -540,6 +544,8 @@ static int cpia_read_proc(char *page, char **start, off_t off,
 static int cpia_write_proc(struct file *file, const char *buffer,
                            unsigned long count, void *data)
 {
+	return -EINVAL;
+#if 0
 	struct cam_data *cam = data;
 	struct cam_params new_params;
 	int retval, find_colon;
@@ -1250,6 +1256,7 @@ static int cpia_write_proc(struct file *file, const char *buffer,
 	up(&cam->param_lock);
 	
 	return retval;
+#endif
 }
 
 static void create_proc_cpia_cam(struct cam_data *cam)
@@ -2499,9 +2506,6 @@ static int cpia_open(struct video_device *dev, int flags)
 	cam->mmap_kludge = 0;
 	
 	++cam->open_count;
-#ifdef MODULE
-	MOD_INC_USE_COUNT;
-#endif
 	return 0;
 }
 
@@ -2554,9 +2558,6 @@ static void cpia_close(struct video_device *dev)
 	}
 	
 
-#ifdef MODULE
-	MOD_DEC_USE_COUNT;
-#endif
 	return;
 }
 
@@ -2838,7 +2839,7 @@ static int cpia_ioctl(struct video_device *dev, unsigned int ioctlnr, void *arg)
 		DBG("VIDIOCMCAPTURE: %d / %d / %dx%d\n", vm.format, vm.frame,
 		    vm.width, vm.height);
 #endif
-		if (vm.frame<0||vm.frame>FRAME_NUM) {
+		if (vm.frame<0||vm.frame>=FRAME_NUM) {
 			retval = -EINVAL;
 			break;
 		}
@@ -2869,7 +2870,7 @@ static int cpia_ioctl(struct video_device *dev, unsigned int ioctlnr, void *arg)
 
 		/* set video size */
 		video_size = match_videosize(vm.width, vm.height);
-		if (cam->video_size < 0) {
+		if (video_size < 0) {
 			retval = -EINVAL;
 			break;
 		}
@@ -3031,6 +3032,7 @@ int cpia_video_init(struct video_device *vdev)
 }
 
 static struct video_device cpia_template = {
+	owner:		THIS_MODULE,
 	name:		"CPiA Camera",
 	type:		VID_TYPE_CAPTURE,
 	hardware:	VID_HARDWARE_CPIA,      /* FIXME */
@@ -3185,7 +3187,7 @@ struct cam_data *cpia_register_camera(struct cpia_camera_ops *ops, void *lowleve
 	camera->lowlevel_data = lowlevel;
 	
 	/* register v4l device */
-	if (video_register_device(&camera->vdev, VFL_TYPE_GRABBER) == -1) {
+	if (video_register_device(&camera->vdev, VFL_TYPE_GRABBER, video_nr) == -1) {
 		kfree(camera);
 		unlock_kernel();
 		printk(KERN_DEBUG "video_register_device failed\n");
@@ -3252,41 +3254,7 @@ void cpia_unregister_camera(struct cam_data *cam)
 	}
 }
 
-/****************************************************************************
- *
- *  Module routines
- *
- ***************************************************************************/
-
-#ifdef MODULE
-int init_module(void)
-{
-	printk(KERN_INFO "%s v%d.%d.%d\n", ABOUT,
-	       CPIA_MAJ_VER, CPIA_MIN_VER, CPIA_PATCH_VER);
-#ifdef CONFIG_PROC_FS
-	proc_cpia_create();
-#endif
-#ifdef CONFIG_KMOD
-#ifdef CONFIG_VIDEO_CPIA_PP_MODULE
-	request_module("cpia_pp");
-#endif
-#ifdef CONFIG_VIDEO_CPIA_USB_MODULE
-	request_module("cpia_usb");
-#endif
-#endif
-return 0;
-}
-
-void cleanup_module(void)
-{
-#ifdef CONFIG_PROC_FS
-	proc_cpia_destroy();
-#endif
-}
-
-#else
-
-int cpia_init(struct video_init *unused)
+static int __init cpia_init(void)
 {
 	printk(KERN_INFO "%s v%d.%d.%d\n", ABOUT,
 	       CPIA_MAJ_VER, CPIA_MIN_VER, CPIA_PATCH_VER);
@@ -3312,9 +3280,17 @@ int cpia_init(struct video_init *unused)
 	return 0;
 }
 
+static void __exit cpia_exit(void)
+{
+#ifdef CONFIG_PROC_FS
+	proc_cpia_destroy();
+#endif
+}
+
+module_init(cpia_init);
+module_exit(cpia_exit);
+
 /* Exported symbols for modules. */
 
 EXPORT_SYMBOL(cpia_register_camera);
 EXPORT_SYMBOL(cpia_unregister_camera);
-
-#endif

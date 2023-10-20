@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.fault.c 1.15 09/24/01 16:35:10 paulus
+ */
+/*
  *  arch/ppc/mm/fault.c
  *
  *  PowerPC version 
@@ -41,14 +44,15 @@ extern int (*debugger_dabr_match)(struct pt_regs *);
 int debugger_kernel_faults = 1;
 #endif
 
-unsigned long htab_reloads = 0; /* updated by head.S:hash_page() */
-unsigned long htab_evicts = 0;  /* updated by head.S:hash_page() */
-unsigned long pte_misses = 0; /* updated by do_page_fault() */
-unsigned long pte_errors = 0; /* updated by do_page_fault() */
-unsigned int probingmem = 0;
+unsigned long htab_reloads;	/* updated by hashtable.S:hash_page() */
+unsigned long htab_evicts; 	/* updated by hashtable.S:hash_page() */
+unsigned long htab_preloads;	/* updated by hashtable.S:add_hash_page() */
+unsigned long pte_misses;	/* updated by do_page_fault() */
+unsigned long pte_errors;	/* updated by do_page_fault() */
+unsigned int probingmem;
 
 extern void die_if_kernel(char *, struct pt_regs *, long);
-void bad_page_fault(struct pt_regs *, unsigned long);
+void bad_page_fault(struct pt_regs *, unsigned long, int sig);
 void do_page_fault(struct pt_regs *, unsigned long, unsigned long);
 
 /*
@@ -96,10 +100,10 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
 #endif /* CONFIG_XMON || CONFIG_KGDB */
 
 	if (in_interrupt() || mm == NULL) {
-		bad_page_fault(regs, address);
+		bad_page_fault(regs, address, SIGSEGV);
 		return;
 	}
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 	vma = find_vma(mm, address);
 	if (!vma)
 		goto bad_area;
@@ -146,6 +150,7 @@ good_area:
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
+ survive:
         switch (handle_mm_fault(mm, vma, address, is_write)) {
         case 1:
                 current->min_flt++;
@@ -159,7 +164,7 @@ good_area:
                 goto out_of_memory;
 	}
 
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	/*
 	 * keep track of tlb+htab misses that are good addrs but
 	 * just need pte's created via handle_mm_fault()
@@ -169,7 +174,7 @@ good_area:
 	return;
 
 bad_area:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	pte_errors++;	
 
 	/* User mode accesses cause a SIGSEGV */
@@ -182,7 +187,7 @@ bad_area:
 		return;
 	}
 
-	bad_page_fault(regs, address);
+	bad_page_fault(regs, address, SIGSEGV);
 	return;
 
 /*
@@ -190,22 +195,28 @@ bad_area:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
+	if (current->pid == 1) {
+		current->policy |= SCHED_YIELD;
+		schedule();
+		down_read(&mm->mmap_sem);
+		goto survive;
+	}
 	printk("VM: killing process %s\n", current->comm);
 	if (user_mode(regs))
 		do_exit(SIGKILL);
-	bad_page_fault(regs, address);
+	bad_page_fault(regs, address, SIGKILL);
 	return;
 
 do_sigbus:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;
 	info.si_code = BUS_ADRERR;
 	info.si_addr = (void *)address;
 	force_sig_info (SIGBUS, &info, current);
 	if (!user_mode(regs))
-		bad_page_fault(regs, address);
+		bad_page_fault(regs, address, SIGBUS);
 }
 
 /*
@@ -214,8 +225,10 @@ do_sigbus:
  * in traps.c.
  */
 void
-bad_page_fault(struct pt_regs *regs, unsigned long address)
+bad_page_fault(struct pt_regs *regs, unsigned long address, int sig)
 {
+	extern void die(const char *,struct pt_regs *,long);
+
 	unsigned long fixup;
 
 	/* Are we prepared to handle this fault?  */
@@ -225,14 +238,11 @@ bad_page_fault(struct pt_regs *regs, unsigned long address)
 	}
 
 	/* kernel has accessed a bad area */
-	show_regs(regs);
 #if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
 	if (debugger_kernel_faults)
 		debugger(regs);
 #endif
-	print_backtrace( (unsigned long *)regs->gpr[1] );
-	panic("kernel access of bad area pc %lx lr %lx address %lX tsk %s/%d",
-	      regs->nip,regs->link,address,current->comm,current->pid);
+	die("kernel access of bad area", regs, sig);
 }
 
 #ifdef CONFIG_8xx
@@ -277,7 +287,7 @@ unsigned long va_to_phys(unsigned long address)
 	
 	pte = va_to_pte(address);
 	if (pte)
-		return(((unsigned long)(pte_val(*pte)) & PAGE_MASK) | (address & ~(PAGE_MASK-1)));
+		return(((unsigned long)(pte_val(*pte)) & PAGE_MASK) | (address & ~(PAGE_MASK)));
 	return (0);
 }
 
@@ -343,34 +353,3 @@ get_8xx_pte(struct mm_struct *mm, unsigned long addr)
         return(retval);
 }
 #endif /* CONFIG_8xx */
-
-#if 0
-/*
- * Misc debugging functions.  Please leave them here. -- Cort
- */
-void print_pte(struct _PTE p)
-{
-	printk(
-"%08x %08x vsid: %06x h: %01x api: %02x rpn: %05x rcwimg: %d%d%d%d%d%d pp: %02x\n",
-		*((unsigned long *)(&p)), *((long *)&p+1),
-		p.vsid, p.h, p.api, p.rpn,
-		p.r,p.c,p.w,p.i,p.m,p.g,p.pp);
-}
-
-/*
- * Search the hw hash table for a mapping to the given physical
- * address. -- Cort
- */
-unsigned long htab_phys_to_va(unsigned long address)
-{
-	extern PTE *Hash, *Hash_end;
-	PTE *ptr;
-
-	for ( ptr = Hash ; ptr < Hash_end ; ptr++ )
-	{
-		if ( ptr->rpn == (address>>12) )
-			printk("phys %08lX -> va ???\n",
-			       address);
-	}
-}
-#endif

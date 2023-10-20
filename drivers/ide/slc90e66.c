@@ -181,7 +181,7 @@ static byte slc90e66_dma_2_pio (byte xfer_rate) {
 
 /*
  *  Based on settings done by AMI BIOS
- *  (might be usefull if drive is not registered in CMOS for any reason).
+ *  (might be useful if drive is not registered in CMOS for any reason).
  */
 static void slc90e66_tune_drive (ide_drive_t *drive, byte pio)
 {
@@ -349,11 +349,11 @@ unsigned int __init ata66_slc90e66 (ide_hwif_t *hwif)
 {
 #if 1
 	byte reg47 = 0, ata66 = 0;
-	byte mask = hwif->channel ? 0x02 : 0x01;
+	byte mask = hwif->channel ? 0x01 : 0x02;	/* bit0:Primary */
 
 	pci_read_config_byte(hwif->pci_dev, 0x47, &reg47);
 
-	ata66 = (reg47 & mask) ? 1 : 0;
+	ata66 = (reg47 & mask) ? 0 : 1;	/* bit[0(1)]: 0:80, 1:40 */
 #else
 	byte ata66 = 0;
 #endif
@@ -372,10 +372,10 @@ void __init ide_init_slc90e66 (ide_hwif_t *hwif)
 	if (!hwif->dma_base)
 		return;
 
-#ifndef CONFIG_BLK_DEV_IDEDMA
 	hwif->autodma = 0;
-#else /* CONFIG_BLK_DEV_IDEDMA */
-	hwif->autodma = 1;
+#ifdef CONFIG_BLK_DEV_IDEDMA 
+	if (!noautodma)
+		hwif->autodma = 1;
 	hwif->dmaproc = &slc90e66_dmaproc;
 	hwif->speedproc = &slc90e66_tune_chipset;
 #endif /* !CONFIG_BLK_DEV_IDEDMA */

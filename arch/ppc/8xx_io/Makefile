@@ -1,3 +1,5 @@
+# BK Id: SCCS/s.Makefile 1.6 08/30/01 09:33:48 trini
+#
 #
 # Makefile for the linux MPC8xx ppc-specific parts of comm processor
 #
@@ -13,5 +15,6 @@ obj-y			:= commproc.o uart.o
 
 obj-$(CONFIG_FEC_ENET)	+= fec.o
 obj-$(CONFIG_SCC_ENET)	+= enet.o
+obj-$(CONFIG_UCODE_PATCH) += micropatch.o
 
 include $(TOPDIR)/Rules.make

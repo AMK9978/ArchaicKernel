@@ -5,12 +5,12 @@
  * Advanced Configuration and Power Infterface
  * Based on 'ACPI Specification 1.0b' Febryary 2, 1999
  * and 'IA-64 Extensions to the ACPI Specification' Rev 0.6
- * 
+ *
  * Copyright (C) 1999 VA Linux Systems
  * Copyright (C) 1999 Walt Drummond <drummond@valinux.com>
  * Copyright (C) 2000 Intel Corp.
- * Copyright (C) 2000 J.I. Lee <jung-ik.lee@intel.com>
- *	ACPI 2.0 specification 
+ * Copyright (C) 2000,2001 J.I. Lee <jung-ik.lee@intel.com>
+ *	ACPI 2.0 specification
  */
 
 #include <linux/types.h>
@@ -147,6 +147,9 @@ typedef struct {
 	u32 flags;
 } acpi_madt_t;
 
+/* acpi 2.0 MADT flags */
+#define MADT_PCAT_COMPAT	(1<<0)
+
 /* acpi 2.0 MADT structure types */
 #define ACPI20_ENTRY_LOCAL_APIC                 0
 #define ACPI20_ENTRY_IO_APIC                    1
@@ -186,9 +189,16 @@ typedef struct {
 	u32 global_vector;
 } acpi20_entry_platform_src_t;
 
+/* constants for interrupt routing API for device drivers */
+#define	ACPI20_ENTRY_PIS_PMI	1
+#define	ACPI20_ENTRY_PIS_INIT	2
+#define	ACPI20_ENTRY_PIS_CPEI	3
+#define	ACPI_MAX_PLATFORM_IRQS	4
+
 extern int acpi20_parse(acpi20_rsdp_t *);
 extern int acpi_parse(acpi_rsdp_t *);
 extern const char *acpi_get_sysname (void);
+extern int acpi_request_vector(u32 int_type);
 
 extern void (*acpi_idle) (void);	/* power-management idle function, if any */
 #pragma	pack()

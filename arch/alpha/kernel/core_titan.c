@@ -20,6 +20,8 @@
 #include <asm/core_titan.h>
 #undef __EXTERN_INLINE
 
+#include <linux/bootmem.h>
+
 #include "proto.h"
 #include "pci_impl.h"
 
@@ -83,7 +85,7 @@ static int
 mk_conf_addr(struct pci_dev *dev, int where, unsigned long *pci_addr,
 	     unsigned char *type1)
 {
-	struct pci_controler *hose = dev->sysdata;
+	struct pci_controller *hose = dev->sysdata;
 	unsigned long addr;
 	u8 bus = dev->bus->number;
 	u8 device_fn = dev->devfn;
@@ -200,7 +202,7 @@ struct pci_ops titan_pci_ops =
 
 
 void
-titan_pci_tbi(struct pci_controler *hose, dma_addr_t start, dma_addr_t end)
+titan_pci_tbi(struct pci_controller *hose, dma_addr_t start, dma_addr_t end)
 {
 	titan_pachip *pachip = 
 	  (hose->index & 1) ? TITAN_pachip1 : TITAN_pachip0;
@@ -243,7 +245,7 @@ titan_query_agp(titan_pachip_port *port)
 
 }
 static void __init
-titan_init_agp(titan_pachip_port *port, struct pci_controler *hose)
+titan_init_agp(titan_pachip_port *port, struct pci_controller *hose)
 {
 	union TPAchipPCTL pctl;
 
@@ -276,9 +278,10 @@ titan_init_agp(titan_pachip_port *port, struct pci_controler *hose)
 static void __init
 titan_init_one_pachip_port(titan_pachip_port *port, int index)
 {
-	struct pci_controler *hose;
+	struct pci_controller *hose;
+	unsigned long sg_size;
 
-	hose = alloc_pci_controler();
+	hose = alloc_pci_controller();
 	if (index == 0)
 		pci_isa_hose = hose;
 	hose->io_space = alloc_resource();
@@ -342,40 +345,35 @@ titan_init_one_pachip_port(titan_pachip_port *port, int index)
 	 * Note: Window 3 on Titan is Scatter-Gather ONLY
 	 *
 	 * Window 0 is scatter-gather 8MB at 8MB (for isa)
-	 * Window 1 is direct access 1GB at 1GB
-	 * Window 2 is direct access 1GB at 2GB
-	 * Window 3 is scatter-gather 128MB at 3GB
-	 * ??? We ought to scale window 3 memory.
-	 *
-	 * We must actually use 2 windows to direct-map the 2GB space,
-	 * because of an idiot-syncrasy of the CYPRESS chip.  It may
-	 * respond to a PCI bus address in the last 1MB of the 4GB
-	 * address range.
+	 * Window 1 is scatter-gather (up to) 1GB at 1GB
+	 * Window 2 is direct access 2GB at 2GB
 	 */
 	hose->sg_isa = iommu_arena_new(hose, 0x00800000, 0x00800000, 0);
 	hose->sg_isa->align_entry = 8; /* 64KB for ISA */
 
-	hose->sg_pci = iommu_arena_new(hose, 0xc0000000, 0x08000000, 0);
+	hose->sg_pci = iommu_arena_new(hose, 0x40000000,
+				       size_for_memory(0x40000000), 0);
 	hose->sg_pci->align_entry = 4; /* Titan caches 4 PTEs at a time */
 
-	__direct_map_base = 0x40000000;
+	__direct_map_base = 0x80000000;
 	__direct_map_size = 0x80000000;
 
 	port->wsba[0].csr = hose->sg_isa->dma_base | 3;
 	port->wsm[0].csr  = (hose->sg_isa->size - 1) & 0xfff00000;
 	port->tba[0].csr  = virt_to_phys(hose->sg_isa->ptes);
 
-	port->wsba[1].csr = 0x40000000 | 1;
-	port->wsm[1].csr  = (0x40000000 - 1) & 0xfff00000;
-	port->tba[1].csr  = 0;
+	port->wsba[1].csr = hose->sg_pci->dma_base | 3;
+	port->wsm[1].csr  = (hose->sg_pci->size - 1) & 0xfff00000;
+	port->tba[1].csr  = virt_to_phys(hose->sg_pci->ptes);
 
 	port->wsba[2].csr = 0x80000000 | 1;
-	port->wsm[2].csr  = (0x40000000 - 1) & 0xfff00000;
-	port->tba[2].csr  = 0x40000000;
+	port->wsm[2].csr  = (0x80000000 - 1) & 0xfff00000;
+	port->tba[2].csr  = 0;
 
-	port->wsba[3].csr = hose->sg_pci->dma_base | 3;
-	port->wsm[3].csr  = (hose->sg_pci->size - 1) & 0xfff00000;
-	port->tba[3].csr  = virt_to_phys(hose->sg_pci->ptes);
+	port->wsba[3].csr = 0;
+
+	/* Enable the Monster Window to make DAC pci64 possible. */
+	port->pctl.csr |= pctl_m_mwin;
 
 	titan_pci_tbi(hose, 0, -1);
 }

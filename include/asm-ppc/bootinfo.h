@@ -1,10 +1,12 @@
 /*
+ * BK Id: SCCS/s.bootinfo.h 1.11 08/17/01 15:23:17 paulus
+ */
+/*
  * Non-machine dependent bootinfo structure.  Basic idea
  * borrowed from the m68k.
  *
  * Copyright (C) 1999 Cort Dougan <cort@ppc.kernel.org>
  */
-
 
 #ifdef __KERNEL__
 #ifndef _PPC_BOOTINFO_H
@@ -29,9 +31,10 @@ struct bi_record {
 #define BI_INITRD		0x1014
 #define BI_SYSMAP		0x1015
 #define BI_MACHTYPE		0x1016
+#define BI_MEMSIZE		0x1017
 
 #endif /* CONFIG_APUS */
 
-#endif /* _PPC_BOOTINFO_H */
 
+#endif /* _PPC_BOOTINFO_H */
 #endif /* __KERNEL__ */

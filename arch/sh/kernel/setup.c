@@ -1,4 +1,4 @@
-/* $Id: setup.c,v 1.20 2000/03/05 02:44:41 gniibe Exp $
+/* $Id: setup.c,v 1.31 2001/08/23 16:36:40 dwmw2 Exp $
  *
  *  linux/arch/sh/kernel/setup.c
  *
@@ -17,7 +17,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/tty.h>
@@ -31,6 +31,7 @@
 #include <linux/bootmem.h>
 #include <linux/console.h>
 #include <linux/ctype.h>
+#include <linux/seq_file.h>
 #include <asm/processor.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
@@ -38,7 +39,6 @@
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/io_generic.h>
-#include <asm/smp.h>
 #include <asm/machvec.h>
 #ifdef CONFIG_SH_EARLY_PRINTK
 #include <asm/sh_bios.h>
@@ -48,18 +48,31 @@
  * Machine setup..
  */
 
-struct sh_cpuinfo boot_cpu_data = { CPU_SH_NONE, 0, 0, 0, };
+/*
+ * Initialize loops_per_jiffy as 10000000 (1000MIPS).
+ * This value will be used at the very early stage of serial setup.
+ * The bigger value means no problem.
+ */
+struct sh_cpuinfo boot_cpu_data = { CPU_SH_NONE, 0, 10000000, };
 struct screen_info screen_info;
-
-#ifdef CONFIG_BLK_DEV_RAM
-extern int rd_doload;		/* 1 = load ramdisk, 0 = don't load */
-extern int rd_prompt;		/* 1 = prompt for ramdisk, 0 = don't prompt */
-extern int rd_image_start;	/* starting block # of image */
-#endif
+unsigned char aux_device_present = 0xaa;
 
 #if defined(CONFIG_SH_GENERIC) || defined(CONFIG_SH_UNKNOWN)
 struct sh_machine_vector sh_mv;
 #endif
+
+/* We need this to satisfy some external references. */
+struct screen_info screen_info = {
+        0, 25,                  /* orig-x, orig-y */
+        0,                      /* unused */
+        0,                      /* orig-video-page */
+        0,                      /* orig-video-mode */
+        80,                     /* orig-video-cols */
+        0,0,0,                  /* ega_ax, ega_bx, ega_cx */
+        25,                     /* orig-video-lines */
+        0,                      /* orig-video-isVGA */
+        16                      /* orig-video-points */
+};
 
 extern void fpu_init(void);
 extern int root_mountflags;
@@ -115,7 +128,7 @@ static struct resource ram_resources[] = {
 	{ "Kernel data", 0, 0 }
 };
 
-static unsigned long memory_start, memory_end;
+unsigned long memory_start, memory_end;
 
 #ifdef CONFIG_SH_EARLY_PRINTK
 /*
@@ -201,8 +214,7 @@ static inline void parse_cmdline (char ** cmdline_p, char mv_name[MV_NAME_SIZE],
 	saved_command_line[COMMAND_LINE_SIZE-1] = '\0';
 
 	memory_start = (unsigned long)PAGE_OFFSET+__MEMORY_START;
-	/* Default is 4Mbyte. */
-	memory_end = (unsigned long)PAGE_OFFSET+0x00400000+__MEMORY_START;
+	memory_end = memory_start + __MEMORY_SIZE;
 
 	for (;;) {
 		/*
@@ -260,7 +272,9 @@ static inline void parse_cmdline (char ** cmdline_p, char mv_name[MV_NAME_SIZE],
 
 void __init setup_arch(char **cmdline_p)
 {
+#if defined(CONFIG_SH_GENERIC) || defined(CONFIG_SH_UNKNOWN)
 	extern struct sh_machine_vector mv_unknown;
+#endif
 	struct sh_machine_vector *mv = NULL;
 	char mv_name[MV_NAME_SIZE] = "";
 	unsigned long mv_io_base = 0;
@@ -348,6 +362,18 @@ void __init setup_arch(char **cmdline_p)
 #define PFN_DOWN(x)	((x) >> PAGE_SHIFT)
 #define PFN_PHYS(x)	((x) << PAGE_SHIFT)
 
+#ifdef CONFIG_DISCONTIGMEM
+	NODE_DATA(0)->bdata = &discontig_node_bdata[0];
+	NODE_DATA(1)->bdata = &discontig_node_bdata[1];
+
+	bootmap_size = init_bootmem_node(NODE_DATA(1), 
+					 PFN_UP(__MEMORY_START_2ND),
+					 PFN_UP(__MEMORY_START_2ND),
+					 PFN_DOWN(__MEMORY_START_2ND+__MEMORY_SIZE_2ND));
+	free_bootmem_node(NODE_DATA(1), __MEMORY_START_2ND, __MEMORY_SIZE_2ND);
+	reserve_bootmem_node(NODE_DATA(1), __MEMORY_START_2ND, bootmap_size);
+#endif
+
 	/*
 	 * Find the highest page frame number we have available
 	 */
@@ -369,7 +395,7 @@ void __init setup_arch(char **cmdline_p)
 	 * is intact) must be done via bootmem_alloc().
 	 */
 	bootmap_size = init_bootmem_node(NODE_DATA(0), start_pfn,
-					 __MEMORY_START>>PAGE_SHIFT, 
+					 __MEMORY_START>>PAGE_SHIFT,
 					 max_low_pfn);
 
 	/*
@@ -391,7 +417,8 @@ void __init setup_arch(char **cmdline_p)
 			last_pfn = max_low_pfn;
 
 		pages = last_pfn - curr_pfn;
-		free_bootmem(PFN_PHYS(curr_pfn), PFN_PHYS(pages));
+		free_bootmem_node(NODE_DATA(0), PFN_PHYS(curr_pfn),
+				  PFN_PHYS(pages));
 	}
 
 	/*
@@ -401,19 +428,19 @@ void __init setup_arch(char **cmdline_p)
 	 * case of us accidentally initializing the bootmem allocator with
 	 * an invalid RAM area.
 	 */
-	reserve_bootmem(__MEMORY_START+PAGE_SIZE, (PFN_PHYS(start_pfn) + 
-			bootmap_size + PAGE_SIZE-1) - __MEMORY_START);
+	reserve_bootmem_node(NODE_DATA(0), __MEMORY_START+PAGE_SIZE,
+		(PFN_PHYS(start_pfn)+bootmap_size+PAGE_SIZE-1)-__MEMORY_START);
 
 	/*
 	 * reserve physical page 0 - it's a special BIOS page on many boxes,
 	 * enabling clean reboots, SMP operation, laptop functions.
 	 */
-	reserve_bootmem(__MEMORY_START, PAGE_SIZE);
+	reserve_bootmem_node(NODE_DATA(0), __MEMORY_START, PAGE_SIZE);
 
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (LOADER_TYPE && INITRD_START) {
 		if (INITRD_START + INITRD_SIZE <= (max_low_pfn << PAGE_SHIFT)) {
-			reserve_bootmem(INITRD_START+__MEMORY_START, INITRD_SIZE);
+			reserve_bootmem_node(NODE_DATA(0), INITRD_START+__MEMORY_START, INITRD_SIZE);
 			initrd_start =
 				INITRD_START ? INITRD_START + PAGE_OFFSET + __MEMORY_START : 0;
 			initrd_end = initrd_start + INITRD_SIZE;
@@ -491,30 +518,49 @@ struct sh_machine_vector* __init get_mv_byname(const char* name)
  *	Get CPU information for use by the procfs.
  */
 #ifdef CONFIG_PROC_FS
-int get_cpuinfo(char *buffer)
+static int show_cpuinfo(struct seq_file *m, void *v)
 {
-	char *p = buffer;
-
 #if defined(__sh3__)
-	p += sprintf(p,"cpu family\t: SH-3\n"
-		       "cache size\t: 8K-byte\n");
+	seq_printf(m, "cpu family\t: SH-3\n"
+		      "cache size\t: 8K-byte\n");
 #elif defined(__SH4__)
-	p += sprintf(p,"cpu family\t: SH-4\n"
-		       "cache size\t: 8K-byte/16K-byte\n");
+	seq_printf(m, "cpu family\t: SH-4\n"
+		      "cache size\t: 8K-byte/16K-byte\n");
 #endif
-	p += sprintf(p, "bogomips\t: %lu.%02lu\n\n",
-		     (loops_per_jiffy+2500)/(500000/HZ),
-		     ((loops_per_jiffy+2500)/(5000/HZ)) % 100);
-	p += sprintf(p, "Machine: %s\n", sh_mv.mv_name);
+	seq_printf(m, "bogomips\t: %lu.%02lu\n\n",
+		     loops_per_jiffy/(500000/HZ),
+		     (loops_per_jiffy/(5000/HZ)) % 100);
+	seq_printf(m, "Machine: %s\n", sh_mv.mv_name);
 
 #define PRINT_CLOCK(name, value) \
-	p += sprintf(p, name " clock: %d.%02dMHz\n", \
+	seq_printf(m, name " clock: %d.%02dMHz\n", \
 		     ((value) / 1000000), ((value) % 1000000)/10000)
 	
 	PRINT_CLOCK("CPU", boot_cpu_data.cpu_clock);
 	PRINT_CLOCK("Bus", boot_cpu_data.bus_clock);
+#ifdef CONFIG_CPU_SUBTYPE_ST40STB1
+	PRINT_CLOCK("Memory", boot_cpu_data.memory_clock);
+#endif
 	PRINT_CLOCK("Peripheral module", boot_cpu_data.module_clock);
 
-	return p - buffer;
+	return 0;
 }
+
+static void *c_start(struct seq_file *m, loff_t *pos)
+{
+	return (void*)(*pos == 0);
+}
+static void *c_next(struct seq_file *m, void *v, loff_t *pos)
+{
+	return NULL;
+}
+static void c_stop(struct seq_file *m, void *v)
+{
+}
+struct seq_operations cpuinfo_op = {
+	start:	c_start,
+	next:	c_next,
+	stop:	c_stop,
+	show:	show_cpuinfo,
+};
 #endif

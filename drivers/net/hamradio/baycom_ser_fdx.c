@@ -152,11 +152,6 @@ struct baycom_state {
 
 /* --------------------------------------------------------------------- */
 
-#define min(a, b) (((a) < (b)) ? (a) : (b))
-#define max(a, b) (((a) > (b)) ? (a) : (b))
-
-/* --------------------------------------------------------------------- */
-
 static void inline baycom_int_freq(struct baycom_state *bc)
 {
 #ifdef BAYCOM_DEBUG
@@ -689,7 +684,7 @@ module_exit(cleanup_baycomserfdx);
 
 static int __init baycom_ser_fdx_setup(char *str)
 {
-        static unsigned nr_dev = 0;
+        static unsigned nr_dev;
         int ints[4];
 
         if (nr_dev >= NR_PORTS)

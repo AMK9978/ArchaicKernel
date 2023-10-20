@@ -34,9 +34,7 @@
 #include <linux/delay.h>
 #include <linux/smp_lock.h>
 
-#ifdef CONFIG_KMOD
 #include <linux/kmod.h>
-#endif
 
 /* #define _CPIA_DEBUG_		define for verbose debug output */
 #include "cpia.h"
@@ -125,6 +123,8 @@ static char *parport[PARPORT_MAX] = {NULL,};
 
 MODULE_AUTHOR("B. Huisman <bhuism@cs.utwente.nl> & Peter Pregler <Peter_Pregler@email.com>");
 MODULE_DESCRIPTION("Parallel port driver for Vision CPiA based cameras");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(parport, "1-" __MODULE_STRING(PARPORT_MAX) "s");
 MODULE_PARM_DESC(parport, "'auto' or a list of parallel port numbers. Just like lp.");
 #else
@@ -160,6 +160,7 @@ static struct cpia_camera_ops cpia_pp_ops =
 };
 
 static struct cam_data *cam_list;
+static spinlock_t cam_list_lock_pp;
 
 #ifdef _CPIA_DEBUG_
 #define DEB_PORT(port) { \
@@ -502,9 +503,6 @@ static int cpia_pp_open(void *privdata)
 	
 	++cam->open_count;
 	
-#ifdef MODULE
-	MOD_INC_USE_COUNT;
-#endif
 	return 0;
 }
 
@@ -535,9 +533,6 @@ static int cpia_pp_registerCallback(void *privdata, void (*cb)(void *cbdata), vo
 static int cpia_pp_close(void *privdata)
 {
 	struct pp_cam_entry *cam = privdata;
-#ifdef MODULE
-	MOD_DEC_USE_COUNT;
-#endif
 	if (--cam->open_count == 0) {
 		parport_release(cam->pdev);
 	}
@@ -590,7 +585,9 @@ static int cpia_pp_register(struct parport *port)
 		kfree(cam);
 		return -ENXIO;
 	}
-	ADD_TO_LIST(cam_list, cpia);
+	spin_lock( &cam_list_lock_pp );
+	cpia_add_to_list(cam_list, cpia);
+	spin_unlock( &cam_list_lock_pp );
 
 	return 0;
 }
@@ -599,11 +596,12 @@ static void cpia_pp_detach (struct parport *port)
 {
 	struct cam_data *cpia;
 
+	spin_lock( &cam_list_lock_pp );
 	for(cpia = cam_list; cpia != NULL; cpia = cpia->next) {
 		struct pp_cam_entry *cam = cpia->lowlevel_data;
 		if (cam && cam->port->number == port->number) {
-			REMOVE_FROM_LIST(cpia);
-			
+			cpia_remove_from_list(cpia);
+			spin_unlock( &cam_list_lock_pp );			
 			cpia_unregister_camera(cpia);
 			
 			if(cam->open_count > 0) {
@@ -668,6 +666,9 @@ int cpia_pp_init(void)
 		LOG ("unable to register with parport\n");
 		return -EIO;
 	}
+	
+	cam_list = NULL;
+	spin_lock_init( &cam_list_lock_pp );
 
 	return 0;
 }

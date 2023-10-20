@@ -209,7 +209,7 @@ static char rcsid[] =
  * board type.
  *  
  * Revision 1.36.4.30  1997/05/16 15:30:00  daniel
- * Changes to suport new cycladesZ boards.
+ * Changes to support new cycladesZ boards.
  *
  * Revision 1.36.4.29  1997/05/12 11:30:00  daniel
  * Merge of Bentson's and Daniel's version 1.36.4.28.
@@ -241,7 +241,7 @@ static char rcsid[] =
  * varying too fast.
  *
  * Revision 1.36.4.27  1997/03/26 10:30:00  daniel
- * Changed for suport linux versions 2.1.X.
+ * Changed for support linux versions 2.1.X.
  * Backward compatible with linux versions 2.0.X.
  * Corrected illegal use of filler field in
  * CH_CTRL struct.
@@ -628,8 +628,6 @@ static char rcsid[] =
 #define PAUSE ;
 #endif
 
-#define cy_min(a,b) (((a)<(b))?(a):(b))
-
 /*
  * Include section 
  */
@@ -676,14 +674,6 @@ static char rcsid[] =
 
 #include <linux/stat.h>
 #include <linux/proc_fs.h>
-
-#ifdef CONFIG_COBALT_27
-#include <asm/page.h>
-#include <asm/pgtable.h>
-
-#define	CACHED_TO_UNCACHED(x)	(((unsigned long)(x) & \
-				  (unsigned long)0x1fffffff) + KSEG1)
-#endif
 
 #define cy_put_user	put_user
 
@@ -751,7 +741,7 @@ static unsigned char *cy_isa_addresses[] = {
 #define NR_ISA_ADDRS (sizeof(cy_isa_addresses)/sizeof(unsigned char*))
 
 #ifdef MODULE
-static int maddr[NR_CARDS] = { 0, };
+static long maddr[NR_CARDS] = { 0, };
 static int irq[NR_CARDS]  = { 0, };
 
 MODULE_PARM(maddr, "1-" __MODULE_STRING(NR_CARDS) "l");
@@ -1639,8 +1629,8 @@ cyz_handle_rx(struct cyclades_port *info, volatile struct CH_CTRL *ch_ctrl,
 	       for performance, but because of buffer boundaries, there
 	       may be several steps to the operation */
 	    while(0 < (small_count = 
-		       cy_min((rx_bufsize - new_rx_get),
-		       cy_min((TTY_FLIPBUF_SIZE - tty->flip.count), char_count))
+		       min_t(unsigned int, (rx_bufsize - new_rx_get),
+		       min_t(unsigned int, (TTY_FLIPBUF_SIZE - tty->flip.count), char_count))
 		 )) {
 		memcpy_fromio(tty->flip.char_buf_ptr,
 			      (char *)(cinfo->base_addr
@@ -1734,9 +1724,9 @@ cyz_handle_tx(struct cyclades_port *info, volatile struct CH_CTRL *ch_ctrl,
 	}
 #ifdef BLOCKMOVE
 	while(0 < (small_count = 
-		   cy_min((tx_bufsize - tx_put),
-		   cy_min ((SERIAL_XMIT_SIZE - info->xmit_tail),
-			cy_min(info->xmit_cnt, char_count))))){
+		   min_t(unsigned int, (tx_bufsize - tx_put),
+		       min_t(unsigned int, (SERIAL_XMIT_SIZE - info->xmit_tail),
+			   min_t(unsigned int, info->xmit_cnt, char_count))))) {
 
 	    memcpy_toio((char *)(cinfo->base_addr + tx_bufaddr + tx_put),
 			&info->xmit_buf[info->xmit_tail],
@@ -2991,10 +2981,11 @@ cy_write(struct tty_struct * tty, int from_user,
         return 0;
     }
 
-    CY_LOCK(info, flags);
     if (from_user) {
 	down(&tmp_buf_sem);
 	while (1) {
+	    int c1;
+	    
 	    c = MIN(count, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
 				SERIAL_XMIT_SIZE - info->xmit_head));
 	    if (c <= 0)
@@ -3007,23 +2998,30 @@ cy_write(struct tty_struct * tty, int from_user,
 		}
 		break;
 	    }
-	    c = MIN(c, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
+	    CY_LOCK(info, flags);
+	    c1 = MIN(c, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
 			SERIAL_XMIT_SIZE - info->xmit_head));
+			
+	    if (c1 < c)
+	    	c = c1;
 	    memcpy(info->xmit_buf + info->xmit_head, tmp_buf, c);
 	    info->xmit_head = ((info->xmit_head + c) & (SERIAL_XMIT_SIZE-1));
 	    info->xmit_cnt += c;
+            CY_UNLOCK(info, flags);
 	    buf += c;
 	    count -= c;
 	    ret += c;
 	}
 	up(&tmp_buf_sem);
     } else {
+	CY_LOCK(info, flags);
 	while (1) {
 	    c = MIN(count, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1, 
 			SERIAL_XMIT_SIZE - info->xmit_head));
-	    if (c <= 0) {
+	        
+	    if (c <= 0)
 		break;
-	    }
+
 	    memcpy(info->xmit_buf + info->xmit_head, buf, c);
 	    info->xmit_head = (info->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
 	    info->xmit_cnt += c;
@@ -3031,8 +3029,8 @@ cy_write(struct tty_struct * tty, int from_user,
 	    count -= c;
 	    ret += c;
 	}
+        CY_UNLOCK(info, flags);
     }
-    CY_UNLOCK(info, flags);
 
     info->idle_stats.xmit_bytes += ret;
     info->idle_stats.xmit_idle   = jiffies;
@@ -5821,3 +5819,4 @@ cy_setup(char *str, int *ints)
 } /* cy_setup */
 #endif /* MODULE */
 
+MODULE_LICENSE("GPL");

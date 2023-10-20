@@ -63,6 +63,11 @@
  */
 #define NFS_SUPER_MAGIC			0x6969
 
+static inline struct nfs_inode_info *NFS_I(struct inode *inode)
+{
+	return &inode->u.nfs_i;
+}
+
 #define NFS_FH(inode)			(&(inode)->u.nfs_i.fh)
 #define NFS_SERVER(inode)		(&(inode)->i_sb->u.nfs_sb.s_server)
 #define NFS_CLIENT(inode)		(NFS_SERVER(inode)->client)
@@ -74,7 +79,6 @@
 #define NFS_READTIME(inode)		((inode)->u.nfs_i.read_cache_jiffies)
 #define NFS_CACHE_CTIME(inode)		((inode)->u.nfs_i.read_cache_ctime)
 #define NFS_CACHE_MTIME(inode)		((inode)->u.nfs_i.read_cache_mtime)
-#define NFS_CACHE_ATIME(inode)		((inode)->u.nfs_i.read_cache_atime)
 #define NFS_CACHE_ISIZE(inode)		((inode)->u.nfs_i.read_cache_isize)
 #define NFS_NEXTSCAN(inode)		((inode)->u.nfs_i.nextscan)
 #define NFS_CACHEINV(inode) \
@@ -137,13 +141,12 @@ unsigned long page_index(struct page *page)
  * linux/fs/nfs/inode.c
  */
 extern struct super_block *nfs_read_super(struct super_block *, void *, int);
-extern int init_nfs_fs(void);
 extern void nfs_zap_caches(struct inode *);
 extern int nfs_inode_is_stale(struct inode *, struct nfs_fh *,
 				struct nfs_fattr *);
 extern struct inode *nfs_fhget(struct dentry *, struct nfs_fh *,
 				struct nfs_fattr *);
-extern int nfs_refresh_inode(struct inode *, struct nfs_fattr *);
+extern int __nfs_refresh_inode(struct inode *, struct nfs_fattr *);
 extern int nfs_revalidate(struct dentry *);
 extern int nfs_permission(struct inode *, int);
 extern int nfs_open(struct inode *, struct file *);
@@ -204,10 +207,14 @@ extern int  nfs_updatepage(struct file *, struct page *, unsigned int, unsigned 
  */
 extern int  nfs_sync_file(struct inode *, struct file *, unsigned long, unsigned int, int);
 extern int  nfs_flush_file(struct inode *, struct file *, unsigned long, unsigned int, int);
-extern int  nfs_flush_timeout(struct inode *, int);
+extern int  nfs_flush_list(struct list_head *, int, int);
+extern int  nfs_scan_lru_dirty(struct nfs_server *, struct list_head *);
+extern int  nfs_scan_lru_dirty_timeout(struct nfs_server *, struct list_head *);
 #ifdef CONFIG_NFS_V3
 extern int  nfs_commit_file(struct inode *, struct file *, unsigned long, unsigned int, int);
-extern int  nfs_commit_timeout(struct inode *, int);
+extern int  nfs_commit_list(struct list_head *, int);
+extern int  nfs_scan_lru_commit(struct nfs_server *, struct list_head *);
+extern int  nfs_scan_lru_commit_timeout(struct nfs_server *, struct list_head *);
 #endif
 
 static inline int
@@ -254,7 +261,9 @@ nfs_wb_file(struct inode *inode, struct file *file)
  */
 extern int  nfs_readpage(struct file *, struct page *);
 extern int  nfs_pagein_inode(struct inode *, unsigned long, unsigned int);
-extern int  nfs_pagein_timeout(struct inode *);
+extern int  nfs_pagein_list(struct list_head *, int);
+extern int  nfs_scan_lru_read(struct nfs_server *, struct list_head *);
+extern int  nfs_scan_lru_read_timeout(struct nfs_server *, struct list_head *);
 
 /*
  * linux/fs/mount_clnt.c
@@ -272,6 +281,14 @@ nfs_revalidate_inode(struct nfs_server *server, struct inode *inode)
 	if (time_before(jiffies, NFS_READTIME(inode)+NFS_ATTRTIMEO(inode)))
 		return NFS_STALE(inode) ? -ESTALE : 0;
 	return __nfs_revalidate_inode(server, inode);
+}
+
+static inline int
+nfs_refresh_inode(struct inode *inode, struct nfs_fattr *fattr)
+{
+	if ((fattr->valid & NFS_ATTR_FATTR) == 0)
+		return 0;
+	return __nfs_refresh_inode(inode,fattr);
 }
 
 static inline loff_t

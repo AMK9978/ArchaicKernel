@@ -71,7 +71,7 @@
 #include <linux/un.h>
 #include <linux/net.h>
 #include <linux/fs.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
 #include <linux/file.h>
@@ -296,9 +296,6 @@ void unix_gc(void)
 	 *	Here we are. Hitlist is filled. Die.
 	 */
 
-	while ((skb=__skb_dequeue(&hitlist))!=NULL) {
-		kfree_skb(skb);
-	}
-
+	__skb_queue_purge(&hitlist);
 	up(&unix_gc_sem);
 }

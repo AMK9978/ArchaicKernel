@@ -12,6 +12,8 @@
 
 #ifdef CONFIG_X86_IO_APIC
 
+#define APIC_MISMATCH_DEBUG
+
 #define IO_APIC_BASE(idx) \
 		((volatile int *)__fix_to_virt(FIX_IO_APIC_BASE_0 + idx))
 
@@ -26,7 +28,8 @@ struct IO_APIC_reg_00 {
 
 struct IO_APIC_reg_01 {
 	__u32	version		:  8,
-		__reserved_2	:  8,
+		__reserved_2	:  7,
+		PRQ		:  1,
 		entries		:  8,
 		__reserved_1	:  8;
 } __attribute__ ((packed));
@@ -128,10 +131,8 @@ static inline void io_apic_sync(unsigned int apic)
 	(void) *(IO_APIC_BASE(apic)+4);
 }
 
-extern int nmi_watchdog;
 /* 1 if "noapic" boot option passed */
 extern int skip_ioapic_setup;
-extern void IO_APIC_init_uniprocessor (void);
 
 /*
  * If we use the IO-APIC for IRQ routing, disable automatic

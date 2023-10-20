@@ -1,7 +1,7 @@
 /*
  *	Generate devlist.h and classlist.h from the PCI ID file.
  *
- *	(c) 1999--2000 Martin Mares <mj@suse.cz>
+ *	(c) 1999--2000 Martin Mares <mj@ucw.cz>
  */
 
 #include <stdio.h>
@@ -68,6 +68,7 @@ main(void)
 							bra[-1] = 0;
 						if (vendor_len + strlen(c) + 1 > MAX_NAME_SIZE) {
 							fprintf(stderr, "Line %d: Device name too long\n", lino);
+							fprintf(stderr, "%s\n", c);
 							return 1;
 						}
 					}

@@ -64,6 +64,61 @@
  * Host:                  Reply:
  * $m0,10#2a               +$00010203040506070809101112131415#42
  *
+ * 
+ *  ==============
+ *  MORE EXAMPLES:
+ *  ==============
+ *
+ *  For reference -- the following are the steps that one
+ *  company took (RidgeRun Inc) to get remote gdb debugging
+ *  going. In this scenario the host machine was a PC and the
+ *  target platform was a Galileo EVB64120A MIPS evaluation
+ *  board.
+ *   
+ *  Step 1:
+ *  First download gdb-5.0.tar.gz from the internet.
+ *  and then build/install the package.
+ * 
+ *  Example:
+ *    $ tar zxf gdb-5.0.tar.gz
+ *    $ cd gdb-5.0
+ *    $ ./configure --target=mips-linux-elf
+ *    $ make
+ *    $ install
+ *    $ which mips-linux-elf-gdb
+ *    /usr/local/bin/mips-linux-elf-gdb
+ * 
+ *  Step 2:
+ *  Configure linux for remote debugging and build it.
+ * 
+ *  Example:
+ *    $ cd ~/linux
+ *    $ make menuconfig <go to "Kernel Hacking" and turn on remote debugging>
+ *    $ make dep; make vmlinux
+ * 
+ *  Step 3:
+ *  Download the kernel to the remote target and start
+ *  the kernel running. It will promptly halt and wait 
+ *  for the host gdb session to connect. It does this
+ *  since the "Kernel Hacking" option has defined 
+ *  CONFIG_REMOTE_DEBUG which in turn enables your calls
+ *  to:
+ *     set_debug_traps();
+ *     breakpoint();
+ * 
+ *  Step 4:
+ *  Start the gdb session on the host.
+ * 
+ *  Example:
+ *    $ mips-linux-elf-gdb vmlinux
+ *    (gdb) set remotebaud 115200
+ *    (gdb) target remote /dev/ttyS1
+ *    ...at this point you are connected to 
+ *       the remote target and can use gdb
+ *       in the normal fasion. Setting 
+ *       breakpoints, single stepping,
+ *       printing variables, etc.
+ *
  */
 
 #include <linux/string.h>
@@ -71,6 +126,8 @@
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/console.h>
+#include <linux/init.h>
 
 #include <asm/asm.h>
 #include <asm/mipsregs.h>
@@ -85,7 +142,6 @@
 
 extern int putDebugChar(char c);    /* write a single character      */
 extern char getDebugChar(void);     /* read and return a single char */
-extern void fltr_set_mem_err(void);
 extern void trap_low(void);
 
 /*
@@ -118,6 +174,10 @@ static char output_buffer[BUFMAX];
 static int initialized;	/* !0 means we've been initialized */
 static const char hexchars[]="0123456789abcdef";
 
+/* Used to prevent crashes in memory access.  Note that they'll crash anyway if
+   we haven't set up fault handlers yet... */
+int kgdb_read_byte(unsigned *address, unsigned *dest);
+int kgdb_write_byte(unsigned val, unsigned *dest);
 
 /*
  * Convert ch from a hex digit to an int
@@ -237,42 +297,18 @@ static void putpacket(char *buffer)
 
 
 /*
- * Indicate to caller of mem2hex or hex2mem that there
- * has been an error.
- */
-static volatile int mem_err = 0;
-
-
-#if 0
-static void set_mem_fault_trap(int enable)
-{
-  mem_err = 0;
-
-#if 0
-  if (enable)
-    exceptionHandler(9, fltr_set_mem_err);
-  else
-    exceptionHandler(9, trap_low);
-#endif  
-}
-#endif /* dead code */
-
-/*
  * Convert the memory pointed to by mem into hex, placing result in buf.
  * Return a pointer to the last char put in buf (null), in case of mem fault,
  * return 0.
- * If MAY_FAULT is non-zero, then we will handle memory faults by returning
- * a 0, else treat a fault like any other fault in the stub.
+ * may_fault is non-zero if we are reading from arbitrary memory, but is currently
+ * not used.
  */
 static unsigned char *mem2hex(char *mem, char *buf, int count, int may_fault)
 {
 	unsigned char ch;
 
-/*	set_mem_fault_trap(may_fault); */
-
 	while (count-- > 0) {
-		ch = *(mem++);
-		if (mem_err)
+		if (kgdb_read_byte(mem++, &ch) != 0)
 			return 0;
 		*buf++ = hexchars[ch >> 4];
 		*buf++ = hexchars[ch & 0xf];
@@ -280,32 +316,27 @@ static unsigned char *mem2hex(char *mem, char *buf, int count, int may_fault)
 
 	*buf = 0;
 
-/*	set_mem_fault_trap(0); */
-
 	return buf;
 }
 
 /*
  * convert the hex array pointed to by buf into binary to be placed in mem
  * return a pointer to the character AFTER the last byte written
+ * may_fault is non-zero if we are reading from arbitrary memory, but is currently
+ * not used.
  */
 static char *hex2mem(char *buf, char *mem, int count, int may_fault)
 {
 	int i;
 	unsigned char ch;
 
-/*	set_mem_fault_trap(may_fault); */
-
 	for (i=0; i<count; i++)
 	{
 		ch = hex(*buf++) << 4;
 		ch |= hex(*buf++);
-		*(mem++) = ch;
-		if (mem_err)
+		if (kgdb_write_byte(ch, mem++) != 0)
 			return 0;
 	}
-
-/*	set_mem_fault_trap(0); */
 
 	return mem;
 }
@@ -315,13 +346,10 @@ static char *hex2mem(char *buf, char *mem, int count, int may_fault)
  * signals, which are primarily what GDB understands.  It also indicates
  * which hardware traps we need to commandeer when initializing the stub.
  */
-static struct hard_trap_info
-{
+static struct hard_trap_info {
 	unsigned char tt;		/* Trap type code for MIPS R3xxx and R4xxx */
 	unsigned char signo;		/* Signal that we map this trap into */
 } hard_trap_info[] = {
-	{ 4, SIGBUS },			/* address error (load) */
-	{ 5, SIGBUS },			/* address error (store) */
 	{ 6, SIGBUS },			/* instruction bus error */
 	{ 7, SIGBUS },			/* data bus error */
 	{ 9, SIGTRAP },			/* break */
@@ -336,6 +364,8 @@ static struct hard_trap_info
 	{ 0, 0}				/* Must be last */
 };
 
+/* Save the normal trap handlers for user-mode traps. */
+void *saved_vectors[32];
 
 /*
  * Set up exception handlers for tracing and breakpoints
@@ -348,8 +378,9 @@ void set_debug_traps(void)
 
 	save_and_cli(flags);
 	for (ht = hard_trap_info; ht->tt && ht->signo; ht++)
-		set_except_vector(ht->tt, trap_low);
+		saved_vectors[ht->tt] = set_except_vector(ht->tt, trap_low);
   
+	putDebugChar('+'); /* 'hello world' */
 	/*
 	 * In case GDB is started before us, ack any packets
 	 * (presumably "$?#xx") sitting there.
@@ -362,18 +393,6 @@ void set_debug_traps(void)
 
 	initialized = 1;
 	restore_flags(flags);
-}
-
-
-/*
- * Trap handler for memory errors.  This just sets mem_err to be non-zero.  It
- * assumes that %l1 is non-zero.  This should be safe, as it is doubtful that
- * 0 would ever contain code that could mem fault.  This routine will skip
- * past the faulting instruction after setting mem_err.
- */
-extern void fltr_set_mem_err(void)
-{
-  /* FIXME: Needs to be written... */
 }
 
 /*
@@ -401,8 +420,7 @@ static int hexToInt(char **ptr, int *intValue)
 
 	*intValue = 0;
 
-	while (**ptr)
-	{
+	while (**ptr) {
 		hexValue = hex(**ptr);
 		if (hexValue < 0)
 			break;
@@ -904,3 +922,47 @@ void adel(void)
 			lw	$9,0($8)
 	");
 }
+
+#ifdef CONFIG_GDB_CONSOLE
+
+void gdb_puts(const char *str)
+{
+	int l = strlen(str);
+	char outbuf[18];
+
+	outbuf[0]='O';
+
+	while(l) {
+		int i = (l>8)?8:l;
+		mem2hex((char *)str, &outbuf[1], i, 0);
+		outbuf[(i*2)+1]=0;
+		putpacket(outbuf); 
+		str += i;
+		l -= i;
+	}
+}
+
+static kdev_t gdb_console_dev(struct console *con)
+{
+	return MKDEV(1, 3); /* /dev/null */
+}
+
+static void gdb_console_write(struct console *con, const char *s, unsigned n)
+{
+	gdb_puts(s);
+}
+
+static struct console gdb_console = {
+	name:	"gdb",
+	write:	gdb_console_write,
+	device:	gdb_console_dev,
+	flags:	CON_PRINTBUFFER,
+	index:	-1
+};
+
+__init void register_gdb_console(void)
+{
+	register_console(&gdb_console);
+}
+     
+#endif

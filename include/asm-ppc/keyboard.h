@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.keyboard.h 1.11 08/29/01 10:07:29 paulus
+ */
+/*
  *  linux/include/asm-ppc/keyboard.h
  *
  *  Created 3 Nov 1996 by Geert Uytterhoeven
@@ -20,6 +23,7 @@
 
 #include <linux/kernel.h>
 #include <linux/ioport.h>
+#include <linux/kd.h>
 #include <asm/io.h>
 
 #define KEYBOARD_IRQ			1
@@ -64,7 +68,7 @@ static inline void kbd_leds(unsigned char leds)
 	if ( ppc_md.kbd_leds )
 		ppc_md.kbd_leds(leds);
 }
-  
+
 static inline void kbd_init_hw(void)
 {
 	if ( ppc_md.kbd_init_hw )

@@ -18,7 +18,7 @@
 #include <linux/types.h>
 #include <linux/ctype.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/blk.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
@@ -65,9 +65,9 @@ static void dma_setup_quick(struct NCR_ESP * esp, __u32 addr, int count, int wri
 static int esp_dafb_dma_irq_p(struct NCR_ESP * espdev);
 static int esp_iosb_dma_irq_p(struct NCR_ESP * espdev);
 
-volatile unsigned char cmd_buffer[16];
+static volatile unsigned char cmd_buffer[16];
 				/* This is where all commands are put
-				 * before they are transfered to the ESP chip
+				 * before they are transferred to the ESP chip
 				 * via PIO.
 				 */
 

@@ -16,7 +16,7 @@
  * are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
  *
  * Alternatively, the contents of this file may be used under the
- * terms of the GNU Public License version 2 (the "GPL"), in which
+ * terms of the GNU General Public License version 2 (the "GPL"), in which
  * case the provisions of the GPL are applicable instead of the
  * above.  If you wish to allow the use of your version of this file
  * only under the terms of the GPL and not to allow others to use
@@ -112,10 +112,12 @@
 #define PRODID_SOCKET_DUAL_RS232	0x0006
 #define PRODID_SOCKET_EIO		0x000a
 #define PRODID_SOCKET_LPE		0x000d
+#define PRODID_SOCKET_LPE_CF		0x0075
 
 #define MANFID_SUNDISK			0x0045
 
 #define MANFID_TDK			0x0105
+#define PRODID_TDK_CF010		0x0900
 
 #define MANFID_TOSHIBA			0x0098
 

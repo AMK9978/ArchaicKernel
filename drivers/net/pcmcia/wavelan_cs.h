@@ -96,7 +96,7 @@
  *
  * wavelan.h :		Description of the hardware interface & structs
  *
- * i82593.h :		Description if the Ethernet controler
+ * i82593.h :		Description if the Ethernet controller
  */
 
 /* --------------------------- HISTORY --------------------------- */
@@ -225,7 +225,7 @@
  *	- wavelan_set_multicast_list : avoid reset
  *	- add wireless extensions (ioctl & get_wireless_stats)
  *	  get/set nwid/frequency on fly, info for /proc/net/wireless
- *	- Supress useless stuff from lp (net_local), but add link
+ *	- Suppress useless stuff from lp (net_local), but add link
  *	- More inlines
  *	- Lot of others minor details & cleanups
  *
@@ -315,7 +315,7 @@
  *		o Rename wavelan_release to wv_pcmcia_release & move up
  *		o move unregister_netdev to wavelan_detach()
  *		o wavelan_release() no longer call wavelan_detach()
- *		o Supress "release" timer
+ *		o Suppress "release" timer
  *		o Other cleanups & fixes
  *	- New MAC address in the probe
  *	- Reorg PSA_CRC code (endian neutral & cleaner)
@@ -364,7 +364,7 @@
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/interrupt.h>
@@ -430,14 +430,14 @@
 #undef DEBUG_CONFIG_INFO	/* What's going on... */
 #define DEBUG_CONFIG_ERRORS	/* Errors on configuration */
 #undef DEBUG_TX_TRACE		/* Transmission calls */
-#undef DEBUG_TX_INFO		/* Header of the transmited packet */
+#undef DEBUG_TX_INFO		/* Header of the transmitted packet */
 #undef DEBUG_TX_FAIL		/* Normal failure conditions */
 #define DEBUG_TX_ERROR		/* Unexpected conditions */
 #undef DEBUG_RX_TRACE		/* Transmission calls */
-#undef DEBUG_RX_INFO		/* Header of the transmited packet */
+#undef DEBUG_RX_INFO		/* Header of the transmitted packet */
 #undef DEBUG_RX_FAIL		/* Normal failure conditions */
 #define DEBUG_RX_ERROR		/* Unexpected conditions */
-#undef DEBUG_PACKET_DUMP	32	/* Dump packet on the screen */
+#undef DEBUG_PACKET_DUMP	/* Dump packet on the screen */
 #undef DEBUG_IOCTL_TRACE	/* Misc call by Linux */
 #undef DEBUG_IOCTL_INFO		/* Various debug info */
 #define DEBUG_IOCTL_ERROR	/* What's going wrong */
@@ -465,13 +465,20 @@ static const char *version = "wavelan_cs.c : v21 (wireless extensions) 18/10/99\
 
 /* ------------------------ PRIVATE IOCTL ------------------------ */
 
-#define SIOCSIPQTHR	SIOCDEVPRIVATE		/* Set quality threshold */
-#define SIOCGIPQTHR	SIOCDEVPRIVATE + 1	/* Get quality threshold */
-#define SIOCSIPROAM     SIOCDEVPRIVATE + 2      /* Set roaming state */
-#define SIOCGIPROAM     SIOCDEVPRIVATE + 3      /* Get roaming state */
+/* Wireless Extension Backward compatibility - Jean II
+ * If the new wireless device private ioctl range is not defined,
+ * default to standard device private ioctl range */
+#ifndef SIOCIWFIRSTPRIV
+#define SIOCIWFIRSTPRIV	SIOCDEVPRIVATE
+#endif /* SIOCIWFIRSTPRIV */
 
-#define SIOCSIPHISTO	SIOCDEVPRIVATE + 6	/* Set histogram ranges */
-#define SIOCGIPHISTO	SIOCDEVPRIVATE + 7	/* Get histogram values */
+#define SIOCSIPQTHR	SIOCIWFIRSTPRIV		/* Set quality threshold */
+#define SIOCGIPQTHR	SIOCIWFIRSTPRIV + 1	/* Get quality threshold */
+#define SIOCSIPROAM     SIOCIWFIRSTPRIV + 2	/* Set roaming state */
+#define SIOCGIPROAM     SIOCIWFIRSTPRIV + 3	/* Get roaming state */
+
+#define SIOCSIPHISTO	SIOCIWFIRSTPRIV + 6	/* Set histogram ranges */
+#define SIOCGIPHISTO	SIOCIWFIRSTPRIV + 7	/* Get histogram values */
 
 /*************************** WaveLAN Roaming  **************************/
 #ifdef WAVELAN_ROAMING		/* Conditional compile, see above in options */
@@ -557,7 +564,7 @@ struct net_local
   en_stats	stats;		/* Ethernet interface statistics */
   int		nresets;	/* Number of hw resets */
   u_char	configured;	/* If it is configured */
-  u_char	reconfig_82593;	/* Need to reconfigure the controler */
+  u_char	reconfig_82593;	/* Need to reconfigure the controller */
   u_char	promiscuous;	/* Promiscuous mode */
   u_char	allmulticast;	/* All Multicast mode */
   int		mc_count;	/* Number of multicast addresses */
@@ -669,7 +676,7 @@ static int
 		     char *,
 		     int);
 static inline void
-	wv_82593_reconfig(device *);	/* Reconfigure the controler */
+	wv_82593_reconfig(device *);	/* Reconfigure the controller */
 /* ------------------- DEBUG & INFO SUBROUTINES ------------------- */
 static inline void
 	wv_init_info(device *);	/* display startup info */
@@ -737,11 +744,11 @@ static int
 /**************************** VARIABLES ****************************/
 
 static dev_info_t dev_info = "wavelan_cs";
-static dev_link_t *dev_list = NULL;	/* Linked list of devices */
+static dev_link_t *dev_list;		/* Linked list of devices */
 
 /* WARNING : the following variable MUST be volatile
  * It is used by wv_82593_cmd to syncronise with wavelan_interrupt */ 
-static volatile int	wv_wait_completed = 0;
+static volatile int	wv_wait_completed;
 
 /*
  * Parameters that can be set with 'insmod'
@@ -754,7 +761,7 @@ static int	irq_mask = 0xdeb8;
 static int 	irq_list[4] = { -1 };
 
 /* Shared memory speed, in ns */
-static int	mem_speed = 0;
+static int	mem_speed;
 
 /* New module interface */
 MODULE_PARM(irq_mask, "i");
@@ -763,7 +770,7 @@ MODULE_PARM(mem_speed, "i");
 
 #ifdef WAVELAN_ROAMING		/* Conditional compile, see above in options */
 /* Enable roaming mode ? No ! Please keep this to 0 */
-static int	do_roaming = 0;
+static int	do_roaming;
 MODULE_PARM(do_roaming, "i");
 #endif	/* WAVELAN_ROAMING */
 

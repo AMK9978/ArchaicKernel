@@ -279,6 +279,11 @@ static void irtty_close(struct tty_struct *tty)
 	tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
 	tty->disc_data = 0;
 	
+	/* We are not using any dongle anymore! */
+	if (self->dongle)
+		irda_device_dongle_cleanup(self->dongle);
+	self->dongle = NULL;
+
 	/* Remove netdevice */
 	if (self->netdev) {
 		rtnl_lock();
@@ -286,11 +291,6 @@ static void irtty_close(struct tty_struct *tty)
 		rtnl_unlock();
 	}
 	
-	/* We are not using any dongle anymore! */
-	if (self->dongle)
-		irda_device_dongle_cleanup(self->dongle);
-	self->dongle = NULL;
-
 	/* Remove speed changing task if any */
 	if (self->task)
 		irda_task_delete(self->task);
@@ -629,7 +629,7 @@ static int irtty_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct irtty_cb *self;
 	int actual = 0;
-	__u32 speed;
+	__s32 speed;
 
 	self = (struct irtty_cb *) dev->priv;
 	ASSERT(self != NULL, return 0;);
@@ -638,12 +638,14 @@ static int irtty_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 	netif_stop_queue(dev);
 	
 	/* Check if we need to change the speed */
-	if ((speed = irda_get_speed(skb)) != self->io.speed) {
+	speed = irda_get_next_speed(skb);
+	if ((speed != self->io.speed) && (speed != -1)) {
 		/* Check for empty frame */
 		if (!skb->len) {
 			irda_task_execute(self, irtty_change_speed, 
 					  irtty_change_speed_complete, 
 					  NULL, (void *) speed);
+			dev_kfree_skb(skb);
 			return 0;
 		} else
 			self->new_speed = speed;
@@ -822,7 +824,7 @@ int irtty_set_mode(struct net_device *dev, int mode)
 /*
  * Function irtty_raw_read (self, buf, len)
  *
- *    Receive incomming data. This function sleeps, so it must only be
+ *    Receive incoming data. This function sleeps, so it must only be
  *    called with a process context. Timeout is currently defined to be
  *    a multiple of 10 ms.
  */
@@ -893,6 +895,8 @@ static int irtty_net_init(struct net_device *dev)
 static int irtty_net_open(struct net_device *dev)
 {
 	struct irtty_cb *self = (struct irtty_cb *) dev->priv;
+	struct tty_struct *tty = self->tty;
+	char hwname[16];
 
 	ASSERT(self != NULL, return -1;);
 	ASSERT(self->magic == IRTTY_MAGIC, return -1;);
@@ -905,11 +909,16 @@ static int irtty_net_open(struct net_device *dev)
 	/* Make sure we can receive more data */
 	irtty_stop_receiver(self, FALSE);
 
+	/* Give self a hardware name */
+	sprintf(hwname, "%s%d", tty->driver.name,
+		MINOR(tty->device) - tty->driver.minor_start +
+		tty->driver.name_base);
+
 	/* 
 	 * Open new IrLAP layer instance, now that everything should be
 	 * initialized properly 
 	 */
-	self->irlap = irlap_open(dev, &self->qos);
+	self->irlap = irlap_open(dev, &self->qos, hwname);
 
 	MOD_INC_USE_COUNT;
 
@@ -969,13 +978,17 @@ static int irtty_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	switch (cmd) {
 	case SIOCSBANDWIDTH: /* Set bandwidth */
 		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
-		irda_task_execute(self, irtty_change_speed, NULL, NULL, 
-				  (void *) irq->ifr_baudrate);
+			ret = -EPERM;
+		else
+			irda_task_execute(self, irtty_change_speed, NULL, NULL, 
+					  (void *) irq->ifr_baudrate);
 		break;
 	case SIOCSDONGLE: /* Set dongle */
-		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
+		if (!capable(CAP_NET_ADMIN)) {
+			ret = -EPERM;
+			break;
+		}
+
 		/* Initialize dongle */
 		dongle = irda_device_dongle_init(dev, irq->ifr_dongle);
 		if (!dongle)
@@ -997,21 +1010,24 @@ static int irtty_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 		break;
 	case SIOCSMEDIABUSY: /* Set media busy */
 		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
-		irda_device_set_media_busy(self->netdev, TRUE);
+			ret = -EPERM;
+		else
+			irda_device_set_media_busy(self->netdev, TRUE);
 		break;
 	case SIOCGRECEIVING: /* Check if we are receiving right now */
 		irq->ifr_receiving = irtty_is_receiving(self);
 		break;
 	case SIOCSDTRRTS:
 		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
-		irtty_set_dtr_rts(dev, irq->ifr_dtr, irq->ifr_rts);
+			ret = -EPERM;
+		else
+			irtty_set_dtr_rts(dev, irq->ifr_dtr, irq->ifr_rts);
 		break;
 	case SIOCSMODE:
 		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
-		irtty_set_mode(dev, irq->ifr_mode);
+			ret = -EPERM;
+		else
+			irtty_set_mode(dev, irq->ifr_mode);
 		break;
 	default:
 		ret = -EOPNOTSUPP;
@@ -1033,6 +1049,8 @@ static struct net_device_stats *irtty_net_get_stats(struct net_device *dev)
 
 MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");
 MODULE_DESCRIPTION("IrDA TTY device driver");
+MODULE_LICENSE("GPL");
+
 
 MODULE_PARM(qos_mtt_bits, "i");
 MODULE_PARM_DESC(qos_mtt_bits, "Minimum Turn Time");

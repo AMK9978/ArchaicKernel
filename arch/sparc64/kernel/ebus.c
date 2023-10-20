@@ -1,4 +1,4 @@
-/* $Id: ebus.c,v 1.53 2000/11/08 05:08:23 davem Exp $
+/* $Id: ebus.c,v 1.64 2001/11/08 04:41:33 davem Exp $
  * ebus.c: PCI to EBus bridge device.
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -9,7 +9,7 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/init.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 
 #include <asm/system.h>
@@ -134,6 +134,9 @@ void __init fill_ebus_child(int node, struct linux_prom_registers *preg,
 		}
 	}
 
+	for (i = 0; i < PROMINTR_MAX; i++)
+		dev->irqs[i] = PCI_IRQ_NONE;
+
 	len = prom_getproperty(node, "interrupts", (char *)&irqs, sizeof(irqs));
 	if ((len == -1) || (len == 0)) {
 		dev->num_irqs = 0;
@@ -159,7 +162,7 @@ void __init fill_ebus_child(int node, struct linux_prom_registers *preg,
 			struct pci_controller_info *p = pbm->parent;
 
 			if (ebus_intmap_match(dev->bus, preg, &irqs[i]) != -1) {
-				dev->irqs[i] = p->irq_build(p,
+				dev->irqs[i] = p->irq_build(pbm,
 							    dev->bus->self,
 							    irqs[i]);
 			} else {
@@ -191,6 +194,11 @@ void __init fill_ebus_device(int node, struct linux_ebus_device *dev)
 	printk(" [%s", dev->prom_name);
 
 	len = prom_getproperty(node, "reg", (void *)regs, sizeof(regs));
+	if (len == -1) {
+		dev->num_addrs = 0;
+		goto probe_interrupts;
+	}
+
 	if (len % sizeof(struct linux_prom_registers)) {
 		prom_printf("UGH: proplen for %s was %d, need multiple of %d\n",
 			    dev->prom_name, len,
@@ -200,7 +208,10 @@ void __init fill_ebus_device(int node, struct linux_ebus_device *dev)
 	dev->num_addrs = len / sizeof(struct linux_prom_registers);
 
 	for (i = 0; i < dev->num_addrs; i++) {
-		n = (regs[i].which_io - 0x10) >> 2;
+		if (dev->bus->is_rio == 0)
+			n = (regs[i].which_io - 0x10) >> 2;
+		else
+			n = regs[i].which_io;
 
 		dev->resource[i].start  = dev->bus->self->resource[n].start;
 		dev->resource[i].start += (unsigned long)regs[i].phys_addr;
@@ -212,6 +223,10 @@ void __init fill_ebus_device(int node, struct linux_ebus_device *dev)
 				 &dev->resource[i]);
 	}
 
+probe_interrupts:
+	for (i = 0; i < PROMINTR_MAX; i++)
+		dev->irqs[i] = PCI_IRQ_NONE;
+
 	len = prom_getproperty(node, "interrupts", (char *)&irqs, sizeof(irqs));
 	if ((len == -1) || (len == 0)) {
 		dev->num_irqs = 0;
@@ -222,7 +237,7 @@ void __init fill_ebus_device(int node, struct linux_ebus_device *dev)
 			struct pci_controller_info *p = pbm->parent;
 
 			if (ebus_intmap_match(dev->bus, &regs[0], &irqs[i]) != -1) {
-				dev->irqs[i] = p->irq_build(p,
+				dev->irqs[i] = p->irq_build(pbm,
 							    dev->bus->self,
 							    irqs[i]);
 			} else {
@@ -259,8 +274,6 @@ void __init fill_ebus_device(int node, struct linux_ebus_device *dev)
 	printk("]");
 }
 
-extern void clock_probe(void);
-extern void power_init(void);
 
 void __init ebus_init(void)
 {
@@ -269,13 +282,18 @@ void __init ebus_init(void)
 	struct linux_ebus *ebus;
 	struct pci_dev *pdev;
 	struct pcidev_cookie *cookie;
-	int nd, ebusnd;
+	int nd, ebusnd, is_rio;
 	int num_ebus = 0;
 
 	if (!pci_present())
 		return;
 
+	is_rio = 0;
 	pdev = pci_find_device(PCI_VENDOR_ID_SUN, PCI_DEVICE_ID_SUN_EBUS, 0);
+	if (!pdev) {
+		pdev = pci_find_device(PCI_VENDOR_ID_SUN, PCI_DEVICE_ID_SUN_RIO_EBUS, 0);
+		is_rio = 1;
+	}
 	if (!pdev) {
 		printk("ebus: No EBus's found.\n");
 		return;
@@ -286,6 +304,7 @@ void __init ebus_init(void)
 
 	ebus_chain = ebus = ebus_alloc(sizeof(struct linux_ebus));
 	ebus->next = 0;
+	ebus->is_rio = is_rio;
 
 	while (ebusnd) {
 		/* SUNW,pci-qfe uses four empty ebuses on it.
@@ -295,8 +314,16 @@ void __init ebus_init(void)
 		   we'd have to tweak with the ebus_chain
 		   in the runtime after initialization. -jj */
 		if (!prom_getchild (ebusnd)) {
+			struct pci_dev *orig_pdev = pdev;
+
+			is_rio = 0;
 			pdev = pci_find_device(PCI_VENDOR_ID_SUN, 
-					       PCI_DEVICE_ID_SUN_EBUS, pdev);
+					       PCI_DEVICE_ID_SUN_EBUS, orig_pdev);
+			if (!pdev) {
+				pdev = pci_find_device(PCI_VENDOR_ID_SUN, 
+						       PCI_DEVICE_ID_SUN_RIO_EBUS, orig_pdev);
+				is_rio = 1;
+			}
 			if (!pdev) {
 				if (ebus == ebus_chain) {
 					ebus_chain = NULL;
@@ -305,7 +332,7 @@ void __init ebus_init(void)
 				}
 				break;
 			}
-			
+			ebus->is_rio = is_rio;
 			cookie = pdev->sysdata;
 			ebusnd = cookie->prom_node;
 			continue;
@@ -346,10 +373,20 @@ void __init ebus_init(void)
 	next_ebus:
 		printk("\n");
 
-		pdev = pci_find_device(PCI_VENDOR_ID_SUN,
-				       PCI_DEVICE_ID_SUN_EBUS, pdev);
-		if (!pdev)
-			break;
+		{
+			struct pci_dev *orig_pdev = pdev;
+
+			is_rio = 0;
+			pdev = pci_find_device(PCI_VENDOR_ID_SUN,
+					       PCI_DEVICE_ID_SUN_EBUS, orig_pdev);
+			if (!pdev) {
+				pdev = pci_find_device(PCI_VENDOR_ID_SUN,
+						       PCI_DEVICE_ID_SUN_RIO_EBUS, orig_pdev);
+				is_rio = 1;
+			}
+			if (!pdev)
+				break;
+		}
 
 		cookie = pdev->sysdata;
 		ebusnd = cookie->prom_node;
@@ -357,12 +394,11 @@ void __init ebus_init(void)
 		ebus->next = ebus_alloc(sizeof(struct linux_ebus));
 		ebus = ebus->next;
 		ebus->next = 0;
+		ebus->is_rio = is_rio;
 		++num_ebus;
 	}
 
 #ifdef CONFIG_SUN_AUXIO
 	auxio_probe();
 #endif
-	clock_probe();
-	power_init();
 }

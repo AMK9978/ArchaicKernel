@@ -13,15 +13,8 @@ static void arch_idle(void)
 	while (!current->need_resched && !hlt_counter);
 }
 
-extern __inline__ void arch_reset(char mode)
+static inline void arch_reset(char mode)
 {
-	extern void ecard_reset(int card);
-
-	/*
-	 * Reset all expansion cards.
-	 */
-	ecard_reset(-1);
-
 	/*
 	 * copy branch instruction to reset location and call it
 	 */

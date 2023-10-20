@@ -23,7 +23,7 @@
    Functions as standalone, loadable, and PCMCIA driver, the latter from
    Dave Hinds' PCMCIA package.
 
-   Redistributable under terms of the GNU Public License
+   Redistributable under terms of the GNU General Public License
 
 */
 /*----------------------------------------------------------------*/
@@ -118,6 +118,7 @@
 #include <linux/blk.h>	/* to get disk capacity */
 #include <linux/kernel.h>
 #include <linux/string.h>
+#include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
@@ -128,11 +129,11 @@
 #include "sd.h"
 #include "hosts.h"
 #include "qlogicfas.h"
-#include<linux/stat.h>
+#include <linux/stat.h>
 
 /*----------------------------------------------------------------*/
 /* driver state info, local to driver */
-static int	    qbase = 0;	/* Port */
+static int	    qbase;	/* Port */
 static int	    qinitid;	/* initiator ID */
 static int	    qabort;	/* Flag to cause an abort */
 static int	    qlirq = -1;	/* IRQ being used */
@@ -270,8 +271,10 @@ static int	ql_wai(void)
 int	i,k;
 	k = 0;
 	i = jiffies + WATCHDOG;
-	while ( i > jiffies && !qabort && !((k = inb(qbase + 4)) & 0xe0))
+	while ( i > jiffies && !qabort && !((k = inb(qbase + 4)) & 0xe0)) {
 		barrier();
+		cpu_relax();
+	}
 	if (i <= jiffies)
 		return (DID_TIME_OUT);
 	if (qabort)
@@ -430,6 +433,7 @@ rtrc(1)
 	i = inb(qbase + 5);	/* should be bus service */
 	while (!qabort && ((i & 0x20) != 0x20)) {
 		barrier();
+		cpu_relax();
 		i |= inb(qbase + 5);
 	}
 rtrc(0)
@@ -512,8 +516,10 @@ int	qlogicfas_queuecommand(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 
 	cmd->scsi_done = done;
 /* wait for the last command's interrupt to finish */
-	while (qlcmd != NULL)
+	while (qlcmd != NULL) {
 		barrier();
+		cpu_relax();
+	}
 	ql_icmd(cmd);
 	return 0;
 }
@@ -537,7 +543,7 @@ void	qlogicfas_preset(int port, int irq)
 
 /*----------------------------------------------------------------*/
 /* look for qlogic card and init if found */
-int	qlogicfas_detect(Scsi_Host_Template * host)
+int __QLINIT qlogicfas_detect(Scsi_Host_Template * host)
 {
 int	i, j;			/* these are only used by IRQ detect */
 int	qltyp;			/* type of chip */
@@ -556,12 +562,13 @@ host->proc_name =  "qlogicfas";
 
 	if( !qbase ) {
 		for (qbase = 0x230; qbase < 0x430; qbase += 0x100) {
-			if( check_region( qbase , 0x10 ) )
+			if( !request_region( qbase , 0x10, "qlogicfas" ) )
 				continue;
 			REG1;
 			if ( ( (inb(qbase + 0xe) ^ inb(qbase + 0xe)) == 7 )
 			  && ( (inb(qbase + 0xe) ^ inb(qbase + 0xe)) == 7 ) )
 				break;
+			release_region(qbase, 0x10 );
 		}
 		if (qbase == 0x430)
 			return 0;
@@ -616,8 +623,9 @@ host->proc_name =  "qlogicfas";
 	if (qlirq >= 0 && !request_irq(qlirq, do_ql_ihandl, 0, "qlogicfas", NULL))
 		host->can_queue = 1;
 #endif
-	request_region( qbase , 0x10 ,"qlogicfas");
 	hreg = scsi_register( host , 0 );	/* no host data */
+	if (!hreg)
+		goto err_release_mem;
 	hreg->io_port = qbase;
 	hreg->n_io_port = 16;
 	hreg->dma_channel = -1;
@@ -629,6 +637,13 @@ host->proc_name =  "qlogicfas";
 	host->name = qinfo;
 
 	return 1;
+
+ err_release_mem:
+	release_region(qbase, 0x10);
+	if (host->can_queue)
+		free_irq(qlirq, do_ql_ihandl);
+	return 0;
+
 }
 
 /*----------------------------------------------------------------*/
@@ -675,6 +690,7 @@ const char	*qlogicfas_info(struct Scsi_Host * host)
 {
 	return qinfo;
 }
+MODULE_LICENSE("GPL");
 
 /* Eventually this will go into an include file, but this will be later */
 static Scsi_Host_Template driver_template = QLOGICFAS;

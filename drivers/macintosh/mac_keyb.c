@@ -305,7 +305,7 @@ int mackbd_translate(unsigned char keycode, unsigned char *keycodep,
 	return 1;
 }
 
-int mackbd_unexpected_up(unsigned char keycode)
+char mackbd_unexpected_up(unsigned char keycode)
 {
 	return 0x80;
 }
@@ -908,6 +908,9 @@ init_trackpad(int id)
 	            r1_buffer[5],
 	            0x03, /*r1_buffer[6],*/
 	            r1_buffer[7]);
+
+	    /* Without this flush, the trackpad may be locked up */	    
+	    adb_request(&req, NULL, ADBREQ_SYNC, 1, ADB_FLUSH(id));
         }
 }
 

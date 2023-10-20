@@ -19,7 +19,7 @@
     are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
 
     Alternatively, the contents of this file may be used under the
-    terms of the GNU Public License version 2 (the "GPL"), in which
+    terms of the GNU General Public License version 2 (the "GPL"), in which
     case the provisions of the GPL are applicable instead of the
     above.  If you wish to allow the use of your version of this file
     only under the terms of the GPL and not to allow others to use
@@ -41,7 +41,7 @@
 #include <linux/errno.h>
 #include <linux/timer.h>
 #include <linux/sched.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
@@ -57,17 +57,14 @@
 #include <pcmcia/ss.h>
 #include <pcmcia/cs.h>
 
+#include <linux/isapnp.h>
+
 /* ISA-bus controllers */
 #include "i82365.h"
 #include "cirrus.h"
 #include "vg468.h"
 #include "ricoh.h"
 #include "o2micro.h"
-
-/* PCI-bus controllers */
-#include "old-yenta.h"
-#include "smc34c90.h"
-#include "topic.h"
 
 #ifdef PCMCIA_DEBUG
 static int pc_debug = PCMCIA_DEBUG;
@@ -210,13 +207,13 @@ static struct timer_list poll_timer;
 		  PCI_COMMAND_MASTER|PCI_COMMAND_WAIT)
 
 /* These definitions must match the pcic table! */
-typedef enum pcic_id {
 #ifdef CONFIG_ISA
+typedef enum pcic_id {
     IS_I82365A, IS_I82365B, IS_I82365DF,
     IS_IBM, IS_RF5Cx96, IS_VLSI, IS_VG468, IS_VG469,
     IS_PD6710, IS_PD672X, IS_VT83C469,
-#endif
 } pcic_id;
+#endif
 
 /* Flags for classifying groups of controllers */
 #define IS_VADEM	0x0001
@@ -257,23 +254,31 @@ static pcic_t pcic[] = {
 
 /*====================================================================*/
 
+static spinlock_t bus_lock = SPIN_LOCK_UNLOCKED;
+
 static u_char i365_get(u_short sock, u_short reg)
 {
+    unsigned long flags;
+    spin_lock_irqsave(&bus_lock,flags);
     {
 	ioaddr_t port = socket[sock].ioaddr;
 	u_char val;
 	reg = I365_REG(socket[sock].psock, reg);
 	outb(reg, port); val = inb(port+1);
+	spin_unlock_irqrestore(&bus_lock,flags);
 	return val;
     }
 }
 
 static void i365_set(u_short sock, u_short reg, u_char data)
 {
+    unsigned long flags;
+    spin_lock_irqsave(&bus_lock,flags);
     {
 	ioaddr_t port = socket[sock].ioaddr;
 	u_char val = I365_REG(socket[sock].psock, reg);
 	outb(val, port); outb(data, port+1);
+	spin_unlock_irqrestore(&bus_lock,flags);
     }
 }
 
@@ -808,10 +813,56 @@ static void __init add_pcic(int ns, int type)
 
 #ifdef CONFIG_ISA
 
+#if defined(CONFIG_ISAPNP) || (defined(CONFIG_ISAPNP_MODULE) && defined(MODULE))
+#define I82365_ISAPNP
+#endif
+
+#ifdef I82365_ISAPNP
+static struct isapnp_device_id id_table[] __initdata = {
+	{ 	ISAPNP_ANY_ID, ISAPNP_ANY_ID, ISAPNP_VENDOR('P', 'N', 'P'),
+		ISAPNP_FUNCTION(0x0e00), (unsigned long) "Intel 82365-Compatible" },
+	{ 	ISAPNP_ANY_ID, ISAPNP_ANY_ID, ISAPNP_VENDOR('P', 'N', 'P'),
+		ISAPNP_FUNCTION(0x0e01), (unsigned long) "Cirrus Logic CL-PD6720" },
+	{ 	ISAPNP_ANY_ID, ISAPNP_ANY_ID, ISAPNP_VENDOR('P', 'N', 'P'),
+		ISAPNP_FUNCTION(0x0e02), (unsigned long) "VLSI VL82C146" },
+	{	0 }
+};
+MODULE_DEVICE_TABLE(isapnp, id_table);
+
+static struct pci_dev *i82365_pnpdev;
+#endif
+
 static void __init isa_probe(void)
 {
     int i, j, sock, k, ns, id;
     ioaddr_t port;
+#ifdef I82365_ISAPNP
+    struct isapnp_device_id *devid;
+    struct pci_dev *dev;
+
+    for (devid = id_table; devid->vendor; devid++) {
+	if ((dev = isapnp_find_dev(NULL, devid->vendor, devid->function, NULL))) {
+	    printk("ISAPNP ");
+
+	    if (dev->prepare && dev->prepare(dev) < 0) {
+		printk("prepare failed\n");
+		break;
+	    }
+
+	    if (dev->activate && dev->activate(dev) < 0) {
+		printk("activate failed\n");
+		break;
+	    }
+
+	    if ((i365_base = pci_resource_start(dev, 0))) {
+		printk("no resources ?\n");
+		break;
+	    }
+	    i82365_pnpdev = dev;
+	    break;
+	}
+    }
+#endif
 
     if (check_region(i365_base, 2) != 0) {
 	if (sockets == 0)
@@ -872,6 +923,13 @@ static void pcic_bh(void *dummy)
 		events = pending_events[i];
 		pending_events[i] = 0;
 		spin_unlock_irq(&pending_event_lock);
+		/* 
+		SS_DETECT events need a small delay here. The reason for this is that 
+		the "is there a card" electronics need time to see the card after the
+		"we have a card coming in" electronics have seen it. 
+		*/
+		if (events & SS_DETECT) 
+			mdelay(4);
 		if (socket[i].handler)
 			socket[i].handler(socket[i].info, events);
 	}
@@ -880,6 +938,8 @@ static void pcic_bh(void *dummy)
 static struct tq_struct pcic_task = {
 	routine:	pcic_bh
 };
+
+static unsigned long last_detect_jiffies;
 
 static void pcic_interrupt(int irq, void *dev,
 				    struct pt_regs *regs)
@@ -906,6 +966,20 @@ static void pcic_interrupt(int irq, void *dev,
 		continue;
 	    }
 	    events = (csc & I365_CSC_DETECT) ? SS_DETECT : 0;
+	    
+	    
+	    /* Several sockets will send multiple "new card detected"
+	       events in rapid succession. However, the rest of the pcmcia expects 
+	       only one such event. We just ignore these events by having a
+               timeout */
+
+	    if (events) {
+	    	if ((jiffies - last_detect_jiffies)<(HZ/20)) 
+	    		events = 0;
+	    	last_detect_jiffies = jiffies;
+	    	
+	    }
+	
 	    if (i365_get(i, I365_INTCTL) & I365_PC_IOCARD)
 		events |= (csc & I365_CSC_STSCHG) ? SS_STSCHG : 0;
 	    else {
@@ -970,6 +1044,7 @@ static int i365_get_status(u_short sock, u_int *value)
     status = i365_get(sock, I365_STATUS);
     *value = ((status & I365_CS_DETECT) == I365_CS_DETECT)
 	? SS_DETECT : 0;
+	
     if (i365_get(sock, I365_INTCTL) & I365_PC_IOCARD)
 	*value |= (status & I365_CS_STSCHG) ? 0 : SS_STSCHG;
     else {
@@ -1247,7 +1322,7 @@ static int i365_get_mem_map(u_short sock, struct pccard_mem_map *mem)
     i = i365_get_pair(sock, base+I365_W_START);
     mem->flags |= (i & I365_MEM_16BIT) ? MAP_16BIT : 0;
     mem->flags |= (i & I365_MEM_0WS) ? MAP_0WS : 0;
-    mem->sys_start += ((u_long)(i & 0x0fff) << 12);
+    mem->sys_start = ((u_long)(i & 0x0fff) << 12);
     
     i = i365_get_pair(sock, base+I365_W_STOP);
     mem->speed  = (i & I365_MEM_WS0) ? 1 : 0;
@@ -1572,9 +1647,13 @@ static void __exit exit_i82365(void)
 	i365_set(i, I365_CSCINT, 0);
 	release_region(socket[i].ioaddr, 2);
     }
+#if defined(CONFIG_ISA) && defined(I82365_ISAPNP)
+    if (i82365_pnpdev && i82365_pnpdev->deactivate)
+		i82365_pnpdev->deactivate(i82365_pnpdev);
+#endif
 } /* exit_i82365 */
 
 module_init(init_i82365);
 module_exit(exit_i82365);
-
+MODULE_LICENSE("Dual MPL/GPL");
 /*====================================================================*/

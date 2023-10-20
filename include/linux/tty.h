@@ -307,6 +307,8 @@ struct tty_struct {
 	struct semaphore atomic_read;
 	struct semaphore atomic_write;
 	spinlock_t read_lock;
+	/* If the tty has a pending do_SAK, queue it here - akpm */
+	struct tq_struct SAK_tq;
 };
 
 /* tty magic number */
@@ -364,6 +366,7 @@ extern int stli_init(void);
 extern int specialix_init(void);
 extern int espserial_init(void);
 extern int macserial_init(void);
+extern int a2232board_init(void);
 
 extern int tty_paranoia_check(struct tty_struct *tty, kdev_t device,
 			      const char *routine);

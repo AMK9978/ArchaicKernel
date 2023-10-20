@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.softemu8xx.c 1.8 05/17/01 18:14:22 cort
+ */
+/*
  * Software emulation of some PPC instructions for the 8xx core.
  *
  * Copyright (C) 1998 Dan Malek (dmalek@jlc.net)
@@ -21,7 +24,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/interrupt.h>
@@ -75,12 +78,12 @@ Soft_emulate_8xx(struct pt_regs *regs)
 		sdisp = (instword & 0xffff);
 		ea = (uint *)(regs->gpr[idxreg] + sdisp);
 		if (copy_from_user(ip, ea, sizeof(double)))
-			retval = EFAULT;
+			retval = -EFAULT;
 		break;
 		
 	case LFDU:
 		if (copy_from_user(ip, ea, sizeof(double)))
-			retval = EFAULT;
+			retval = -EFAULT;
 		else
 			regs->gpr[idxreg] = (uint)ea;
 		break;
@@ -88,7 +91,7 @@ Soft_emulate_8xx(struct pt_regs *regs)
 		sdisp = (instword & 0xffff);
 		ea = (uint *)(regs->gpr[idxreg] + sdisp);
 		if (copy_from_user(ip, ea, sizeof(float)))
-			retval = EFAULT;
+			retval = -EFAULT;
 		break;
 	case STFD:
 		/* this is a 16 bit quantity that is sign extended
@@ -97,12 +100,12 @@ Soft_emulate_8xx(struct pt_regs *regs)
 		sdisp = (instword & 0xffff);
 		ea = (uint *)(regs->gpr[idxreg] + sdisp);
 		if (copy_to_user(ea, ip, sizeof(double)))
-			retval = EFAULT;
+			retval = -EFAULT;
 		break;
 
 	case STFDU:
 		if (copy_to_user(ea, ip, sizeof(double)))
-			retval = EFAULT;
+			retval = -EFAULT;
 		else
 			regs->gpr[idxreg] = (uint)ea;
 		break;

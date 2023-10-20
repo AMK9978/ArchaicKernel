@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.socket.h 1.6 05/17/01 18:14:25 cort
+ */
 #ifndef _ASM_SOCKET_H
 #define _ASM_SOCKET_H
 
@@ -49,6 +52,8 @@
 #define SO_TIMESTAMP		29
 #define SCM_TIMESTAMP		SO_TIMESTAMP
 
+#define SO_ACCEPTCONN		30
+
 /* Nast libc5 fixup - bletch */
 #if defined(__KERNEL__)
 /* Socket types. */
@@ -62,6 +67,7 @@
 					/* level.  For writing rarp and	*/
 					/* other similar things on the	*/
 					/* user level.			*/
+#define	SOCK_MAX	(SOCK_PACKET+1)
 #endif
 
 #endif /* _ASM_SOCKET_H */

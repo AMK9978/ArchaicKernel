@@ -29,7 +29,7 @@
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #ifdef CONFIG_SERIAL_CONSOLE
@@ -44,7 +44,7 @@
 
 #include <linux/generic_serial.h>
 
-#ifdef CONFIG_DEBUG_KERNEL_WITH_GDB_STUB
+#ifdef CONFIG_SH_STANDARD_BIOS
 #include <asm/sh_bios.h>
 #endif
 
@@ -74,6 +74,8 @@ static int sci_set_real_termios(void *ptr);
 static void sci_hungup(void *ptr);
 static void sci_close(void *ptr);
 static int sci_chars_in_buffer(void *ptr);
+static int sci_request_irq(struct sci_port *port);
+static void sci_free_irq(struct sci_port *port);
 static int sci_init_drivers(void);
 
 static struct tty_driver sci_driver, sci_callout_driver;
@@ -83,8 +85,8 @@ static struct tty_struct *sci_table[SCI_NPORTS] = { NULL, };
 static struct termios *sci_termios[SCI_NPORTS];
 static struct termios *sci_termios_locked[SCI_NPORTS];
 
-int sci_refcount;
-int sci_debug = 0;
+static int sci_refcount;
+static int sci_debug = 0;
 
 #ifdef MODULE
 MODULE_PARM(sci_debug, "i");
@@ -92,6 +94,7 @@ MODULE_PARM(sci_debug, "i");
 
 #define dprintk(x...) do { if (sci_debug) printk(x); } while(0)
 
+#ifdef CONFIG_SERIAL_CONSOLE
 static void put_char(struct sci_port *port, char c)
 {
 	unsigned long flags;
@@ -102,15 +105,16 @@ static void put_char(struct sci_port *port, char c)
 	do
 		status = sci_in(port, SCxSR);
 	while (!(status & SCxSR_TDxE(port)));
-  
+	
 	sci_out(port, SCxTDR, c);
 	sci_in(port, SCxSR);            /* Dummy read */
 	sci_out(port, SCxSR, SCxSR_TDxE_CLEAR(port));
 
 	restore_flags(flags);
 }
+#endif
 
-#ifdef CONFIG_DEBUG_KERNEL_WITH_GDB_STUB
+#ifdef CONFIG_SH_STANDARD_BIOS
 
 static void handle_error(struct sci_port *port)
 {				/* Clear error flags */
@@ -159,12 +163,12 @@ static __inline__ char lowhex(int  x)
  * This routine does not wait for a positive acknowledge.
  */
 
-static void put_string(struct sci_port *port,
-				  const char *buffer, int count)
+#ifdef CONFIG_SERIAL_CONSOLE
+static void put_string(struct sci_port *port, const char *buffer, int count)
 {
 	int i;
 	const unsigned char *p = buffer;
-#ifdef CONFIG_DEBUG_KERNEL_WITH_GDB_STUB
+#ifdef CONFIG_SH_STANDARD_BIOS
 	int checksum;
 
     	/* This call only does a trap the first time it is
@@ -200,7 +204,7 @@ static void put_string(struct sci_port *port,
 		put_char(port, *p++);
 	}
 }
-
+#endif
 
 
 static struct real_driver sci_real_driver = {
@@ -626,10 +630,10 @@ static inline int sci_handle_breaks(struct sci_port *port)
 		dprintk("sci: BREAK detected\n");
 	}
 
-#if defined(CONFIG_CPU_SUBTYPE_SH7750)
+#if defined(CONFIG_CPU_SUBTYPE_SH7750) || defined(CONFIG_CPU_SUBTYPE_ST40STB1)
 	/* XXX: Handle SCIF overrun error */
-	if (port->type == PORT_SCIF && (ctrl_inw(SCLSR2) & SCIF_ORER) != 0) {
-		ctrl_outw(0, SCLSR2);
+	if (port->type == PORT_SCIF && (sci_in(port, SCLSR) & SCIF_ORER) != 0) {
+		sci_out(port, SCLSR, 0);
 		if(tty->flip.count<TTY_FLIPBUF_SIZE) {
 			copied++;
 			*tty->flip.flag_buf_ptr++ = TTY_OVERRUN;
@@ -796,6 +800,7 @@ static void sci_shutdown_port(void * ptr)
 	port->gs.flags &= ~ GS_ACTIVE;
 	if (port->gs.tty && port->gs.tty->termios->c_cflag & HUPCL)
 		sci_setsignals(port, 0, 0);
+	sci_free_irq(port);
 }
 
 /* ********************************************************************** *
@@ -828,8 +833,7 @@ static int sci_open(struct tty_struct * tty, struct file * filp)
 	 */
 	retval = gs_init_port(&port->gs);
 	if (retval) {
-		port->gs.count--;
-		return retval;
+		goto failed_1;
 	}
 
 	port->gs.flags |= GS_ACTIVE;
@@ -837,14 +841,17 @@ static int sci_open(struct tty_struct * tty, struct file * filp)
 
 	if (port->gs.count == 1) {
 		MOD_INC_USE_COUNT;
+
+		retval = sci_request_irq(port);
+		if (retval) {
+			goto failed_2;
+		}
 	}
 
 	retval = gs_block_til_ready(port, filp);
 
 	if (retval) {
-		MOD_DEC_USE_COUNT;
-		port->gs.count--;
-		return retval;
+		goto failed_3;
 	}
 
 	if ((port->gs.count == 1) && (port->gs.flags & ASYNC_SPLIT_TERMIOS)) {
@@ -870,6 +877,14 @@ static int sci_open(struct tty_struct * tty, struct file * filp)
 	port->gs.pgrp = current->pgrp;
 
 	return 0;
+
+failed_3:
+	sci_free_irq(port);
+failed_2:
+	MOD_DEC_USE_COUNT;
+failed_1:
+	port->gs.count--;
+	return retval;
 }
 
 static void sci_hungup(void *ptr)
@@ -896,13 +911,10 @@ static int sci_ioctl(struct tty_struct * tty, struct file * filp,
 		              (unsigned int *) arg);
 		break;
 	case TIOCSSOFTCAR:
-		if ((rc = verify_area(VERIFY_READ, (void *) arg,
-		                      sizeof(int))) == 0) {
-			get_user(ival, (unsigned int *) arg);
+		if ((rc = get_user(ival, (unsigned int *) arg)) == 0)
 			tty->termios->c_cflag =
 				(tty->termios->c_cflag & ~CLOCAL) |
 				(ival ? CLOCAL : 0);
-		}
 		break;
 	case TIOCGSERIAL:
 		if ((rc = verify_area(VERIFY_WRITE, (void *) arg,
@@ -916,35 +928,23 @@ static int sci_ioctl(struct tty_struct * tty, struct file * filp,
 					  (struct serial_struct *) arg);
 		break;
 	case TIOCMGET:
-		if ((rc = verify_area(VERIFY_WRITE, (void *) arg,
-		                      sizeof(unsigned int))) == 0) {
-			ival = sci_getsignals(port);
-			put_user(ival, (unsigned int *) arg);
-		}
+		ival = sci_getsignals(port);
+		rc = put_user(ival, (unsigned int *) arg);
 		break;
 	case TIOCMBIS:
-		if ((rc = verify_area(VERIFY_READ, (void *) arg,
-		                      sizeof(unsigned int))) == 0) {
-			get_user(ival, (unsigned int *) arg);
+		if ((rc = get_user(ival, (unsigned int *) arg)) == 0)
 			sci_setsignals(port, ((ival & TIOCM_DTR) ? 1 : -1),
 			                     ((ival & TIOCM_RTS) ? 1 : -1));
-		}
 		break;
 	case TIOCMBIC:
-		if ((rc = verify_area(VERIFY_READ, (void *) arg,
-		                      sizeof(unsigned int))) == 0) {
-			get_user(ival, (unsigned int *) arg);
+		if ((rc = get_user(ival, (unsigned int *) arg)) == 0)
 			sci_setsignals(port, ((ival & TIOCM_DTR) ? 0 : -1),
 			                     ((ival & TIOCM_RTS) ? 0 : -1));
-		}
 		break;
 	case TIOCMSET:
-		if ((rc = verify_area(VERIFY_READ, (void *) arg,
-		                      sizeof(unsigned int))) == 0) {
-			get_user(ival, (unsigned int *)arg);
+		if ((rc = get_user(ival, (unsigned int *)arg)) == 0)
 			sci_setsignals(port, ((ival & TIOCM_DTR) ? 1 : 0),
 			                     ((ival & TIOCM_RTS) ? 1 : 0));
-		}
 		break;
 
 	default:
@@ -1022,7 +1022,11 @@ static int sci_init_drivers(void)
 	memset(&sci_driver, 0, sizeof(sci_driver));
 	sci_driver.magic = TTY_DRIVER_MAGIC;
 	sci_driver.driver_name = "sci";
+#ifdef CONFIG_DEVFS_FS
+	sci_driver.name = "ttsc/%d";
+#else
 	sci_driver.name = "ttySC";
+#endif
 	sci_driver.major = SCI_MAJOR;
 	sci_driver.minor_start = SCI_MINOR_START;
 	sci_driver.num = SCI_NPORTS;
@@ -1057,7 +1061,11 @@ static int sci_init_drivers(void)
 #endif
 
 	sci_callout_driver = sci_driver;
+#ifdef CONFIG_DEVFS_FS
+	sci_callout_driver.name = "cusc/%d";
+#else
 	sci_callout_driver.name = "cusc";
+#endif
 	sci_callout_driver.major = SCI_MAJOR+1;
 	sci_callout_driver.subtype = SERIAL_TYPE_CALLOUT;
 	sci_callout_driver.read_proc = NULL;
@@ -1094,34 +1102,54 @@ static int sci_init_drivers(void)
 	return 0;
 }
 
-int __init sci_init(void)
+static int sci_request_irq(struct sci_port *port)
 {
-	struct sci_port *port;
-	int i, j;
+	int i;
 	void (*handlers[4])(int irq, void *ptr, struct pt_regs *regs) = {
 		sci_er_interrupt, sci_rx_interrupt, sci_tx_interrupt,
 		sci_br_interrupt,
 	};
 
-	printk("SuperH SCI(F) driver initialized\n");
+	for (i=0; i<4; i++) {
+		if (!port->irqs[i]) continue;
+		if (request_irq(port->irqs[i], handlers[i], SA_INTERRUPT,
+				"sci", port)) {
+			printk(KERN_ERR "sci: Cannot allocate irq.\n");
+			return -ENODEV;
+		}
+	}
+	return 0;
+}
+
+static void sci_free_irq(struct sci_port *port)
+{
+	int i;
+
+	for (i=0; i<4; i++) {
+		if (!port->irqs[i]) continue;
+		free_irq(port->irqs[i], port);
+	}
+}
+
+static char banner[] __initdata =
+	KERN_INFO "SuperH SCI(F) driver initialized\n";
+
+int __init sci_init(void)
+{
+	struct sci_port *port;
+	int j;
+
+	printk("%s", banner);
 
 	for (j=0; j<SCI_NPORTS; j++) {
 		port = &sci_ports[j];
-		printk("ttySC%d at 0x%08x is a %s\n", j, port->base,
+		printk(KERN_INFO "ttySC%d at 0x%08x is a %s\n", j, port->base,
 		       (port->type == PORT_SCI) ? "SCI" : "SCIF");
-		for (i=0; i<4; i++) {
-			if (!port->irqs[i]) continue;
-			if (request_irq(port->irqs[i], handlers[i], SA_INTERRUPT,
-					"sci", port)) {
-				printk(KERN_ERR "sci: Cannot allocate irq.\n");
-				return -ENODEV;
-			}
-		}
 	}
 
 	sci_init_drivers();
 
-#ifdef CONFIG_DEBUG_KERNEL_WITH_GDB_STUB
+#ifdef CONFIG_SH_STANDARD_BIOS
 	sh_bios_gdb_detach();
 #endif
 	return 0;		/* Return -EIO when not detected */
@@ -1135,11 +1163,6 @@ module_init(sci_init);
 
 void cleanup_module(void)
 {
-	int i;
-
-	for (i=SCI_ERI_IRQ; i<SCI_TEI_IRQ; i++) /* XXX: irq_end?? */
-		free_irq(i, port);
-
 	tty_unregister_driver(&sci_driver);
 	tty_unregister_driver(&sci_callout_driver);
 }

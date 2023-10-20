@@ -25,8 +25,7 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 	int __res = 1;							\
 	struct elfhdr *__h = (hdr);					\
 									\
-	if ((__h->e_machine != EM_MIPS) &&				\
-	    (__h->e_machine != EM_MIPS_RS4_BE))				\
+	if (__h->e_machine != EM_MIPS)					\
 		__res = 0;						\
 	if (__h->e_flags & EF_MIPS_ARCH)				\
 		__res = 0;						\
@@ -35,17 +34,7 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 })
 
 /* This one accepts IRIX binaries.  */
-#define irix_elf_check_arch(hdr)					\
-({									\
-	int __res = 1;							\
-	struct elfhdr *__h = (hdr);					\
-									\
-	if ((__h->e_machine != EM_MIPS) &&				\
-	    (__h->e_machine != EM_MIPS_RS4_BE))				\
-		__res = 0;						\
-									\
-	__res;								\
-})
+#define irix_elf_check_arch(hdr)	((hdr)->e_machine == EM_MIPS)
 
 /*
  * These are used to set parameters in the core dumps.
@@ -100,7 +89,7 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
    the loader.  We need to make sure that it is out of the way of the program
    that it will "exec", and that there is sufficient room for the brk.  */
 
-#define ELF_ET_DYN_BASE         (2 * TASK_SIZE / 3)
+#define ELF_ET_DYN_BASE         (TASK_SIZE / 3 * 2)
 
 #ifdef __KERNEL__
 #define SET_PERSONALITY(ex, ibcs2) set_personality((ibcs2)?PER_SVR4:PER_LINUX)

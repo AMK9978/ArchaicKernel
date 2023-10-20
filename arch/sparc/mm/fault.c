@@ -1,4 +1,4 @@
-/* $Id: fault.c,v 1.118 2000/12/29 07:52:41 anton Exp $
+/* $Id: fault.c,v 1.121 2001/10/30 04:54:22 davem Exp $
  * fault.c:  Page fault handlers for the Sparc.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -36,8 +36,6 @@
 
 extern struct sparc_phys_banks sp_banks[SPARC_PHYS_BANKS];
 extern int prom_node_root;
-
-struct linux_romvec *romvec;
 
 /* At boot time we determine these two values necessary for setting
  * up the segment maps and page table entries (pte's).
@@ -179,11 +177,11 @@ asmlinkage int lookup_fault(unsigned long pc, unsigned long ret_pc,
 	memset (&regs, 0, sizeof (regs));
 	regs.pc = pc;
 	regs.npc = pc + 4;
-	__asm__ __volatile__ ("
-		rd %%psr, %0
-		nop
-		nop
-		nop" : "=r" (regs.psr));
+	__asm__ __volatile__ (
+		"rd %%psr, %0\n\t"
+		"nop\n\t"
+		"nop\n\t"
+		"nop\n" : "=r" (regs.psr));
 	unhandled_fault (address, current, &regs);
 	/* Not reached */
 	return 0;
@@ -224,7 +222,7 @@ asmlinkage void do_sparc_fault(struct pt_regs *regs, int text_fault, int write,
         if (in_interrupt() || !mm)
                 goto no_context;
 
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 
 	/*
 	 * The kernel referencing a bad kernel pointer can lock up
@@ -274,7 +272,7 @@ good_area:
 	default:
 		goto out_of_memory;
 	}
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	return;
 
 	/*
@@ -282,7 +280,7 @@ good_area:
 	 * Fix it, but check if it's kernel or user first..
 	 */
 bad_area:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
 bad_area_nosemaphore:
 	/* User mode accesses just cause a SIGSEGV */
@@ -338,14 +336,14 @@ no_context:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	printk("VM: killing process %s\n", tsk->comm);
 	if (from_user)
 		do_exit(SIGKILL);
 	goto no_context;
 
 do_sigbus:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;
 	info.si_code = BUS_ADRERR;
@@ -479,7 +477,7 @@ inline void force_user_fault(unsigned long address, int write)
 	printk("wf<pid=%d,wr=%d,addr=%08lx>\n",
 	       tsk->pid, write, address);
 #endif
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 	vma = find_vma(mm, address);
 	if(!vma)
 		goto bad_area;
@@ -500,10 +498,10 @@ good_area:
 	}
 	if (!handle_mm_fault(mm, vma, address, write))
 		goto do_sigbus;
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	return;
 bad_area:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 #if 0
 	printk("Window whee %s [%d]: segfaults at %08lx\n",
 	       tsk->comm, tsk->pid, address);
@@ -518,7 +516,7 @@ bad_area:
 	return;
 
 do_sigbus:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;
 	info.si_code = BUS_ADRERR;

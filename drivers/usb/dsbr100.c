@@ -60,10 +60,18 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/videodev.h>
 #include <linux/usb.h>
+#include <linux/smp_lock.h>
+
+/*
+ * Version Information
+ */
+#define DRIVER_VERSION "v0.24"
+#define DRIVER_AUTHOR "Markus Demleitner <msdemlei@tucana.harvard.edu>"
+#define DRIVER_DESC "D-Link DSB-R100 USB radio driver"
 
 #define DSB100_VENDOR 0x04b4
 #define DSB100_PRODUCT 0x1002
@@ -78,6 +86,8 @@ static int usb_dsbr100_ioctl(struct video_device *dev, unsigned int cmd,
 static int usb_dsbr100_open(struct video_device *dev, int flags);
 static void usb_dsbr100_close(struct video_device *dev);
 
+static int radio_nr = -1;
+MODULE_PARM(radio_nr, "i");
 
 typedef struct
 {	struct urb readurb,writeurb;
@@ -185,10 +195,14 @@ static void usb_dsbr100_disconnect(struct usb_device *dev, void *ptr)
 {
 	usb_dsbr100 *radio=ptr;
 
-	if (users)
+	lock_kernel();
+	if (users) {
+		unlock_kernel();
 		return;
+	}
 	kfree(radio);
 	usb_dsbr100_radio.priv = NULL;
+	unlock_kernel();
 }
 
 static int usb_dsbr100_ioctl(struct video_device *dev, unsigned int cmd, 
@@ -330,10 +344,11 @@ static int __init dsbr100_init(void)
 {
 	usb_dsbr100_radio.priv = NULL;
 	usb_register(&usb_dsbr100_driver);
-	if (video_register_device(&usb_dsbr100_radio,VFL_TYPE_RADIO)==-1) {	
+	if (video_register_device(&usb_dsbr100_radio,VFL_TYPE_RADIO,radio_nr)==-1) {	
 		warn("couldn't register video device");
 		return -EINVAL;
 	}
+	info(DRIVER_VERSION ":" DRIVER_DESC);
 	return 0;
 }
 
@@ -350,8 +365,9 @@ static void __exit dsbr100_exit(void)
 module_init (dsbr100_init);
 module_exit (dsbr100_exit);
 
-MODULE_AUTHOR("Markus Demleitner <msdemlei@tucana.harvard.edu>");
-MODULE_DESCRIPTION("D-Link DSB-R100 USB radio driver");
+MODULE_AUTHOR( DRIVER_AUTHOR );
+MODULE_DESCRIPTION( DRIVER_DESC );
+MODULE_LICENSE("GPL");
 
 /*
 vi: ts=8

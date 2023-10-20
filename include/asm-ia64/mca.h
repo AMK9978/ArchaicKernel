@@ -1,6 +1,6 @@
 /*
- * File: 	mca.h
- * Purpose: 	Machine check handling specific defines
+ * File:	mca.h
+ * Purpose:	Machine check handling specific defines
  *
  * Copyright (C) 1999 Silicon Graphics, Inc.
  * Copyright (C) Vijay Chander (vijay@engr.sgi.com)
@@ -8,7 +8,7 @@
  */
 
 /* XXX use this temporary define for MP systems trying to INIT */
-#define SAL_MPINIT_WORKAROUND
+#undef SAL_MPINIT_WORKAROUND
 
 #ifndef _ASM_IA64_MCA_H
 #define _ASM_IA64_MCA_H
@@ -18,7 +18,6 @@
 #include <asm/param.h>
 #include <asm/sal.h>
 #include <asm/processor.h>
-#include <asm/hw_irq.h>
 
 /* These are the return codes from all the IA64_MCA specific interfaces */
 typedef	int ia64_mca_return_code_t;
@@ -30,11 +29,6 @@ enum {
 
 #define IA64_MCA_RENDEZ_TIMEOUT		(100 * HZ)	/* 1000 milliseconds */
 
-/* Interrupt vectors reserved for MC handling. */
-#define IA64_MCA_RENDEZ_INT_VECTOR	MCA_RENDEZ_IRQ	/* Rendez interrupt */
-#define IA64_MCA_WAKEUP_INT_VECTOR	MCA_WAKEUP_IRQ	/* Wakeup interrupt */
-#define IA64_MCA_CMC_INT_VECTOR		CMC_IRQ	/* Correctable machine check interrupt */
-
 #define IA64_CMC_INT_DISABLE		0
 #define IA64_CMC_INT_ENABLE		1
 
@@ -45,7 +39,7 @@ typedef u64 millisec_t;
 typedef union cmcv_reg_u {
 	u64	cmcv_regval;
 	struct	{
-		u64  	cmcr_vector		: 8;
+		u64	cmcr_vector		: 8;
 		u64	cmcr_reserved1		: 4;
 		u64	cmcr_ignored1		: 1;
 		u64	cmcr_reserved2		: 3;
@@ -63,21 +57,19 @@ typedef union cmcv_reg_u {
 #define IA64_INIT_HANDLER_SIZE		0x10
 
 enum {
-	IA64_MCA_RENDEZ_CHECKIN_NOTDONE	= 	0x0,
-	IA64_MCA_RENDEZ_CHECKIN_DONE 	= 	0x1
+	IA64_MCA_RENDEZ_CHECKIN_NOTDONE	=	0x0,
+	IA64_MCA_RENDEZ_CHECKIN_DONE	=	0x1
 };
-
-#define IA64_MAXCPUS	64	/* Need to do something about this */
 
 /* Information maintained by the MC infrastructure */
 typedef struct ia64_mc_info_s {
-	u64		imi_mca_handler;		
+	u64		imi_mca_handler;
 	size_t		imi_mca_handler_size;
 	u64		imi_monarch_init_handler;
 	size_t		imi_monarch_init_handler_size;
 	u64		imi_slave_init_handler;
 	size_t		imi_slave_init_handler_size;
-	u8		imi_rendez_checkin[IA64_MAXCPUS];
+	u8		imi_rendez_checkin[NR_CPUS];
 
 } ia64_mc_info_t;
 
@@ -85,7 +77,7 @@ typedef struct ia64_mc_info_s {
  * handoff
  */
 enum {
-	IA64_MCA_RENDEZ_NOT_RQD 		= 	0x0,
+	IA64_MCA_RENDEZ_NOT_RQD		=	0x0,
 	IA64_MCA_RENDEZ_DONE_WITHOUT_INIT	=	0x1,
 	IA64_MCA_RENDEZ_DONE_WITH_INIT		=	0x2,
 	IA64_MCA_RENDEZ_FAILURE			=	-1
@@ -103,12 +95,12 @@ typedef struct ia64_mca_sal_to_os_state_s {
 } ia64_mca_sal_to_os_state_t;
 
 enum {
-	IA64_MCA_CORRECTED 	= 	0x0,	/* Error has been corrected by OS_MCA */
+	IA64_MCA_CORRECTED	=	0x0,	/* Error has been corrected by OS_MCA */
 	IA64_MCA_WARM_BOOT	=	-1,	/* Warm boot of the system need from SAL */
 	IA64_MCA_COLD_BOOT	=	-2,	/* Cold boot of the system need from SAL */
 	IA64_MCA_HALT		=	-3	/* System to be halted by SAL */
 };
-	
+
 typedef struct ia64_mca_os_to_sal_state_s {
 	u64		imots_os_status;	/*   OS status to SAL as to what happened
 						 *   with the MCA handling.
@@ -134,18 +126,22 @@ extern void ia64_slave_init_handler(void);
 extern void ia64_mca_rendez_int_handler(int,void *,struct pt_regs *);
 extern void ia64_mca_wakeup_int_handler(int,void *,struct pt_regs *);
 extern void ia64_mca_cmc_int_handler(int,void *,struct pt_regs *);
-extern void ia64_log_print(int,int,prfunc_t);
+extern void ia64_mca_cpe_int_handler(int,void *,struct pt_regs *);
+extern void ia64_log_print(int,prfunc_t);
+extern void ia64_mca_cmc_vector_setup(void);
+extern void ia64_mca_check_errors( void );
+extern u64  ia64_log_get(int, prfunc_t);
 
 #define PLATFORM_CALL(fn, args)	printk("Platform call TBD\n")
 
-#undef 	MCA_TEST
+#undef	MCA_TEST
 
-#define IA64_MCA_DEBUG_INFO 1
+#undef IA64_MCA_DEBUG_INFO
 
 #if defined(IA64_MCA_DEBUG_INFO)
-# define IA64_MCA_DEBUG	printk
+# define IA64_MCA_DEBUG(fmt...)	printk(fmt)
 #else
-# define IA64_MCA_DEBUG
+# define IA64_MCA_DEBUG(fmt...)
 #endif
 #endif /* !__ASSEMBLY__ */
 #endif /* _ASM_IA64_MCA_H */

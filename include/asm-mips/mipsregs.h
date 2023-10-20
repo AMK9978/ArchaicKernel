@@ -1,14 +1,16 @@
-/* $Id: mipsregs.h,v 1.6 1999/07/26 19:42:43 harald Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1994, 1995, 1996, 1997 by Ralf Baechle
+ * Copyright (C) 1994, 1995, 1996, 1997, 2000, 2001 by Ralf Baechle
+ * Copyright (C) 2000 Silicon Graphics, Inc.
  * Modified for further R[236]000 support by Paul M. Antoine, 1996.
+ * Kevin D. Kissell, kevink@mips.com and Carsten Langgaard, carstenl@mips.com
+ * Copyright (C) 2000 MIPS Technologies, Inc.  All rights reserved.
  */
-#ifndef __ASM_MIPS_MIPSREGS_H
-#define __ASM_MIPS_MIPSREGS_H
+#ifndef _ASM_MIPSREGS_H
+#define _ASM_MIPSREGS_H
 
 #include <linux/linkage.h>
 
@@ -34,6 +36,7 @@
 #define CP0_CONTEXT $4
 #define CP0_PAGEMASK $5
 #define CP0_WIRED $6
+#define CP0_INFO $7
 #define CP0_BADVADDR $8
 #define CP0_COUNT $9
 #define CP0_ENTRYHI $10
@@ -70,6 +73,12 @@
 #define CP0_IWATCH $18
 #define CP0_DWATCH $19
 
+/* 
+ * Coprocessor 0 Set 1 register names
+ */
+#define CP0_S1_DERRADDR0  $26
+#define CP0_S1_DERRADDR1  $27
+#define CP0_S1_INTCONTROL $20
 /*
  * Coprocessor 1 (FPU) register names
  */
@@ -77,8 +86,68 @@
 #define CP1_STATUS     $31
 
 /*
+ * FPU Status Register Values
+ */
+/*
+ * Status Register Values
+ */
+
+#define FPU_CSR_FLUSH   0x01000000      /* flush denormalised results to 0 */
+#define FPU_CSR_COND    0x00800000      /* $fcc0 */
+#define FPU_CSR_COND0   0x00800000      /* $fcc0 */
+#define FPU_CSR_COND1   0x02000000      /* $fcc1 */
+#define FPU_CSR_COND2   0x04000000      /* $fcc2 */
+#define FPU_CSR_COND3   0x08000000      /* $fcc3 */
+#define FPU_CSR_COND4   0x10000000      /* $fcc4 */
+#define FPU_CSR_COND5   0x20000000      /* $fcc5 */
+#define FPU_CSR_COND6   0x40000000      /* $fcc6 */
+#define FPU_CSR_COND7   0x80000000      /* $fcc7 */
+
+/*
+ * X the exception cause indicator
+ * E the exception enable
+ * S the sticky/flag bit
+*/
+#define FPU_CSR_ALL_X 0x0003f000
+#define FPU_CSR_UNI_X   0x00020000
+#define FPU_CSR_INV_X   0x00010000
+#define FPU_CSR_DIV_X   0x00008000
+#define FPU_CSR_OVF_X   0x00004000
+#define FPU_CSR_UDF_X   0x00002000
+#define FPU_CSR_INE_X   0x00001000
+
+#define FPU_CSR_ALL_E   0x00000f80
+#define FPU_CSR_INV_E   0x00000800
+#define FPU_CSR_DIV_E   0x00000400
+#define FPU_CSR_OVF_E   0x00000200
+#define FPU_CSR_UDF_E   0x00000100
+#define FPU_CSR_INE_E   0x00000080
+
+#define FPU_CSR_ALL_S   0x0000007c
+#define FPU_CSR_INV_S   0x00000040
+#define FPU_CSR_DIV_S   0x00000020
+#define FPU_CSR_OVF_S   0x00000010
+#define FPU_CSR_UDF_S   0x00000008
+#define FPU_CSR_INE_S   0x00000004
+
+/* rounding mode */
+#define FPU_CSR_RN      0x0     /* nearest */
+#define FPU_CSR_RZ      0x1     /* towards zero */
+#define FPU_CSR_RU      0x2     /* towards +Infinity */
+#define FPU_CSR_RD      0x3     /* towards -Infinity */
+
+
+/*
  * Values for PageMask register
  */
+#include <linux/config.h>
+#ifdef CONFIG_CPU_VR41XX
+#define PM_1K   0x00000000
+#define PM_4K   0x00001800
+#define PM_16K  0x00007800
+#define PM_64K  0x0001f800
+#define PM_256K 0x0007f800
+#else
 #define PM_4K   0x00000000
 #define PM_16K  0x00006000
 #define PM_64K  0x0001e000
@@ -86,6 +155,7 @@
 #define PM_1M   0x001fe000
 #define PM_4M   0x007fe000
 #define PM_16M  0x01ffe000
+#endif
 
 /*
  * Values used for computation of new tlb entries
@@ -111,6 +181,16 @@
         : "=r" (__res));                                        \
         __res;})
 
+#define read_32bit_cp0_set1_register(source)                    \
+({ int __res;                                                   \
+        __asm__ __volatile__(                                   \
+	".set\tpush\n\t"					\
+	".set\treorder\n\t"					\
+        "cfc0\t%0,"STR(source)"\n\t"                            \
+	".set\tpop"						\
+        : "=r" (__res));                                        \
+        __res;})
+
 /*
  * For now use this only with interrupts disabled!
  */
@@ -129,12 +209,34 @@
 	"nop"							\
         : : "r" (value));
 
+#define write_32bit_cp0_set1_register(register,value)           \
+        __asm__ __volatile__(                                   \
+        "ctc0\t%0,"STR(register)"\n\t"				\
+	"nop"							\
+        : : "r" (value));
+
 #define write_64bit_cp0_register(register,value)                \
         __asm__ __volatile__(                                   \
         ".set\tmips3\n\t"                                       \
         "dmtc0\t%0,"STR(register)"\n\t"                         \
         ".set\tmips0"                                           \
         : : "r" (value))
+
+/* 
+ * This should be changed when we get a compiler that support the MIPS32 ISA. 
+ */
+#define read_mips32_cp0_config1()                               \
+({ int __res;                                                   \
+        __asm__ __volatile__(                                   \
+	".set\tnoreorder\n\t"                                   \
+	".set\tnoat\n\t"                                        \
+     	".word\t0x40018001\n\t"                                 \
+	"move\t%0,$1\n\t"                                       \
+	".set\tat\n\t"                                          \
+	".set\treorder"                                         \
+	:"=r" (__res));                                         \
+        __res;})
+
 /*
  * R4x00 interrupt enable / cause bits
  */
@@ -166,7 +268,31 @@
  */
 #define __BUILD_SET_CP0(name,register)                          \
 extern __inline__ unsigned int                                  \
-set_cp0_##name(unsigned int change, unsigned int new)           \
+set_cp0_##name(unsigned int set)				\
+{                                                               \
+	unsigned int res;                                       \
+                                                                \
+	res = read_32bit_cp0_register(register);                \
+	res |= set;						\
+	write_32bit_cp0_register(register, res);        	\
+                                                                \
+	return res;                                             \
+}								\
+								\
+extern __inline__ unsigned int                                  \
+clear_cp0_##name(unsigned int clear)				\
+{                                                               \
+	unsigned int res;                                       \
+                                                                \
+	res = read_32bit_cp0_register(register);                \
+	res &= ~clear;						\
+	write_32bit_cp0_register(register, res);		\
+                                                                \
+	return res;                                             \
+}								\
+								\
+extern __inline__ unsigned int                                  \
+change_cp0_##name(unsigned int change, unsigned int new)	\
 {                                                               \
 	unsigned int res;                                       \
                                                                 \
@@ -184,42 +310,6 @@ __BUILD_SET_CP0(cause,CP0_CAUSE)
 __BUILD_SET_CP0(config,CP0_CONFIG)
 
 #endif /* defined (_LANGUAGE_ASSEMBLY) */
-
-/*
- * Inline code for use of the ll and sc instructions
- *
- * FIXME: This instruction is only available on MIPS ISA >=2.
- * Since these operations are only being used for atomic operations
- * the easiest workaround for the R[23]00 is to disable interrupts.
- * This fails for R3000 SMP machines which use that many different
- * technologies as replacement that it is difficult to create even
- * just a hook for for all machines to hook into.  The only good
- * thing is that there is currently no R3000 SMP machine on the
- * Linux/MIPS target list ...
- */
-#define load_linked(addr)                                       \
-({                                                              \
-	unsigned int __res;                                     \
-                                                                \
-	__asm__ __volatile__(                                   \
-	"ll\t%0,(%1)"                                           \
-	: "=r" (__res)                                          \
-	: "r" ((unsigned long) (addr)));                        \
-                                                                \
-	__res;                                                  \
-})
-
-#define store_conditional(addr,value)                           \
-({                                                              \
-	int	__res;                                          \
-                                                                \
-	__asm__ __volatile__(                                   \
-	"sc\t%0,(%2)"                                           \
-	: "=r" (__res)                                          \
-	: "0" (value), "r" (addr));                             \
-                                                                \
-	__res;                                                  \
-})
 
 /*
  * Bitfields in the R4xx0 cp0 status register
@@ -249,13 +339,47 @@ __BUILD_SET_CP0(config,CP0_CONFIG)
 /* bits 6 & 7 are reserved on R[23]000 */
 #define ST0_ISC			0x00010000
 #define ST0_SWC			0x00020000
+#define ST0_CM			0x00080000
 
 /*
  * Bits specific to the R4640/R4650
  */
-#define ST0_UM                 <1   <<  4)
+#define ST0_UM                 (1   <<  4)
 #define ST0_IL                 (1   << 23)
 #define ST0_DL                 (1   << 24)
+
+/*
+ * Bitfields in the TX39 family CP0 Configuration Register 3
+ */
+#define TX39_CONF_ICS_SHIFT	19
+#define TX39_CONF_ICS_MASK	0x00380000
+#define TX39_CONF_ICS_1KB 	0x00000000
+#define TX39_CONF_ICS_2KB 	0x00080000
+#define TX39_CONF_ICS_4KB 	0x00100000
+#define TX39_CONF_ICS_8KB 	0x00180000
+#define TX39_CONF_ICS_16KB 	0x00200000
+
+#define TX39_CONF_DCS_SHIFT	16
+#define TX39_CONF_DCS_MASK	0x00070000
+#define TX39_CONF_DCS_1KB 	0x00000000
+#define TX39_CONF_DCS_2KB 	0x00010000
+#define TX39_CONF_DCS_4KB 	0x00020000
+#define TX39_CONF_DCS_8KB 	0x00030000
+#define TX39_CONF_DCS_16KB 	0x00040000
+
+#define TX39_CONF_CWFON 	0x00004000
+#define TX39_CONF_WBON  	0x00002000
+#define TX39_CONF_RF_SHIFT	10
+#define TX39_CONF_RF_MASK	0x00000c00
+#define TX39_CONF_DOZE		0x00000200
+#define TX39_CONF_HALT		0x00000100
+#define TX39_CONF_LOCK		0x00000080
+#define TX39_CONF_ICE		0x00000020
+#define TX39_CONF_DCE		0x00000010
+#define TX39_CONF_IRSIZE_SHIFT	2
+#define TX39_CONF_IRSIZE_MASK	0x0000000c
+#define TX39_CONF_DRSIZE_SHIFT	0
+#define TX39_CONF_DRSIZE_MASK	0x00000003
 
 /*
  * Status register bits available in all MIPS CPUs.
@@ -277,6 +401,22 @@ __BUILD_SET_CP0(config,CP0_CONFIG)
 #define  STATUSF_IP6		(1   << 14)
 #define  STATUSB_IP7		15
 #define  STATUSF_IP7		(1   << 15)
+#define  STATUSB_IP8		0
+#define  STATUSF_IP8		(1   << 0)
+#define  STATUSB_IP9		1
+#define  STATUSF_IP9		(1   << 1)
+#define  STATUSB_IP10		2
+#define  STATUSF_IP10		(1   << 2)
+#define  STATUSB_IP11		3
+#define  STATUSF_IP11		(1   << 3)
+#define  STATUSB_IP12		4
+#define  STATUSF_IP12		(1   << 4)
+#define  STATUSB_IP13		5
+#define  STATUSF_IP13		(1   << 5)
+#define  STATUSB_IP14		6
+#define  STATUSF_IP14		(1   << 6)
+#define  STATUSB_IP15		7
+#define  STATUSF_IP15		(1   << 7)
 #define ST0_CH			0x00040000
 #define ST0_SR			0x00100000
 #define ST0_BEV			0x00400000
@@ -292,7 +432,7 @@ __BUILD_SET_CP0(config,CP0_CONFIG)
 /*
  * Bitfields and bit numbers in the coprocessor 0 cause register.
  *
- * Refer to to your MIPS R4xx0 manual, chapter 5 for explanation.
+ * Refer to your MIPS R4xx0 manual, chapter 5 for explanation.
  */
 #define  CAUSEB_EXCCODE		2
 #define  CAUSEF_EXCCODE		(31  <<  2)
@@ -395,14 +535,4 @@ __BUILD_SET_CP0(config,CP0_CONFIG)
 #define CEB_KERNEL	2	/* Count events in kernel mode EXL = ERL = 0 */
 #define CEB_EXL		1	/* Count events with EXL = 1, ERL = 0 */
 
-#ifndef _LANGUAGE_ASSEMBLY
-/*
- * Functions to access the performance counter and control registers
- */
-extern asmlinkage unsigned int read_perf_cntr(unsigned int counter);
-extern asmlinkage void write_perf_cntr(unsigned int counter, unsigned int val);
-extern asmlinkage unsigned int read_perf_cntl(unsigned int counter);
-extern asmlinkage void write_perf_cntl(unsigned int counter, unsigned int val);
-#endif
-
-#endif /* __ASM_MIPS_MIPSREGS_H */
+#endif /* _ASM_MIPSREGS_H */

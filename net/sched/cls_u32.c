@@ -162,7 +162,7 @@ check_terminal:
 		if (!(n->sel.flags&(TC_U32_VAROFFSET|TC_U32_OFFSET|TC_U32_EAT)))
 			goto next_ht;
 
-		if (n->sel.flags&(TC_U32_EAT|TC_U32_VAROFFSET)) {
+		if (n->sel.flags&(TC_U32_OFFSET|TC_U32_VAROFFSET)) {
 			off2 = n->sel.off + 3;
 			if (n->sel.flags&TC_U32_VAROFFSET)
 				off2 += ntohs(n->sel.offmask & *(u16*)(ptr+n->sel.offoff)) >>n->sel.offshift;
@@ -252,7 +252,7 @@ static u32 gen_new_htid(struct tc_u_common *tp_c)
 	do {
 		if (++tp_c->hgenerator == 0x7FF)
 			tp_c->hgenerator = 1;
-	} while (i>0 && u32_lookup_ht(tp_c, (tp_c->hgenerator|0x800)<<20));
+	} while (--i>0 && u32_lookup_ht(tp_c, (tp_c->hgenerator|0x800)<<20));
 
 	return i > 0 ? (tp_c->hgenerator|0x800)<<20 : 0;
 }
@@ -726,3 +726,4 @@ void cleanup_module(void)
 	unregister_tcf_proto_ops(&cls_u32_ops);
 }
 #endif
+MODULE_LICENSE("GPL");

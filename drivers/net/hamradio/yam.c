@@ -35,6 +35,9 @@
  *   0.6 F6FBB 25.08.98  Added 1200Bds format
  *   0.7 F6FBB 12.09.98  Added to the kernel configuration
  *   0.8 F6FBB 14.10.98  Fixed slottime/persistance timing bug
+ *       OK1ZIA 2.09.01  Fixed "kfree_skb on hard IRQ" 
+ *                       using dev_kfree_skb_any(). (important in 2.4 kernel)
+ *   
  */
 
 /*****************************************************************************/
@@ -45,7 +48,7 @@
 #include <linux/net.h>
 #include <linux/in.h>
 #include <linux/if.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
@@ -81,7 +84,7 @@
 /* --------------------------------------------------------------------- */
 
 static const char yam_drvname[] = "yam";
-static const char yam_drvinfo[] __initdata = KERN_INFO "YAM driver version 0.8 by F1OAT/F6FBB\n";
+static char yam_drvinfo[] __initdata = KERN_INFO "YAM driver version 0.8 by F1OAT/F6FBB\n";
 
 /* --------------------------------------------------------------------- */
 
@@ -649,16 +652,16 @@ static void yam_tx_byte(struct net_device *dev, struct yam_port *yp)
 			yp->tx_state = TX_DATA;
 			if (skb->data[0] != 0) {
 /*                              do_kiss_params(s, skb->data, skb->len); */
-				dev_kfree_skb(skb);
+				dev_kfree_skb_any(skb);
 				break;
 			}
 			yp->tx_len = skb->len - 1;	/* strip KISS byte */
 			if (yp->tx_len >= YAM_MAX_FRAME || yp->tx_len < 2) {
-				dev_kfree_skb(skb);
+        			dev_kfree_skb_any(skb);
 				break;
 			}
 			memcpy(yp->tx_buf, skb->data + 1, yp->tx_len);
-			dev_kfree_skb(skb);
+			dev_kfree_skb_any(skb);
 			yp->tx_count = 0;
 			yp->tx_crcl = 0x21;
 			yp->tx_crch = 0xf3;
@@ -858,7 +861,7 @@ static int yam_open(struct net_device *dev)
 		return -EIO;
 	}
 	outb(0, IER(dev->base_addr));
-	if (request_irq(dev->irq, yam_interrupt, SA_INTERRUPT | SA_SHIRQ, dev->name, NULL)) {
+	if (request_irq(dev->irq, yam_interrupt, SA_INTERRUPT | SA_SHIRQ, dev->name, dev)) {
 		printk(KERN_ERR "%s: irq %d busy\n", dev->name, dev->irq);
 		return -EBUSY;
 	}
@@ -878,7 +881,6 @@ static int yam_open(struct net_device *dev)
 
 	printk(KERN_INFO "%s at iobase 0x%lx irq %u uart %s\n", dev->name, dev->base_addr, dev->irq,
 		   uart_str[u]);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -897,7 +899,7 @@ static int yam_close(struct net_device *dev)
 	outb(0, IER(dev->base_addr));
 	outb(1, MCR(dev->base_addr));
 	/* Remove IRQ handler if last */
-	free_irq(dev->irq, NULL);
+	free_irq(dev->irq,dev);
 	release_region(dev->base_addr, YAM_EXTENT);
 	netif_stop_queue(dev);
 	while ((skb = skb_dequeue(&yp->send_queue)))
@@ -905,7 +907,6 @@ static int yam_close(struct net_device *dev)
 
 	printk(KERN_INFO "%s: close yam at iobase 0x%lx irq %u\n",
 		   yam_drvname, dev->base_addr, dev->irq);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -938,14 +939,17 @@ static int yam_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 	case SIOCYAMSMCS:
 		if (netif_running(dev))
 			return -EINVAL;		/* Cannot change this parameter when up */
-		ym = kmalloc(sizeof(struct yamdrv_ioctl_mcs), GFP_KERNEL);
-		if(ym==NULL)
+		if ((ym = kmalloc(sizeof(struct yamdrv_ioctl_mcs), GFP_KERNEL)) == NULL)
 			return -ENOBUFS;
 		ym->bitrate = 9600;
-		if (copy_from_user(ym, ifr->ifr_data, sizeof(struct yamdrv_ioctl_mcs)))
-			 return -EFAULT;
-		if (ym->bitrate > YAM_MAXBITRATE)
+		if (copy_from_user(ym, ifr->ifr_data, sizeof(struct yamdrv_ioctl_mcs))) {
+			kfree(ym);
+			return -EFAULT;
+		}
+		if (ym->bitrate > YAM_MAXBITRATE) {
+			kfree(ym);
 			return -EINVAL;
+		}
 		add_mcs(ym->bits, ym->bitrate);
 		kfree(ym);
 		break;
@@ -1070,7 +1074,6 @@ static int yam_probe(struct net_device *dev)
 	dev->hard_start_xmit = yam_send_packet;
 	dev->get_stats = yam_get_stats;
 
-	dev_init_buffers(dev);
 	skb_queue_head_init(&yp->send_queue);
 
 #if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
@@ -1129,8 +1132,11 @@ static int __init yam_init_driver(void)
 
 		if (register_netdev(dev)) {
 			printk(KERN_WARNING "yam: cannot register net device %s\n", dev->name);
+			dev->priv = NULL;
 			return -ENXIO;
 		}
+
+		SET_MODULE_OWNER(dev);
 	}
 
 	yam_timer.function = yam_dotimer;

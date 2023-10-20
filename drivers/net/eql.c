@@ -6,7 +6,7 @@
  *
  *
  *	This software may be used and distributed according to the terms
- *	of the GNU Public License, incorporated herein by reference.
+ *	of the GNU General Public License, incorporated herein by reference.
  * 
  * The author may be reached as simon@ncm.com, or C/O
  *    NCM
@@ -15,9 +15,6 @@
  *    McLean VA 22101
  *    Phone: 1-703-847-0040 ext 103
  */
-
-static const char *version = 
-	"Equalizer1996: $Revision: 1.2.1 $ $Date: 1996/09/22 13:52:00 $ Simon Janes (simon@ncm.com)\n";
 
 /*
  * Sources:
@@ -124,6 +121,8 @@ static const char *version =
 
 #include <asm/uaccess.h>
 
+static char version[] __initdata = 
+	"Equalizer1996: $Revision: 1.2.1 $ $Date: 1996/09/22 13:52:00 $ Simon Janes (simon@ncm.com)\n";
 
 #ifndef EQL_DEBUG
 /* #undef EQL_DEBUG      -* print nothing at all, not even a boot-banner */
@@ -197,7 +196,7 @@ static void eql_timer(unsigned long param);	/*  */
 
 static int __init eql_init(struct net_device *dev)
 {
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 	/* static unsigned num_masters     = 0; */
 	equalizer_t *eql = 0;
 
@@ -240,8 +239,6 @@ static int __init eql_init(struct net_device *dev)
 	 *	eql-generic values. 
 	 */
 
-	dev_init_buffers(dev);
-	
 	/*
 	 *	Now we undo some of the things that eth_setup does
 	 * 	that we don't like 
@@ -362,9 +359,9 @@ static int eql_slave_xmit(struct sk_buff *skb, struct net_device *dev)
 #endif
 		skb->dev = slave_dev;
 		skb->priority = 1;
+		slave->bytes_queued += skb->len; 
 		dev_queue_xmit (skb);
 		eql->stats->tx_packets++;
-		slave->bytes_queued += skb->len; 
 	}
 	else
 	{
@@ -424,6 +421,8 @@ static int eql_enslave(struct net_device *dev, slaving_request_t *srqp)
 				slave_t *s = eql_new_slave ();
 				equalizer_t *eql = 
 					(equalizer_t *) master_dev->priv;
+				if (!s)
+					return -ENOMEM;
 				s->dev = slave_dev;
 				s->priority = srq.priority;
 				s->priority_bps = srq.priority;
@@ -721,6 +720,9 @@ static void eql_delete_slave_queue(slave_queue_t *queue)
 
 static int eql_insert_slave(slave_queue_t *queue, slave_t *slave)
 {
+	unsigned long flags;
+
+	save_flags(flags);
 	cli ();
 
 	if ( ! eql_is_full (queue) )
@@ -736,10 +738,10 @@ static int eql_insert_slave(slave_queue_t *queue, slave_t *slave)
 		slave->next = queue->head->next;
 		queue->head->next = slave;
 		queue->num_slaves++;
-		sti ();
+		restore_flags(flags);
 		return 0;
 	}
-	sti ();
+	restore_flags(flags);
 	return 1;
 }
 
@@ -748,7 +750,9 @@ static slave_t *eql_remove_slave(slave_queue_t *queue, slave_t *slave)
 {
 	slave_t *prev;
 	slave_t *curr;
+	unsigned long flags;
 
+	save_flags(flags);
 	cli ();
 
 	prev = queue->head;
@@ -766,10 +770,10 @@ static slave_t *eql_remove_slave(slave_queue_t *queue, slave_t *slave)
 		prev->next = curr->next;
 		queue->num_slaves--;
 		curr->dev->flags = curr->dev->flags & ~IFF_SLAVE;
-		sti();
+		restore_flags(flags);
 		return curr;
 	}
-	sti ();
+	restore_flags(flags);
 	return 0;			/* not found */
 }
 
@@ -784,6 +788,9 @@ static int eql_remove_slave_dev(slave_queue_t *queue, struct net_device *dev)
 
 	if (target != 0)
 	{
+		unsigned long flags;
+
+		save_flags(flags);
 		cli ();
 		prev = queue->head;
 		curr = prev->next;
@@ -794,7 +801,7 @@ static int eql_remove_slave_dev(slave_queue_t *queue, struct net_device *dev)
 		}
 		prev->next = curr->next;
 		queue->num_slaves--;
-		sti ();
+		restore_flags(flags);
 		eql_delete_slave (curr);
 		return 0;
 	}
@@ -847,8 +854,10 @@ static inline void eql_schedule_slaves(slave_queue_t *queue)
 		 */
 		unsigned long best_load = (unsigned long) ULONG_MAX;
 		slave_t *slave = 0;
+		unsigned long flags;
 		int i;
 
+		save_flags(flags);
 		cli ();
 		for (i = 1, slave = eql_first_slave (queue);
 			i <= eql_number_slaves (queue);
@@ -895,7 +904,7 @@ static inline void eql_schedule_slaves(slave_queue_t *queue)
 				}
 			}
 		} /* for */
-		sti ();
+		restore_flags(flags);
 		eql_set_best_slave (queue, best_slave);
 	} /* else */
 	if (slave_corpse != 0)
@@ -948,9 +957,11 @@ static void eql_timer(unsigned long param)
 	slave_t *slave;
 	slave_t *slave_corpse = 0;
 	int i;
+	unsigned long flags;
 	
 	if ( ! eql_is_empty (eql->queue) )
 	{
+		save_flags(flags);
 		cli ();
 		for (i = 1, slave = eql_first_slave (eql->queue);
 			i <= eql_number_slaves (eql->queue);
@@ -968,7 +979,7 @@ static void eql_timer(unsigned long param)
 					slave_corpse = slave;
 			}
 		}
-		sti ();
+		restore_flags(flags);
 		if (slave_corpse != 0)
 		{
 			printk ("eql: timer found dead slave, burying...\n");
@@ -1005,6 +1016,7 @@ static void __exit eql_cleanup_module(void)
 
 module_init(eql_init_module);
 module_exit(eql_cleanup_module);
+MODULE_LICENSE("GPL");
 
 /*
  * Local Variables: 

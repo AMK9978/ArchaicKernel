@@ -92,10 +92,11 @@ typedef struct slip_ctrl {
 	struct slip	ctrl;		/* SLIP things			*/
 	struct net_device	dev;		/* the device			*/
 } slip_ctrl_t;
-static slip_ctrl_t	**slip_ctrls = NULL;
+static slip_ctrl_t	**slip_ctrls;
 
 int slip_maxdev = SL_NRUNIT;		/* Can be overridden with insmod! */
 MODULE_PARM(slip_maxdev, "i");
+MODULE_PARM_DESC(slip_maxdev, "Maximum number of slip devices");
 
 static struct tty_ldisc	sl_ldisc;
 
@@ -387,6 +388,7 @@ sl_bump(struct slip *sl)
 	skb->mac.raw=skb->data;
 	skb->protocol=htons(ETH_P_IP);
 	netif_rx(skb);
+	sl->dev->last_rx = jiffies;
 	sl->rx_packets++;
 }
 
@@ -646,8 +648,6 @@ static int sl_init(struct net_device *dev)
 	dev->tx_queue_len	= 10;
 
 	SET_MODULE_OWNER(dev);
-
-	dev_init_buffers(dev);
 
 	/* New-style flags. */
 	dev->flags		= IFF_NOARP|IFF_POINTOPOINT|IFF_MULTICAST;
@@ -1516,3 +1516,4 @@ out:
 }
 
 #endif
+MODULE_LICENSE("GPL");

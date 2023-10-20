@@ -35,6 +35,7 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/smp_lock.h>
+#include <linux/seq_file.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -49,20 +50,12 @@
  * have a way to deal with that gracefully. Right now I used straightforward
  * wrappers, but this needs further analysis wrt potential overflows.
  */
-extern int get_cpuinfo(char *);
-extern int get_hardware_list(char *);
-extern int get_stram_list(char *);
-#ifdef CONFIG_DEBUG_MALLOC
-extern int get_malloc(char * buffer);
-#endif
 #ifdef CONFIG_MODULES
 extern int get_module_list(char *);
-extern int get_ksyms_list(char *, char **, off_t, int);
 #endif
 extern int get_device_list(char *);
 extern int get_partition_list(char *, char **, off_t, int);
 extern int get_filesystem_list(char *);
-extern int get_filesystem_info(char *);
 extern int get_exec_domain_list(char *);
 extern int get_irq_list(char *);
 extern int get_dma_list(char *);
@@ -140,57 +133,58 @@ static int meminfo_read_proc(char *page, char **start, off_t off,
 {
 	struct sysinfo i;
 	int len;
+	int pg_size ;
 
 /*
  * display in kilobytes.
  */
 #define K(x) ((x) << (PAGE_SHIFT - 10))
-#define B(x) ((x) << PAGE_SHIFT)
-        si_meminfo(&i);
-        si_swapinfo(&i);
-        len = sprintf(page, "        total:    used:    free:  shared: buffers:  cached:\n"
-                "Mem:  %8lu %8lu %8lu %8lu %8lu %8u\n"
-                "Swap: %8lu %8lu %8lu\n",
-                B(i.totalram), B(i.totalram-i.freeram), B(i.freeram),
-                B(i.sharedram), B(i.bufferram),
-                B(atomic_read(&page_cache_size)), B(i.totalswap),
-                B(i.totalswap-i.freeswap), B(i.freeswap));
-        /*
-         * Tagged format, for easy grepping and expansion.
-         * The above will go away eventually, once the tools
-         * have been updated.
-         */
-        len += sprintf(page+len,
-                "MemTotal:     %8lu kB\n"
-                "MemFree:      %8lu kB\n"
-                "MemShared:    %8lu kB\n"
-                "Buffers:      %8lu kB\n"
-                "Cached:       %8u kB\n"
+#define B(x) ((unsigned long long)(x) << PAGE_SHIFT)
+	si_meminfo(&i);
+	si_swapinfo(&i);
+	pg_size = atomic_read(&page_cache_size) - i.bufferram ;
+
+	len = sprintf(page, "        total:    used:    free:  shared: buffers:  cached:\n"
+		"Mem:  %8Lu %8Lu %8Lu %8Lu %8Lu %8Lu\n"
+		"Swap: %8Lu %8Lu %8Lu\n",
+		B(i.totalram), B(i.totalram-i.freeram), B(i.freeram),
+		B(i.sharedram), B(i.bufferram),
+		B(pg_size), B(i.totalswap),
+		B(i.totalswap-i.freeswap), B(i.freeswap));
+	/*
+	 * Tagged format, for easy grepping and expansion.
+	 * The above will go away eventually, once the tools
+	 * have been updated.
+	 */
+	len += sprintf(page+len,
+		"MemTotal:     %8lu kB\n"
+		"MemFree:      %8lu kB\n"
+		"MemShared:    %8lu kB\n"
+		"Buffers:      %8lu kB\n"
+		"Cached:       %8lu kB\n"
+		"SwapCached:   %8lu kB\n"
 		"Active:       %8u kB\n"
-		"Inact_dirty:  %8u kB\n"
-		"Inact_clean:  %8u kB\n"
-		"Inact_target: %8lu kB\n"
-                "HighTotal:    %8lu kB\n"
-                "HighFree:     %8lu kB\n"
-                "LowTotal:     %8lu kB\n"
-                "LowFree:      %8lu kB\n"
-                "SwapTotal:    %8lu kB\n"
-                "SwapFree:     %8lu kB\n",
-                K(i.totalram),
-                K(i.freeram),
-                K(i.sharedram),
-                K(i.bufferram),
-                K(atomic_read(&page_cache_size)),
+		"Inactive:     %8u kB\n"
+		"HighTotal:    %8lu kB\n"
+		"HighFree:     %8lu kB\n"
+		"LowTotal:     %8lu kB\n"
+		"LowFree:      %8lu kB\n"
+		"SwapTotal:    %8lu kB\n"
+		"SwapFree:     %8lu kB\n",
+		K(i.totalram),
+		K(i.freeram),
+		K(i.sharedram),
+		K(i.bufferram),
+		K(pg_size - swapper_space.nrpages),
+		K(swapper_space.nrpages),
 		K(nr_active_pages),
-		K(nr_inactive_dirty_pages),
-		K(nr_inactive_clean_pages()),
-		K(inactive_target),
-                K(i.totalhigh),
-                K(i.freehigh),
-                K(i.totalram-i.totalhigh),
-                K(i.freeram-i.freehigh),
-                K(i.totalswap),
-                K(i.freeswap));
+		K(nr_inactive_pages),
+		K(i.totalhigh),
+		K(i.freehigh),
+		K(i.totalram-i.totalhigh),
+		K(i.freeram-i.freehigh),
+		K(i.totalswap),
+		K(i.freeswap));
 
 	return proc_calc_metrics(page, start, off, count, eof, len);
 #undef B
@@ -208,39 +202,17 @@ static int version_read_proc(char *page, char **start, off_t off,
 	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
-static int cpuinfo_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
+extern struct seq_operations cpuinfo_op;
+static int cpuinfo_open(struct inode *inode, struct file *file)
 {
-	int len = get_cpuinfo(page);
-	return proc_calc_metrics(page, start, off, count, eof, len);
+	return seq_open(file, &cpuinfo_op);
 }
-
-#ifdef CONFIG_PROC_HARDWARE
-static int hardware_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
-{
-	int len = get_hardware_list(page);
-	return proc_calc_metrics(page, start, off, count, eof, len);
-}
-#endif
-
-#ifdef CONFIG_STRAM_PROC
-static int stram_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
-{
-	int len = get_stram_list(page);
-	return proc_calc_metrics(page, start, off, count, eof, len);
-}
-#endif
-
-#ifdef CONFIG_DEBUG_MALLOC
-static int malloc_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
-{
-	int len = get_malloc(page);
-	return proc_calc_metrics(page, start, off, count, eof, len);
-}
-#endif
+static struct file_operations proc_cpuinfo_operations = {
+	open:		cpuinfo_open,
+	read:		seq_read,
+	llseek:		seq_lseek,
+	release:	seq_release,
+};
 
 #ifdef CONFIG_MODULES
 static int modules_read_proc(char *page, char **start, off_t off,
@@ -250,13 +222,17 @@ static int modules_read_proc(char *page, char **start, off_t off,
 	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
-static int ksyms_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
+extern struct seq_operations ksyms_op;
+static int ksyms_open(struct inode *inode, struct file *file)
 {
-	int len = get_ksyms_list(page, start, off, count);
-	if (len < count) *eof = 1;
-	return len;
+	return seq_open(file, &ksyms_op);
 }
+static struct file_operations proc_ksyms_operations = {
+	open:		ksyms_open,
+	read:		seq_read,
+	llseek:		seq_lseek,
+	release:	seq_release,
+};
 #endif
 
 static int kstat_read_proc(char *page, char **start, off_t off,
@@ -274,8 +250,10 @@ static int kstat_read_proc(char *page, char **start, off_t off,
 		user += kstat.per_cpu_user[cpu];
 		nice += kstat.per_cpu_nice[cpu];
 		system += kstat.per_cpu_system[cpu];
+#if !defined(CONFIG_ARCH_S390)
 		for (j = 0 ; j < NR_IRQS ; j++)
 			sum += kstat.irqs[cpu][j];
+#endif
 	}
 
 	len = sprintf(page, "cpu  %u %u %u %lu\n", user, nice, system,
@@ -287,20 +265,22 @@ static int kstat_read_proc(char *page, char **start, off_t off,
 			kstat.per_cpu_nice[cpu_logical_map(i)],
 			kstat.per_cpu_system[cpu_logical_map(i)],
 			jif - (  kstat.per_cpu_user[cpu_logical_map(i)] \
-			           + kstat.per_cpu_nice[cpu_logical_map(i)] \
-			           + kstat.per_cpu_system[cpu_logical_map(i)]));
+				   + kstat.per_cpu_nice[cpu_logical_map(i)] \
+				   + kstat.per_cpu_system[cpu_logical_map(i)]));
 	len += sprintf(page + len,
 		"page %u %u\n"
-                "swap %u %u\n"
+		"swap %u %u\n"
 		"intr %u",
-			kstat.pgpgin,
-			kstat.pgpgout,
+			kstat.pgpgin >> 1,
+			kstat.pgpgout >> 1,
 			kstat.pswpin,
 			kstat.pswpout,
 			sum
 	);
+#if !defined(CONFIG_ARCH_S390)
 	for (i = 0 ; i < NR_IRQS ; i++)
 		len += sprintf(page + len, " %u", kstat_irqs(i));
+#endif
 
 	len += sprintf(page + len, "\ndisk_io: ");
 
@@ -409,13 +389,6 @@ static int locks_read_proc(char *page, char **start, off_t off,
 	return len;
 }
 
-static int mounts_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
-{
-	int len = get_filesystem_info(page);
-	return proc_calc_metrics(page, start, off, count, eof, len);
-}
-
 static int execdomains_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
@@ -500,7 +473,27 @@ static struct file_operations proc_profile_operations = {
 	write:		write_profile,
 };
 
+extern struct seq_operations mounts_op;
+static int mounts_open(struct inode *inode, struct file *file)
+{
+	return seq_open(file, &mounts_op);
+}
+static struct file_operations proc_mounts_operations = {
+	open:		mounts_open,
+	read:		seq_read,
+	llseek:		seq_lseek,
+	release:	seq_release,
+};
+
 struct proc_dir_entry *proc_root_kcore;
+
+static void create_seq_entry(char *name, mode_t mode, struct file_operations *f)
+{
+	struct proc_dir_entry *entry;
+	entry = create_proc_entry(name, mode, NULL);
+	if (entry)
+		entry->proc_fops = f;
+}
 
 void __init proc_misc_init(void)
 {
@@ -513,19 +506,8 @@ void __init proc_misc_init(void)
 		{"uptime",	uptime_read_proc},
 		{"meminfo",	meminfo_read_proc},
 		{"version",	version_read_proc},
-		{"cpuinfo",	cpuinfo_read_proc},
-#ifdef CONFIG_PROC_HARDWARE
-		{"hardware",	hardware_read_proc},
-#endif
-#ifdef CONFIG_STRAM_PROC
-		{"stram",	stram_read_proc},
-#endif
-#ifdef CONFIG_DEBUG_MALLOC
-		{"malloc",	malloc_read_proc},
-#endif
 #ifdef CONFIG_MODULES
 		{"modules",	modules_read_proc},
-		{"ksyms",	ksyms_read_proc},
 #endif
 		{"stat",	kstat_read_proc},
 		{"devices",	devices_read_proc},
@@ -541,7 +523,6 @@ void __init proc_misc_init(void)
 		{"rtc",		ds1286_read_proc},
 #endif
 		{"locks",	locks_read_proc},
-		{"mounts",	mounts_read_proc},
 		{"swaps",	swaps_read_proc},
 		{"iomem",	memory_read_proc},
 		{"execdomains",	execdomains_read_proc},
@@ -554,6 +535,11 @@ void __init proc_misc_init(void)
 	entry = create_proc_entry("kmsg", S_IRUSR, &proc_root);
 	if (entry)
 		entry->proc_fops = &proc_kmsg_operations;
+	create_seq_entry("mounts", 0, &proc_mounts_operations);
+	create_seq_entry("cpuinfo", 0, &proc_cpuinfo_operations);
+#ifdef CONFIG_MODULES
+	create_seq_entry("ksyms", 0, &proc_ksyms_operations);
+#endif
 	proc_root_kcore = create_proc_entry("kcore", S_IRUSR, NULL);
 	if (proc_root_kcore) {
 		proc_root_kcore->proc_fops = &proc_kcore_operations;
@@ -567,7 +553,7 @@ void __init proc_misc_init(void)
 			entry->size = (1+prof_len) * sizeof(unsigned int);
 		}
 	}
-#ifdef __powerpc__
+#ifdef CONFIG_PPC32
 	{
 		extern struct file_operations ppc_htab_operations;
 		entry = create_proc_entry("ppc_htab", S_IRUGO|S_IWUSR, NULL);

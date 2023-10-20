@@ -28,7 +28,7 @@
 #ifdef __KERNEL__
 #include <linux/blkdev.h>
 #include <linux/locks.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/proc_fs.h>
 #include <linux/timer.h>
 #endif
@@ -55,6 +55,11 @@ typedef struct {
 } drv_info_t;
 
 #ifdef __KERNEL__
+
+struct my_sg {
+	int size;
+	char *start_addr;
+};
 
 struct ctlr_info;
 typedef struct ctlr_info ctlr_info_t;
@@ -104,6 +109,7 @@ struct ctlr_info {
 	cmdlist_t *reqQ;
 	cmdlist_t *cmpQ;
 	cmdlist_t *cmd_pool;
+	dma_addr_t cmd_pool_dhandle;
 	__u32	*cmd_pool_bits;
 
 	unsigned int Qdepth;

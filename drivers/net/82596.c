@@ -32,15 +32,13 @@
    Written 1993 by Donald Becker.
    Copyright 1993 United States Government as represented by the Director,
    National Security Agency. This software may only be used and distributed
-   according to the terms of the GNU Public License as modified by SRC,
+   according to the terms of the GNU General Public License as modified by SRC,
    incorporated herein by reference.
 
-   The author may be reached as becker@super.org or
-   C/O Supercomputing Research Ctr., 17100 Science Dr., Bowie MD 20715
+   The author may be reached as becker@scyld.com, or C/O
+   Scyld Computing Corporation, 410 Severn Ave., Suite 210, Annapolis MD 21403
 
  */
-
-static const char *version = "82596.c $Revision: 1.4 $\n";
 
 #include <linux/config.h>
 #include <linux/module.h>
@@ -51,7 +49,7 @@ static const char *version = "82596.c $Revision: 1.4 $\n";
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
@@ -64,6 +62,9 @@ static const char *version = "82596.c $Revision: 1.4 $\n";
 #include <asm/dma.h>
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
+
+static char version[] __initdata =
+	"82596.c $Revision: 1.4 $\n";
 
 /* DEBUG flags
  */
@@ -149,7 +150,10 @@ static int i596_debug = (DEB_SERIOUS|DEB_PROBE);
 
 MODULE_AUTHOR("Richard Hirst");
 MODULE_DESCRIPTION("i82596 driver");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(i596_debug, "i");
+MODULE_PARM_DESC(i596_debug, "i82596 debug mask");
 
 
 /* Copy frames shorter than rx_copybreak, otherwise pass on up in
@@ -333,7 +337,7 @@ struct i596_private {
 	spinlock_t lock;
 };
 
-char init_setup[] =
+static char init_setup[] =
 {
 	0x8E,			/* length, prefetch on */
 	0xC8,			/* fifo to 8, monitor off */
@@ -807,6 +811,7 @@ memory_squeeze:
 						pkt_len);
 #endif
 				netif_rx(skb);
+				dev->last_rx = jiffies;
 				lp->stats.rx_packets++;
 				lp->stats.rx_bytes+=pkt_len;
 			}
@@ -1093,7 +1098,7 @@ int __init i82596_probe(struct net_device *dev)
 	int i;
 	struct i596_private *lp;
 	char eth_addr[8];
-	static int probed = 0;
+	static int probed;
 
 	if (probed)
 		return -ENODEV;
@@ -1131,9 +1136,9 @@ int __init i82596_probe(struct net_device *dev)
 		/* this is easy the ethernet interface can only be at 0x300 */
 		/* first check nothing is already registered here */
 
-		if (check_region(ioaddr, I596_TOTAL_SIZE)) {
+		if (!request_region(ioaddr, I596_TOTAL_SIZE, dev->name)) {
 			printk("82596: IO address 0x%04x in use\n", ioaddr);
-			return -ENODEV;
+			return -EBUSY;
 		}
 
 		for (i = 0; i < 8; i++) {
@@ -1143,19 +1148,15 @@ int __init i82596_probe(struct net_device *dev)
 
 		/* checksum is a multiple of 0x100, got this wrong first time
 		   some machines have 0x100, some 0x200. The DOS driver doesn't
-		   even bother with the checksum */
+		   even bother with the checksum.
+		   Some other boards trip the checksum.. but then appear as
+		   ether address 0. Trap these - AC */
 
-		if (checksum % 0x100)
+		if ((checksum % 0x100) || 
+		    (memcmp(eth_addr, "\x00\x00\x49", 3) != 0)) {
+			release_region(ioaddr, I596_TOTAL_SIZE);
 			return -ENODEV;
-
-		/* Some other boards trip the checksum.. but then appear as
-		 * ether address 0. Trap these - AC */
-
-		if (memcmp(eth_addr, "\x00\x00\x49", 3) != 0)
-			return -ENODEV;
-
-		if (!request_region(ioaddr, I596_TOTAL_SIZE, "i596"))
-			return -ENODEV;
+		}
 
 		dev->base_addr = ioaddr;
 		dev->irq = 10;
@@ -1495,9 +1496,11 @@ static struct net_device dev_82596 = { init: i82596_probe };
 static int io = 0x300;
 static int irq = 10;
 MODULE_PARM(irq, "i");
+MODULE_PARM_DESC(irq, "Apricot IRQ number");
 #endif
 
 MODULE_PARM(debug, "i");
+MODULE_PARM_DESC(debug, "i82596 debug mask");
 static int debug = -1;
 
 int init_module(void)

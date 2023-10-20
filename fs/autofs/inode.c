@@ -11,7 +11,7 @@
  * ------------------------------------------------------------------------- */
 
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/locks.h>
 #include <asm/bitops.h>
@@ -132,7 +132,7 @@ struct super_block *autofs_read_super(struct super_block *s, void *data,
 	sbi->oz_pgrp = current->pgrp;
 	autofs_initialize_hash(&sbi->dirhash);
 	sbi->queues = NULL;
-	memset(sbi->symlink_bitmap, 0, sizeof(u32)*AUTOFS_SYMLINK_BITMAP_LEN);
+	memset(sbi->symlink_bitmap, 0, sizeof(long)*AUTOFS_SYMLINK_BITMAP_LEN);
 	sbi->next_dir_ino = AUTOFS_FIRST_DIR_INO;
 	s->s_blocksize = 1024;
 	s->s_blocksize_bits = 10;

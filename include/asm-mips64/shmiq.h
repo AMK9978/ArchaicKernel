@@ -1,5 +1,4 @@
-/* $Id$
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -153,7 +152,7 @@ struct shmiqsetcpos {
 /* get time since last event */
 #define QIOCGETITIME    _IOR('Q', 11, time_t)
 
-/* set curent screen */
+/* set current screen */
 #define QIOCSETSCRN     _IOW('Q',6,int)
 
 

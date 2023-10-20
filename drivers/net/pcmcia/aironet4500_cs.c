@@ -19,7 +19,7 @@ static const char *awc_version =
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/interrupt.h>
@@ -81,7 +81,7 @@ static void awc_release(u_long arg);
 static int awc_event(event_t event, int priority,
 					   event_callback_args_t *args);
 
-static dev_link_t *dev_list = NULL;
+static dev_link_t *dev_list;
 
 static void cs_error(client_handle_t handle, int func, int ret)
 {
@@ -177,8 +177,16 @@ static dev_link_t *awc_attach(void)
 
 	/* Create the PC card device object. */
 	link = kmalloc(sizeof(struct dev_link_t), GFP_KERNEL);
+	if (!link)
+		return NULL;
 	memset(link, 0, sizeof(struct dev_link_t));
+
 	link->dev = kmalloc(sizeof(struct dev_node_t), GFP_KERNEL);
+	if (!link->dev) {
+		kfree(link);
+		return NULL;
+	}
+
 	memset(link->dev, 0, sizeof(struct dev_node_t));
 
 	link->release.function = &awc_release;
@@ -199,7 +207,6 @@ static dev_link_t *awc_attach(void)
 	/* Create the network device object. */
 
 	dev = kmalloc(sizeof(struct net_device ), GFP_KERNEL);
-	memset(dev,0,sizeof(struct net_device));
 //	dev =  init_etherdev(0, sizeof(struct awc_private) );
 	if (!dev ) {
 		printk(KERN_CRIT "out of mem on dev alloc \n");
@@ -207,6 +214,7 @@ static dev_link_t *awc_attach(void)
 		kfree(link);
 		return NULL;
 	};
+	memset(dev,0,sizeof(struct net_device));
 	dev->priv = kmalloc(sizeof(struct awc_private), GFP_KERNEL);
 	if (!dev->priv ) {printk(KERN_CRIT "out of mem on dev priv alloc \n"); return NULL;};
 	memset(dev->priv,0,sizeof(struct awc_private));
@@ -636,4 +644,4 @@ static void __exit aironet_cs_exit(void)
 
 module_init(aironet_cs_init);
 module_exit(aironet_cs_exit);
-
+MODULE_LICENSE("GPL");

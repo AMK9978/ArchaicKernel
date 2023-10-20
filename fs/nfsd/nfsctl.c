@@ -18,7 +18,7 @@
 #include <linux/net.h>
 #include <linux/in.h>
 #include <linux/unistd.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/proc_fs.h>
 
 #include <linux/nfs.h>
@@ -31,8 +31,6 @@
 #include <asm/uaccess.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
-
-extern long sys_call_table[];
 
 static int	nfsctl_svc(struct nfsctl_svc *data);
 static int	nfsctl_addclient(struct nfsctl_client *data);
@@ -158,7 +156,7 @@ nfsctl_getfd(struct nfsctl_fdparm *data, __u8 *res)
 			err = -EINVAL;
 		else {
 			memset(res,0, NFS_FHSIZE);
-			memcpy(res, fh.fh_base.fh_pad, fh.fh_size);
+			memcpy(res, &fh.fh_base, fh.fh_size);
 		}
 	}
 
@@ -191,7 +189,7 @@ nfsctl_getfh(struct nfsctl_fhparm *data, __u8 *res)
 			err = -EINVAL;
 		else {
 			memset(res,0, NFS_FHSIZE);
-			memcpy(res, fh.fh_base.fh_pad, fh.fh_size);
+			memcpy(res, &fh.fh_base, fh.fh_size);
 		}
 	}
 
@@ -311,6 +309,7 @@ done:
 /* New-style module support since 2.1.18 */
 EXPORT_NO_SYMBOLS;
 MODULE_AUTHOR("Olaf Kirch <okir@monad.swb.de>");
+MODULE_LICENSE("GPL");
 
 struct nfsd_linkage nfsd_linkage_s = {
 	do_nfsservctl: handle_sys_nfsservctl,

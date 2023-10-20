@@ -16,7 +16,13 @@
 /*
  * a maximum of 16 APICs with the current APIC ID architecture.
  */
+#ifdef CONFIG_MULTIQUAD
+#define MAX_APICS 256
+#else /* !CONFIG_MULTIQUAD */
 #define MAX_APICS 16
+#endif /* CONFIG_MULTIQUAD */
+
+#define MAX_MPC_ENTRY 1024
 
 struct intel_mp_floating
 {
@@ -55,6 +61,7 @@ struct mp_config_table
 #define	MP_IOAPIC	2
 #define	MP_INTSRC	3
 #define	MP_LINTSRC	4
+#define	MP_TRANSLATION  192  /* Used by IBM NUMA-Q to describe node locality */
 
 struct mpc_config_processor
 {
@@ -144,6 +151,27 @@ struct mpc_config_lintsrc
 	unsigned char mpc_destapiclint;
 };
 
+struct mp_config_oemtable
+{
+	char oem_signature[4];
+#define MPC_OEM_SIGNATURE "_OEM"
+	unsigned short oem_length;	/* Size of table */
+	char  oem_rev;			/* 0x01 */
+	char  oem_checksum;
+	char  mpc_oem[8];
+};
+
+struct mpc_config_translation
+{
+        unsigned char mpc_type;
+        unsigned char trans_len;
+        unsigned char trans_type;
+        unsigned char trans_quad;
+        unsigned char trans_global;
+        unsigned char trans_local;
+        unsigned short trans_reserved;
+};
+
 /*
  *	Default configurations
  *
@@ -156,7 +184,12 @@ struct mpc_config_lintsrc
  *	7	2 CPU MCA+PCI
  */
 
-#define MAX_IRQ_SOURCES 128
+#ifdef CONFIG_MULTIQUAD
+#define MAX_IRQ_SOURCES 512
+#else /* !CONFIG_MULTIQUAD */
+#define MAX_IRQ_SOURCES 256
+#endif /* CONFIG_MULTIQUAD */
+
 #define MAX_MP_BUSSES 32
 enum mp_bustype {
 	MP_BUS_ISA = 1,
@@ -167,7 +200,7 @@ enum mp_bustype {
 extern int mp_bus_id_to_type [MAX_MP_BUSSES];
 extern int mp_bus_id_to_pci_bus [MAX_MP_BUSSES];
 
-extern unsigned int boot_cpu_id;
+extern unsigned int boot_cpu_physical_apicid;
 extern unsigned long phys_cpu_present_map;
 extern int smp_found_config;
 extern void find_smp_config (void);
@@ -182,6 +215,7 @@ extern int mp_bus_id_to_pci_bus [MAX_MP_BUSSES];
 extern int mp_current_pci_id;
 extern unsigned long mp_lapic_addr;
 extern int pic_mode;
+extern int using_apic_timer;
 
 #endif
 

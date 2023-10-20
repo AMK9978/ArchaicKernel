@@ -36,7 +36,7 @@
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/spinlock.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/pci.h>
 
@@ -638,7 +638,7 @@ void __init ccio_init(void)
 }
 
 
-static int ccio_dma_supported( struct pci_dev *dev, dma_addr_t mask)
+static int ccio_dma_supported( struct pci_dev *dev, u64 mask)
 {
 	if (dev == NULL) {
 		printk(MODULE_NAME ": EISA/ISA/et al not supported\n");

@@ -1,7 +1,7 @@
 /*
     NetWinder Floating Point Emulator
-    (c) Corel Computer Corporation, 1998
-    (c) Philip Blundell 1998-1999
+    (c) Rebel.COM, 1998
+    (c) 1998, 1999 Philip Blundell
 
     Direct questions, comments to Scott Bambrough <scottb@netwinder.org>
 
@@ -77,16 +77,13 @@ nwfpe_enter:
 	   emulation.  This would reduce load/store overhead at the expense
 	   of stealing two regs from the register allocator.  Not sure if
 	   it's worth it.  */
-	ldr r4, =userRegisters
-        str sp, [r4]			@ save pointer to user regs
-	ldr r4, =fpa11
-	str r10, [r4]			@ store pointer to our state
+	str sp, [r10]                   @ Store the user registers pointer in the fpa11 structure.
         mov r4, sp			@ use r4 for local pointer
         mov r10, lr			@ save the failure-return addresses
 
         ldr r5, [r4, #60]	 	@ get contents of PC;
 	sub r8, r5, #4
-.Lx2:	ldrt r0, [r8], #0		@ get actual instruction into r0
+.Lx2:	ldrt r0, [r8]			@ get actual instruction into r0
 emulate:
 	bl EmulateAll			@ emulate the instruction
    	cmp r0, #0			@ was emulation successful
@@ -115,15 +112,17 @@ next:
         mov r0, r6			@ prepare for EmulateAll()
    	b emulate			@ if r0 != 0, goto EmulateAll
 
-	@ We need to be prepared for the instruction at .Lx1 or .Lx2
-	@ to fault.
+	@ We need to be prepared for the instructions at .Lx1 and .Lx2 
+	@ to fault.  Emit the appropriate exception gunk to fix things up.
+	@ ??? For some reason, faults can happen at .Lx2 even with a
+	@ plain LDR instruction.  Weird, but it seems harmless.
 	.section .fixup,"ax"
-	.align
-.Lfix:	mov	pc, r9
+	.align	2
+.Lfix:	mov	pc, r9			@ let the user eat segfaults
 	.previous
 
 	.section __ex_table,"a"
-	.align 3
-	.long	.Lx2, .Lfix
+	.align	3
 	.long	.Lx1, .Lfix
+	.long	.Lx2, .Lfix
 	.previous

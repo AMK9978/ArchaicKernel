@@ -13,6 +13,9 @@
 *
 *  Peter Berger (pberger@brimson.com)
 *  Al Borchers (borchers@steinerpoint.com)
+* 
+* (04/08/2001) gb
+*	Identify version on module load.
 *
 * (11/01/2000) Adam J. Richter
 *	usb_device_id table support
@@ -233,26 +236,33 @@
 #include <linux/errno.h>
 #include <linux/poll.h>
 #include <linux/init.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/fcntl.h>
+#include <linux/tty.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
-#include <linux/tty.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
 #include <linux/tqueue.h>
+#include <linux/usb.h>
 
 #ifdef CONFIG_USB_SERIAL_DEBUG
-	#define DEBUG
+	static int debug = 1;
 #else
-	#undef DEBUG
+	static int debug;
 #endif
 
-#include <linux/usb.h>
 #include "usb-serial.h"
 
 
 /* Defines */
+
+/*
+ * Version Information
+ */
+#define DRIVER_VERSION "v1.80.1.2"
+#define DRIVER_AUTHOR "Peter Berger <pberger@brimson.com>, Al Borchers <borchers@steinerpoint.com>"
+#define DRIVER_DESC "Digi AccelePort USB-2/USB-4 Serial Converter driver"
 
 /* port output buffer length -- must be <= transfer buffer length - 2 */
 /* so we can be sure to send the full buffer in one urb */
@@ -397,11 +407,6 @@
 #define DIGI_READ_INPUT_SIGNALS_DSR		32
 #define DIGI_READ_INPUT_SIGNALS_RI		64
 #define DIGI_READ_INPUT_SIGNALS_DCD		128
-
-
-/* macros */
-#define MAX(a,b)	(((a)>(b))?(a):(b))
-#define MIN(a,b)	(((a)<(b))?(a):(b))
 
 
 /* Structures */
@@ -665,7 +670,7 @@ dbg( "digi_write_oob_command: TOP: port=%d, count=%d", oob_priv->dp_port_num, co
 		}
 
 		/* len must be a multiple of 4, so commands are not split */
-		len = MIN( count, oob_port->bulk_out_size );
+		len = min(count, oob_port->bulk_out_size );
 		if( len > 4 )
 			len &= ~3;
 
@@ -742,7 +747,7 @@ count );
 		/* len must be a multiple of 4 and small enough to */
 		/* guarantee the write will send buffered data first, */
 		/* so commands are in order with data and not split */
-		len = MIN( count, port->bulk_out_size-2-priv->dp_out_buf_len );
+		len = min(count, port->bulk_out_size-2-priv->dp_out_buf_len );
 		if( len > 4 )
 			len &= ~3;
 
@@ -946,7 +951,7 @@ dbg( "digi_rx_unthrottle: TOP: port=%d", priv->dp_port_num );
 	spin_lock_irqsave( &priv->dp_port_lock, flags );
 
 	/* send any buffered chars from throttle time on to tty subsystem */
-	len = MIN( priv->dp_in_buf_len, TTY_FLIPBUF_SIZE - tty->flip.count );
+	len = min(priv->dp_in_buf_len, TTY_FLIPBUF_SIZE - tty->flip.count );
 	if( len > 0 ) {
 		memcpy( tty->flip.char_buf_ptr, priv->dp_in_buf, len );
 		memcpy( tty->flip.flag_buf_ptr, priv->dp_in_flag_buf, len );
@@ -1267,7 +1272,8 @@ dbg( "digi_write: TOP: port=%d, count=%d, from_user=%d, in_interrupt=%d",
 priv->dp_port_num, count, from_user, in_interrupt() );
 
 	/* copy user data (which can sleep) before getting spin lock */
-	count = MIN( 64, MIN( count, port->bulk_out_size-2 ) );
+	count = min( count, port->bulk_out_size-2 );
+	count = min( 64, count);
 	if( from_user && copy_from_user( user_buf, buf, count ) ) {
 		return( -EFAULT );
 	}
@@ -1282,12 +1288,10 @@ priv->dp_port_num, count, from_user, in_interrupt() );
 	|| priv->dp_write_urb_in_use ) {
 
 		/* buffer data if count is 1 (probably put_char) if possible */
-		if( count == 1 ) {
-			new_len = MIN( count,
-				DIGI_OUT_BUF_SIZE-priv->dp_out_buf_len );
-			memcpy( priv->dp_out_buf+priv->dp_out_buf_len, buf,
-				new_len );
-			priv->dp_out_buf_len += new_len;
+		if( count == 1 && priv->dp_out_buf_len < DIGI_OUT_BUF_SIZE ) {
+			priv->dp_out_buf[priv->dp_out_buf_len++]
+				= *(from_user ? user_buf : buf);
+			new_len = 1;
 		} else {
 			new_len = 0;
 		}
@@ -1300,7 +1304,7 @@ priv->dp_port_num, count, from_user, in_interrupt() );
 
 	/* allow space for any buffered data and for new data, up to */
 	/* transfer buffer size - 2 (for command and length bytes) */
-	new_len = MIN( count, port->bulk_out_size-2-priv->dp_out_buf_len );
+	new_len = min(count, port->bulk_out_size-2-priv->dp_out_buf_len);
 	data_len = new_len + priv->dp_out_buf_len;
 
 	if( data_len == 0 ) {
@@ -1587,53 +1591,55 @@ dbg( "digi_close: TOP: port=%d, active=%d, open_count=%d", priv->dp_port_num, po
 	if( tty->ldisc.flush_buffer )
 		tty->ldisc.flush_buffer( tty );
 
-	/* wait for transmit idle */
-	if( (filp->f_flags&(O_NDELAY|O_NONBLOCK)) == 0 ) {
-		digi_transmit_idle( port, DIGI_CLOSE_TIMEOUT );
+	if (port->serial->dev) {
+		/* wait for transmit idle */
+		if( (filp->f_flags&(O_NDELAY|O_NONBLOCK)) == 0 ) {
+			digi_transmit_idle( port, DIGI_CLOSE_TIMEOUT );
+		}
+
+		/* drop DTR and RTS */
+		digi_set_modem_signals( port, 0, 0 );
+
+		/* disable input flow control */
+		buf[0] = DIGI_CMD_SET_INPUT_FLOW_CONTROL;
+		buf[1] = priv->dp_port_num;
+		buf[2] = DIGI_DISABLE;
+		buf[3] = 0;
+
+		/* disable output flow control */
+		buf[4] = DIGI_CMD_SET_OUTPUT_FLOW_CONTROL;
+		buf[5] = priv->dp_port_num;
+		buf[6] = DIGI_DISABLE;
+		buf[7] = 0;
+
+		/* disable reading modem signals automatically */
+		buf[8] = DIGI_CMD_READ_INPUT_SIGNALS;
+		buf[9] = priv->dp_port_num;
+		buf[10] = DIGI_DISABLE;
+		buf[11] = 0;
+
+		/* disable receive */
+		buf[12] = DIGI_CMD_RECEIVE_ENABLE;
+		buf[13] = priv->dp_port_num;
+		buf[14] = DIGI_DISABLE;
+		buf[15] = 0;
+
+		/* flush fifos */
+		buf[16] = DIGI_CMD_IFLUSH_FIFO;
+		buf[17] = priv->dp_port_num;
+		buf[18] = DIGI_FLUSH_TX | DIGI_FLUSH_RX;
+		buf[19] = 0;
+
+		if( (ret=digi_write_oob_command( port, buf, 20, 0 )) != 0 )
+			dbg( "digi_close: write oob failed, ret=%d", ret );
+
+		/* wait for final commands on oob port to complete */
+		interruptible_sleep_on_timeout( &priv->dp_flush_wait,
+			DIGI_CLOSE_TIMEOUT );
+
+		/* shutdown any outstanding bulk writes */
+		usb_unlink_urb (port->write_urb);
 	}
-
-	/* drop DTR and RTS */
-	digi_set_modem_signals( port, 0, 0 );
-
-	/* disable input flow control */
-	buf[0] = DIGI_CMD_SET_INPUT_FLOW_CONTROL;
-	buf[1] = priv->dp_port_num;
-	buf[2] = DIGI_DISABLE;
-	buf[3] = 0;
-
-	/* disable output flow control */
-	buf[4] = DIGI_CMD_SET_OUTPUT_FLOW_CONTROL;
-	buf[5] = priv->dp_port_num;
-	buf[6] = DIGI_DISABLE;
-	buf[7] = 0;
-
-	/* disable reading modem signals automatically */
-	buf[8] = DIGI_CMD_READ_INPUT_SIGNALS;
-	buf[9] = priv->dp_port_num;
-	buf[10] = DIGI_DISABLE;
-	buf[11] = 0;
-
-	/* disable receive */
-	buf[12] = DIGI_CMD_RECEIVE_ENABLE;
-	buf[13] = priv->dp_port_num;
-	buf[14] = DIGI_DISABLE;
-	buf[15] = 0;
-
-	/* flush fifos */
-	buf[16] = DIGI_CMD_IFLUSH_FIFO;
-	buf[17] = priv->dp_port_num;
-	buf[18] = DIGI_FLUSH_TX | DIGI_FLUSH_RX;
-	buf[19] = 0;
-
-	if( (ret=digi_write_oob_command( port, buf, 20, 0 )) != 0 )
-		dbg( "digi_close: write oob failed, ret=%d", ret );
-
-	/* wait for final commands on oob port to complete */
-	interruptible_sleep_on_timeout( &priv->dp_flush_wait,
-		DIGI_CLOSE_TIMEOUT );
-
-	/* shutdown any outstanding bulk writes */
-	usb_unlink_urb (port->write_urb);
 
 	tty->closing = 0;
 
@@ -1926,7 +1932,7 @@ static int digi_read_inb_callback( struct urb *urb )
 
 		if( throttled ) {
 
-			len = MIN( len,
+			len = min( len,
 				DIGI_IN_BUF_SIZE - priv->dp_in_buf_len );
 
 			if( len > 0 ) {
@@ -1939,7 +1945,7 @@ static int digi_read_inb_callback( struct urb *urb )
 
 		} else {
 
-			len = MIN( len, TTY_FLIPBUF_SIZE - tty->flip.count );
+			len = min( len, TTY_FLIPBUF_SIZE - tty->flip.count );
 
 			if( len > 0 ) {
 				memcpy( tty->flip.char_buf_ptr, data, len );
@@ -2070,6 +2076,7 @@ static int __init digi_init (void)
 {
 	usb_serial_register (&digi_acceleport_2_device);
 	usb_serial_register (&digi_acceleport_4_device);
+	info(DRIVER_VERSION ":" DRIVER_DESC);
 	return 0;
 }
 
@@ -2085,6 +2092,10 @@ module_init(digi_init);
 module_exit(digi_exit);
 
 
-MODULE_AUTHOR("Peter Berger <pberger@brimson.com>, Al Borchers <borchers@steinerpoint.com>");
-MODULE_DESCRIPTION("Digi AccelePort USB-2/USB-4 Serial Converter driver");
+MODULE_AUTHOR( DRIVER_AUTHOR );
+MODULE_DESCRIPTION( DRIVER_DESC );
+MODULE_LICENSE("GPL");
+
+MODULE_PARM(debug, "i");
+MODULE_PARM_DESC(debug, "Debug enabled or not");
 

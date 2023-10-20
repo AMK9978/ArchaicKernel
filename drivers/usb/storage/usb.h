@@ -1,7 +1,7 @@
 /* Driver for USB Mass Storage compliant devices
  * Main Header File
  *
- * $Id: usb.h,v 1.11 2000/11/13 22:38:55 mdharm Exp $
+ * $Id: usb.h,v 1.18 2001/07/30 00:27:59 mdharm Exp $
  *
  * Current development and maintenance by:
  *   (c) 1999, 2000 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
@@ -47,6 +47,7 @@
 #include <linux/usb.h>
 #include <linux/blk.h>
 #include <linux/smp_lock.h>
+#include <linux/completion.h>
 #include "scsi.h"
 #include "hosts.h"
 
@@ -84,13 +85,6 @@ struct us_data;
  */
 
 struct us_unusual_dev {
-	/* we search the list based on these parameters */
-	__u16 idVendor;
-	__u16 idProduct;
-	__u16 bcdDeviceMin;
-	__u16 bcdDeviceMax;
-
-	/* the list specifies these parameters */
 	const char* vendorName;
 	const char* productName;
 	__u8  useProtocol;
@@ -101,11 +95,12 @@ struct us_unusual_dev {
 
 /* Flag definitions */
 #define US_FL_SINGLE_LUN      0x00000001 /* allow access to only LUN 0	    */
-#define US_FL_MODE_XLATE      0x00000002 /* translate _6 to _10 comands for
+#define US_FL_MODE_XLATE      0x00000002 /* translate _6 to _10 commands for
 						    Win/MacOS compatibility */
 #define US_FL_START_STOP      0x00000004 /* ignore START_STOP commands	    */
 #define US_FL_IGNORE_SER      0x00000010 /* Ignore the serial number given  */
 #define US_FL_SCM_MULT_TARG   0x00000020 /* supports multiple targets */
+#define US_FL_FIX_INQUIRY     0x00000040 /* INQUIRY response needs fixing */
 
 #define USB_STOR_STRING_LEN 32
 
@@ -172,11 +167,11 @@ struct us_data {
 	struct semaphore	current_urb_sem; /* to protect irq_urb	 */
 	struct urb		*current_urb;	 /* non-int USB requests */
 
-	/* the waitqueue for sleeping the control thread */
-	wait_queue_head_t	wqh;		 /* to sleep thread on   */
+	/* the semaphore for sleeping the control thread */
+	struct semaphore	sema;		 /* to sleep thread on   */
 
 	/* mutual exclusion structures */
-	struct semaphore	notify;		 /* thread begin/end	    */
+	struct completion	notify;		 /* thread begin/end	    */
 	struct semaphore	queue_exclusion; /* to protect data structs */
 	struct us_unusual_dev   *unusual_dev;	 /* If unusual device       */
 	void			*extra;		 /* Any extra data          */
@@ -188,7 +183,7 @@ extern struct us_data *us_list;
 extern struct semaphore us_list_semaphore;
 
 /* The structure which defines our driver */
-struct usb_driver usb_storage_driver;
+extern struct usb_driver usb_storage_driver;
 
 /* Function to fill an inquiry response. See usb.c for details */
 extern void fill_inquiry_response(struct us_data *us,

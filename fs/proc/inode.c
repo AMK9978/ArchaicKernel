@@ -160,14 +160,12 @@ printk("proc_iget: using deleted entry %s, count=%d\n", de->name, atomic_read(&d
 			inode->i_nlink = de->nlink;
 		if (de->owner)
 			__MOD_INC_USE_COUNT(de->owner);
-		if (S_ISBLK(de->mode)||S_ISCHR(de->mode)||S_ISFIFO(de->mode))
+		if (de->proc_iops)
+			inode->i_op = de->proc_iops;
+		if (de->proc_fops)
+			inode->i_fop = de->proc_fops;
+		else if (S_ISBLK(de->mode)||S_ISCHR(de->mode)||S_ISFIFO(de->mode))
 			init_special_inode(inode,de->mode,kdev_t_to_nr(de->rdev));
-		else {
-			if (de->proc_iops)
-				inode->i_op = de->proc_iops;
-			if (de->proc_fops)
-				inode->i_fop = de->proc_fops;
-		}
 	}
 
 out:
@@ -188,6 +186,7 @@ struct super_block *proc_read_super(struct super_block *s,void *data,
 	s->s_blocksize_bits = 10;
 	s->s_magic = PROC_SUPER_MAGIC;
 	s->s_op = &proc_sops;
+	
 	root_inode = proc_get_inode(s, PROC_ROOT_INO, &proc_root);
 	if (!root_inode)
 		goto out_no_root;
@@ -208,3 +207,4 @@ out_no_root:
 	iput(root_inode);
 	return NULL;
 }
+MODULE_LICENSE("GPL");

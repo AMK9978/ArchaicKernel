@@ -177,7 +177,7 @@ eiger_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 static u8 __init
 eiger_swizzle(struct pci_dev *dev, u8 *pinp)
 {
-	struct pci_controler *hose = dev->sysdata;
+	struct pci_controller *hose = dev->sysdata;
 	int slot, pin = *pinp;
 	int bridge_count = 0;
 
@@ -233,6 +233,7 @@ struct alpha_machine_vector eiger_mv __initmv = {
 	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
 	min_io_address:		DEFAULT_IO_BASE,
 	min_mem_address:	DEFAULT_MEM_BASE,
+	pci_dac_offset:		TSUNAMI_DAC_OFFSET,
 
 	nr_irqs:		128,
 	device_interrupt:	eiger_device_interrupt,

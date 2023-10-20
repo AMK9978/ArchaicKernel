@@ -1,4 +1,4 @@
-/*  $Id: process.c,v 1.113 2000/11/08 08:14:58 davem Exp $
+/*  $Id: process.c,v 1.122 2001/10/18 09:06:36 davem Exp $
  *  arch/sparc64/kernel/process.c
  *
  *  Copyright (C) 1995, 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -22,7 +22,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/config.h>
@@ -111,6 +111,7 @@ extern char reboot_command [];
 extern void (*prom_palette)(int);
 extern int serial_console;
 #endif
+extern void (*prom_keyboard)(void);
 
 void machine_halt(void)
 {
@@ -121,6 +122,8 @@ void machine_halt(void)
 	if (!serial_console && prom_palette)
 		prom_palette (1);
 #endif
+	if (prom_keyboard)
+		prom_keyboard();
 	prom_halt();
 	panic("Halt failed!");
 }
@@ -139,6 +142,8 @@ void machine_restart(char * cmd)
 	if (!serial_console && prom_palette)
 		prom_palette (1);
 #endif
+	if (prom_keyboard)
+		prom_keyboard();
 	if (cmd)
 		prom_reboot(cmd);
 	if (*reboot_command)
@@ -277,8 +282,8 @@ void __show_regs(struct pt_regs * regs)
 	       local_irq_count(smp_processor_id()),
 	       irqs_running());
 #endif
-	printk("TSTATE: %016lx TPC: %016lx TNPC: %016lx Y: %08x\n", regs->tstate,
-	       regs->tpc, regs->tnpc, regs->y);
+	printk("TSTATE: %016lx TPC: %016lx TNPC: %016lx Y: %08x    %s\n", regs->tstate,
+	       regs->tpc, regs->tnpc, regs->y, print_tainted());
 	printk("g0: %016lx g1: %016lx g2: %016lx g3: %016lx\n",
 	       regs->u_regs[0], regs->u_regs[1], regs->u_regs[2],
 	       regs->u_regs[3]);
@@ -344,8 +349,8 @@ void show_regs(struct pt_regs *regs)
 
 void show_regs32(struct pt_regs32 *regs)
 {
-	printk("PSR: %08x PC: %08x NPC: %08x Y: %08x\n", regs->psr,
-	       regs->pc, regs->npc, regs->y);
+	printk("PSR: %08x PC: %08x NPC: %08x Y: %08x    %s\n", regs->psr,
+	       regs->pc, regs->npc, regs->y, print_tainted());
 	printk("g0: %08x g1: %08x g2: %08x g3: %08x ",
 	       regs->u_regs[0], regs->u_regs[1], regs->u_regs[2],
 	       regs->u_regs[3]);
@@ -416,14 +421,14 @@ void flush_thread(void)
 			unsigned long pgd_cache;
 
 			if (pgd_none(*pgd0)) {
-				pmd_t *page = get_pmd_fast();
+				pmd_t *page = pmd_alloc_one_fast(NULL, 0);
 				if (!page)
-					(void) get_pmd_slow(pgd0, 0);
-				else
-					pgd_set(pgd0, page);
+					page = pmd_alloc_one(NULL, 0);
+				pgd_set(pgd0, page);
 			}
 			pgd_cache = pgd_val(*pgd0) << 11UL;
-			__asm__ __volatile__("stxa %0, [%1] %2"
+			__asm__ __volatile__("stxa %0, [%1] %2\n\t"
+					     "membar #Sync"
 					     : /* no outputs */
 					     : "r" (pgd_cache),
 					       "r" (TSB_REG),
@@ -580,7 +585,7 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 	char *child_trap_frame;
 
 	/* Calculate offset to stack_frame & pt_regs */
-	child_trap_frame = ((char *)p) + ((PAGE_SIZE << 1) - (TRACEREG_SZ+REGWIN_SZ));
+	child_trap_frame = ((char *)p) + (THREAD_SIZE - (TRACEREG_SZ+REGWIN_SZ));
 	memcpy(child_trap_frame, (((struct reg_window *)regs)-1), (TRACEREG_SZ+REGWIN_SZ));
 	t->ksp = ((unsigned long) child_trap_frame) - STACK_BIAS;
 	t->flags |= SPARC_FLAG_NEWCHILD;

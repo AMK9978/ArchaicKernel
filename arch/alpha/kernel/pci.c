@@ -43,11 +43,11 @@ const char pci_hae0_name[] = "HAE0";
 
 
 /*
- * The PCI controler list.
+ * The PCI controller list.
  */
 
-struct pci_controler *hose_head, **hose_tail = &hose_head;
-struct pci_controler *pci_isa_hose;
+struct pci_controller *hose_head, **hose_tail = &hose_head;
+struct pci_controller *pci_isa_hose;
 
 /*
  * Quirks.
@@ -76,40 +76,36 @@ quirk_ali_ide_ports(struct pci_dev *dev)
 		dev->resource[3].end = dev->resource[3].start + 7;
 }
 
-/*
- * Notorious Cy82C693 chip. One of its numerous bugs: although
- * Cypress IDE controller doesn't support native mode, it has
- * programmable addresses of IDE command/control registers.
- * This violates PCI specifications, confuses IDE subsystem
- * and causes resource conflict between primary HD_CMD register
- * and floppy controller. Ugh.
- * Fix that.
- */
 static void __init
-quirk_cypress_ide_ports(struct pci_dev *dev)
+quirk_cypress(struct pci_dev *dev)
 {
-	if (dev->class >> 8 != PCI_CLASS_STORAGE_IDE)
-		return;
-	dev->resource[0].flags = 0;
-	dev->resource[1].flags = 0;
-}
+	/* The Notorious Cy82C693 chip.  */
 
-static void __init
-quirk_vga_enable_rom(struct pci_dev *dev)
-{
-	/* If it's a VGA, enable its BIOS ROM at C0000.
-	   But if its a Cirrus 543x/544x DISABLE it, since
-	   enabling ROM disables the memory... */
-	if ((dev->class >> 8) == PCI_CLASS_DISPLAY_VGA &&
-	    (dev->vendor != PCI_VENDOR_ID_CIRRUS ||
-	     (dev->device < 0x00a0) || (dev->device > 0x00ac)))
-	{
-		u32 reg;
+	/* The Cypress IDE controller doesn't support native mode, but it
+	   has programmable addresses of IDE command/control registers.
+	   This violates PCI specifications, confuses the IDE subsystem and
+	   causes resource conflicts between the primary HD_CMD register and
+	   the floppy controller.  Ugh.  Fix that.  */
+	if (dev->class >> 8 == PCI_CLASS_STORAGE_IDE) {
+		dev->resource[0].flags = 0;
+		dev->resource[1].flags = 0;
+	}
 
-		pci_read_config_dword(dev, dev->rom_base_reg, &reg);
-		reg |= PCI_ROM_ADDRESS_ENABLE;
-		pci_write_config_dword(dev, dev->rom_base_reg, reg);
-		dev->resource[PCI_ROM_RESOURCE].flags |= PCI_ROM_ADDRESS_ENABLE;
+	/* The Cypress bridge responds on the PCI bus in the address range
+	   0xffff0000-0xffffffff (conventional x86 BIOS ROM).  There is no
+	   way to turn this off.  The bridge also supports several extended
+	   BIOS ranges (disabled after power-up), and some consoles do turn
+	   them on.  So if we use a large direct-map window, or a large SG
+	   window, we must avoid entire 0xfff00000-0xffffffff region.  */
+	else if (dev->class >> 8 == PCI_CLASS_BRIDGE_ISA) {
+		if (__direct_map_base + __direct_map_size >= 0xfff00000)
+			__direct_map_size = 0xfff00000 - __direct_map_base;
+		else {
+			struct pci_controller *hose = dev->sysdata;
+			struct pci_iommu_arena *pci = hose->sg_pci;
+			if (pci && pci->dma_base + pci->size >= 0xfff00000)
+				pci->size = 0xfff00000 - pci->dma_base;
+		}
 	}
 }
 
@@ -121,8 +117,7 @@ struct pci_fixup pcibios_fixups[] __initdata = {
 	{ PCI_FIXUP_HEADER, PCI_VENDOR_ID_AL, PCI_DEVICE_ID_AL_M5229,
 	  quirk_ali_ide_ports },
 	{ PCI_FIXUP_HEADER, PCI_VENDOR_ID_CONTAQ, PCI_DEVICE_ID_CONTAQ_82C693,
-	  quirk_cypress_ide_ports },
-	{ PCI_FIXUP_FINAL, PCI_ANY_ID, PCI_ANY_ID, quirk_vga_enable_rom },
+	  quirk_cypress },
 	{ 0 }
 };
 
@@ -136,7 +131,7 @@ void
 pcibios_align_resource(void *data, struct resource *res, unsigned long size)
 {
 	struct pci_dev *dev = data;
-	struct pci_controler *hose = dev->sysdata;
+	struct pci_controller *hose = dev->sysdata;
 	unsigned long alignto;
 	unsigned long start = res->start;
 
@@ -148,15 +143,13 @@ pcibios_align_resource(void *data, struct resource *res, unsigned long size)
 		/*
 		 * Put everything into 0x00-0xff region modulo 0x400
 		 */
-		if (start & 0x300) {
+		if (start & 0x300)
 			start = (start + 0x3ff) & ~0x3ff;
-			res->start = start;
-		}
 	}
 	else if	(res->flags & IORESOURCE_MEM) {
 		/* Make sure we start at our min on all hoses */
 		if (start - hose->mem_space->start < PCIBIOS_MIN_MEM)
-			start = PCIBIOS_MIN_MEM + hose->io_space->start;
+			start = PCIBIOS_MIN_MEM + hose->mem_space->start;
 
 		/*
 		 * The following holds at least for the Low Cost
@@ -177,13 +170,13 @@ pcibios_align_resource(void *data, struct resource *res, unsigned long size)
 		/* Align to multiple of size of minimum base.  */
 		alignto = MAX(0x1000, size);
 		start = ALIGN(start, alignto);
-		if (size <= 7 * 16*MB) {
+		if (hose->sparse_mem_base && size <= 7 * 16*MB) {
 			if (((start / (16*MB)) & 0x7) == 0) {
 				start &= ~(128*MB - 1);
 				start += 16*MB;
 				start  = ALIGN(start, alignto);
 			}
-			if (start/(128*MB) != (start + size)/(128*MB)) {
+			if (start/(128*MB) != (start + size - 1)/(128*MB)) {
 				start &= ~(128*MB - 1);
 				start += (128 + 16)*MB;
 				start  = ALIGN(start, alignto);
@@ -224,7 +217,7 @@ void __init
 pcibios_fixup_device_resources(struct pci_dev *dev, struct pci_bus *bus)
 {
 	/* Update device resources.  */
-	struct pci_controler *hose = (struct pci_controler *)bus->sysdata;
+	struct pci_controller *hose = (struct pci_controller *)bus->sysdata;
 	int i;
 
 	for (i = 0; i < PCI_NUM_RESOURCES; i++) {
@@ -244,7 +237,7 @@ pcibios_fixup_bus(struct pci_bus *bus)
 {
 	/* Propogate hose info into the subordinate devices.  */
 
-	struct pci_controler *hose = bus->sysdata;
+	struct pci_controller *hose = bus->sysdata;
 	struct list_head *ln;
 	struct pci_dev *dev = bus->self;
 
@@ -284,7 +277,7 @@ void
 pcibios_update_resource(struct pci_dev *dev, struct resource *root,
 			struct resource *res, int resource)
 {
-	struct pci_controler *hose = dev->sysdata;
+	struct pci_controller *hose = dev->sysdata;
 	int where;
 	u32 reg;
 
@@ -328,7 +321,7 @@ pcibios_update_irq(struct pci_dev *dev, int irq)
 u8 __init
 common_swizzle(struct pci_dev *dev, u8 *pinp)
 {
-	struct pci_controler *hose = dev->sysdata;
+	struct pci_controller *hose = dev->sysdata;
 
 	if (dev->bus->number != hose->first_busno) {
 		u8 pin = *pinp;
@@ -349,7 +342,7 @@ void __init
 pcibios_fixup_pbus_ranges(struct pci_bus * bus,
 			  struct pbus_set_ranges_data * ranges)
 {
-	struct pci_controler *hose = (struct pci_controler *)bus->sysdata;
+	struct pci_controller *hose = (struct pci_controller *)bus->sysdata;
 
 	ranges->io_start -= hose->io_space->start;
 	ranges->io_end -= hose->io_space->start;
@@ -383,11 +376,11 @@ pcibios_set_master(struct pci_dev *dev)
 void __init
 common_init_pci(void)
 {
-	struct pci_controler *hose;
+	struct pci_controller *hose;
 	struct pci_bus *bus;
 	int next_busno;
 
-	/* Scan all of the recorded PCI controlers.  */
+	/* Scan all of the recorded PCI controllers.  */
 	for (next_busno = 0, hose = hose_head; hose; hose = hose->next) {
 		hose->first_busno = next_busno;
 		hose->last_busno = 0xff;
@@ -402,10 +395,10 @@ common_init_pci(void)
 }
 
 
-struct pci_controler * __init
-alloc_pci_controler(void)
+struct pci_controller * __init
+alloc_pci_controller(void)
 {
-	struct pci_controler *hose;
+	struct pci_controller *hose;
 
 	hose = alloc_bootmem(sizeof(*hose));
 
@@ -432,7 +425,7 @@ alloc_resource(void)
 asmlinkage long
 sys_pciconfig_iobase(long which, unsigned long bus, unsigned long dfn)
 {
-	struct pci_controler *hose;
+	struct pci_controller *hose;
 	struct pci_dev *dev;
 
 	/* from hose or from bus.devfn */
@@ -441,15 +434,15 @@ sys_pciconfig_iobase(long which, unsigned long bus, unsigned long dfn)
 			if (hose->index == bus) break;
 		if (!hose) return -ENODEV;
 	} else {
-	/* Special hook for ISA access.  */
-	if (bus == 0 && dfn == 0) {
-		hose = pci_isa_hose;
-	} else {
-		dev = pci_find_slot(bus, dfn);
-		if (!dev)
-			return -ENODEV;
-		hose = dev->sysdata;
-	}
+		/* Special hook for ISA access.  */
+		if (bus == 0 && dfn == 0) {
+			hose = pci_isa_hose;
+		} else {
+			dev = pci_find_slot(bus, dfn);
+			if (!dev)
+				return -ENODEV;
+			hose = dev->sysdata;
+		}
 	}
 
 	switch (which & ~IOBASE_FROM_HOSE) {
@@ -468,4 +461,12 @@ sys_pciconfig_iobase(long which, unsigned long bus, unsigned long dfn)
 	}
 
 	return -EOPNOTSUPP;
+}
+
+/* Return the index of the PCI controller for device PDEV. */
+int
+pci_controller_num(struct pci_dev *pdev)
+{
+        struct pci_controller *hose = pdev->sysdata;
+	return (hose ? hose->index : -ENXIO);
 }

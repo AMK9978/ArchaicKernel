@@ -1,11 +1,12 @@
-/* $Id: w6692.c,v 1.12.6.2 2000/11/29 16:00:14 kai Exp $
+/* $Id: w6692.c,v 1.12.6.6 2001/09/23 22:24:52 kai Exp $
  *
- * w6692.c   Winbond W6692 specific routines
+ * Winbond W6692 specific routines
  *
- * Author       Petr Novak <petr.novak@i.cz>
- *              (based on HiSax driver by Karsten Keil)
- *
- *              This file is (c) under GNU PUBLIC LICENSE
+ * Author       Petr Novak
+ * Copyright    by Petr Novak        <petr.novak@i.cz>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -35,7 +36,7 @@ static const PCI_ENTRY id_list[] =
 
 extern const char *CardType[];
 
-const char *w6692_revision = "$Revision: 1.12.6.2 $";
+const char *w6692_revision = "$Revision: 1.12.6.6 $";
 
 #define DBUSY_TIMER_VALUE 80
 
@@ -641,8 +642,8 @@ W6692_l1hw(struct PStack *st, int pr, void *arg)
 			/* !!! not implemented yet */
 			break;
 		case (HW_DEACTIVATE | RESPONSE):
-			discard_queue(&cs->rq);
-			discard_queue(&cs->sq);
+			skb_queue_purge(&cs->rq);
+			skb_queue_purge(&cs->sq);
 			if (cs->tx_skb) {
 				dev_kfree_skb_any(cs->tx_skb);
 				cs->tx_skb = NULL;
@@ -805,8 +806,8 @@ close_w6692state(struct BCState *bcs)
 			kfree(bcs->blog);
 			bcs->blog = NULL;
 		}
-		discard_queue(&bcs->rqueue);
-		discard_queue(&bcs->squeue);
+		skb_queue_purge(&bcs->rqueue);
+		skb_queue_purge(&bcs->squeue);
 		if (bcs->tx_skb) {
 			dev_kfree_skb_any(bcs->tx_skb);
 			bcs->tx_skb = NULL;

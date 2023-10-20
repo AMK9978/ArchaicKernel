@@ -33,13 +33,9 @@ static void arch_idle(void)
 slow_out:
 }
 
-extern __inline__ void arch_reset(char mode)
+static inline void arch_reset(char mode)
 {
-	extern void ecard_reset(int card);
-
-	ecard_reset(-1);
-
-	outb(0, IOMD_ROMCR0);
+	iomd_writeb(0, IOMD_ROMCR0);
 
 	/*
 	 * Jump into the ROM

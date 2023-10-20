@@ -120,7 +120,7 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mca.h>
 
 #include <linux/spinlock.h>
@@ -592,7 +592,7 @@ static void eexp_timeout(struct net_device *dev)
 
 	status = scb_status(dev);
 	unstick_cu(dev);
-	printk(KERN_INFO "%s: transmit timed out, %s?", dev->name,
+	printk(KERN_INFO "%s: transmit timed out, %s?\n", dev->name,
 	       (SCB_complete(status)?"lost interrupt":
 		"board on fire"));
 	lp->stats.tx_errors++;
@@ -939,6 +939,7 @@ static void eexp_hw_rx_pio(struct net_device *dev)
 			        insw(ioaddr+DATAPORT, skb_put(skb,pkt_len),(pkt_len+1)>>1);
 				skb->protocol = eth_type_trans(skb,dev);
 				netif_rx(skb);
+				dev->last_rx = jiffies;
 				lp->stats.rx_packets++;
 				lp->stats.rx_bytes += pkt_len;
 			}
@@ -1631,6 +1632,10 @@ static int io[EEXP_MAX_CARDS];
 
 MODULE_PARM(io, "1-" __MODULE_STRING(EEXP_MAX_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(EEXP_MAX_CARDS) "i");
+MODULE_PARM_DESC(io, "EtherExpress 16 I/O base address(es)");
+MODULE_PARM_DESC(irq, "EtherExpress 16 IRQ number(s)");
+MODULE_LICENSE("GPL");
+
 
 /* Ideally the user would give us io=, irq= for every card.  If any parameters
  * are specified, we verify and then use them.  If no parameters are given, we

@@ -1,8 +1,8 @@
 /*
  *
- * Hardware accelerated Matrox Millennium I, II, Mystique, G100, G200 and G400
+ * Hardware accelerated Matrox Millennium I, II, Mystique, G100, G200, G400 and G450
  *
- * (c) 1998,1999,2000 Petr Vandrovec <vandrove@vc.cvut.cz>
+ * (c) 1998,1999,2000,2001 Petr Vandrovec <vandrove@vc.cvut.cz>
  *
  */
 #ifndef __MATROXFB_H__
@@ -32,7 +32,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
 #include <linux/console.h>
@@ -102,7 +102,7 @@
 
 #endif /* MATROXFB_DEBUG */
 
-#ifndef __i386__
+#if !defined(__i386__) && !defined(__x86_64__)
 #ifndef ioremap_nocache
 #define ioremap_nocache(X,Y) ioremap(X,Y)
 #endif
@@ -117,7 +117,7 @@
 /* I benchmarked PII/350MHz with G200... MEMCPY, MEMCPYTOIO and WRITEL are on same speed ( <2% diff) */
 /* so that means that G200 speed (or AGP speed?) is our limit... I do not have benchmark to test, how */
 /* much of PCI bandwidth is used during transfers... */
-#if defined(__i386__)
+#if defined(__i386__) || defined(__x86_64__)
 #define MEMCPYTOIO_MEMCPY
 #else
 #define MEMCPYTOIO_WRITEL
@@ -145,21 +145,6 @@
 #endif
 #ifndef PCI_SS_VENDOR_ID_MATROX
 #define PCI_SS_VENDOR_ID_MATROX		PCI_VENDOR_ID_MATROX
-#endif
-#ifndef PCI_DEVICE_ID_MATROX_G200_PCI
-#define PCI_DEVICE_ID_MATROX_G200_PCI	0x0520
-#endif
-#ifndef PCI_DEVICE_ID_MATROX_G200_AGP
-#define PCI_DEVICE_ID_MATROX_G200_AGP	0x0521
-#endif
-#ifndef PCI_DEVICE_ID_MATROX_G100
-#define PCI_DEVICE_ID_MATROX_G100	0x1000
-#endif
-#ifndef PCI_DEVICE_ID_MATROX_G100_AGP
-#define PCI_DEVICE_ID_MATROX_G100_AGP	0x1001
-#endif
-#ifndef PCI_DEVICE_ID_MATROX_G400_AGP
-#define PCI_DEVICE_ID_MATROX_G400_AGP	0x0525
 #endif
 
 #ifndef PCI_SS_ID_MATROX_PRODUCTIVA_G100_AGP
@@ -492,6 +477,7 @@ struct matrox_fb_info {
 		int		cross4MB;
 		int		text;
 		int		plnwt;
+		int		srcorg;
 			      } capable;
 	struct {
 		unsigned int	size;
@@ -532,6 +518,8 @@ struct matrox_fb_info {
 						/* 0 except for 6MB Millenium */
 		int		memtype;
 		int		g450dac;
+		int		g550dac;
+		int		dfp_type;
 			      } devflags;
 	struct display_switch	dispsw;
 	struct {
@@ -589,7 +577,6 @@ static inline struct matrox_fb_info* mxinfo(const struct display* p) {
 #else
 
 extern struct matrox_fb_info matroxfb_global_mxinfo;
-struct display global_disp;
 
 #define ACCESS_FBINFO(x) (matroxfb_global_mxinfo.x)
 #define ACCESS_FBINFO2(info, x) (matroxfb_global_mxinfo.x)
@@ -739,6 +726,7 @@ void matroxfb_unregister_driver(struct matroxfb_driver* drv);
 
 /* G200 only */
 #define M_SRCORG	0x2CB4
+#define M_DSTORG	0x2CB8
 
 #define M_RAMDAC_BASE	0x3C00
 
@@ -787,11 +775,7 @@ void matroxfb_unregister_driver(struct matroxfb_driver* drv);
 #define mga_setr(addr,port,val) do { mga_outb(addr, port); mga_outb((addr)+1, val); } while (0)
 #endif
 
-#ifdef __LITTLE_ENDIAN
-#define mga_fifo(n)	do {} while (mga_inb(M_FIFOSTATUS) < (n))
-#else
 #define mga_fifo(n)	do {} while ((mga_inl(M_FIFOSTATUS) & 0xFF) < (n))
-#endif
 
 #define WaitTillIdle()	do {} while (mga_inl(M_STATUS) & 0x10000)
 

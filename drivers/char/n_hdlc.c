@@ -96,7 +96,7 @@
 
 #include <linux/poll.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/tty.h>
 #include <linux/errno.h>
 #include <linux/string.h>	/* used in new tty drivers */
@@ -1031,3 +1031,6 @@ static void __exit n_hdlc_exit(void)
 
 module_init(n_hdlc_init);
 module_exit(n_hdlc_exit);
+
+MODULE_LICENSE("GPL");
+EXPORT_NO_SYMBOLS;

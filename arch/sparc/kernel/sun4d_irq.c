@@ -1,4 +1,4 @@
-/*  $Id: sun4d_irq.c,v 1.26 2000/07/26 01:04:03 davem Exp $
+/*  $Id: sun4d_irq.c,v 1.28 2001/07/17 16:17:33 anton Exp $
  *  arch/sparc/kernel/sun4d_irq.c:
  *			SS1000/SC2000 interrupt handling.
  *
@@ -14,7 +14,7 @@
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/init.h>
 #include <linux/smp.h>
@@ -237,6 +237,8 @@ void sun4d_handler_irq(int irq, struct pt_regs * regs)
 			}
 	}
 	irq_exit(cpu, irq);
+	if (softirq_pending(cpu))
+		do_softirq();
 }
 
 unsigned int sun4d_build_irq(struct sbus_dev *sdev, int irq)

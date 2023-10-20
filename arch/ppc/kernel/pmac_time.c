@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.pmac_time.c 1.16 09/08/01 15:47:42 paulus
+ */
+/*
  * Support for periodic interrupts (100 per second) and for getting
  * the current time from the RTC on Power Macintoshes.
  *
@@ -19,7 +22,7 @@
 #include <linux/cuda.h>
 #include <linux/pmu.h>
 
-#include <asm/init.h>
+#include <asm/sections.h>
 #include <asm/prom.h>
 #include <asm/system.h>
 #include <asm/io.h>
@@ -57,8 +60,8 @@ extern rwlock_t xtime_lock;
 
 extern struct timezone sys_tz;
 
-__init
-long pmac_time_init(void)
+long __init
+pmac_time_init(void)
 {
 #ifdef CONFIG_NVRAM
 	s32 delta = 0;
@@ -78,8 +81,8 @@ long pmac_time_init(void)
 #endif
 }
 
-__pmac
-unsigned long pmac_get_rtc_time(void)
+unsigned long __pmac
+pmac_get_rtc_time(void)
 {
 #if defined(CONFIG_ADB_CUDA) || defined(CONFIG_ADB_PMU)
 	struct adb_request req;
@@ -114,12 +117,13 @@ unsigned long pmac_get_rtc_time(void)
 			+ (req.reply[3] << 8) + req.reply[4];
 		return now - RTC_OFFSET;
 #endif /* CONFIG_ADB_PMU */
-	default:
+	default: ;
 	}
 	return 0;
 }
 
-int pmac_set_rtc_time(unsigned long nowtime)
+int __pmac
+pmac_set_rtc_time(unsigned long nowtime)
 {
 #if defined(CONFIG_ADB_CUDA) || defined(CONFIG_ADB_PMU)
 	struct adb_request req;
@@ -135,7 +139,7 @@ int pmac_set_rtc_time(unsigned long nowtime)
 			return 0;
 		while (!req.complete)
 			cuda_poll();
-//		if (req.reply_len != 7)
+		if ((req.reply_len != 3) && (req.reply_len != 7))
 			printk(KERN_ERR "pmac_set_rtc_time: got %d byte reply\n",
 			       req.reply_len);
 		return 1;
@@ -161,7 +165,8 @@ int pmac_set_rtc_time(unsigned long nowtime)
  * Calibrate the decrementer register using VIA timer 1.
  * This is used both on powermacs and CHRP machines.
  */
-int __init via_calibrate_decr(void)
+int __init
+via_calibrate_decr(void)
 {
 	struct device_node *vias;
 	volatile unsigned char *via;
@@ -208,7 +213,8 @@ int __init via_calibrate_decr(void)
 /*
  * Reset the time after a sleep.
  */
-static int time_sleep_notify(struct pmu_sleep_notifier *self, int when)
+static int __pmac
+time_sleep_notify(struct pmu_sleep_notifier *self, int when)
 {
 	static unsigned long time_diff;
 	unsigned long flags;
@@ -234,7 +240,7 @@ static int time_sleep_notify(struct pmu_sleep_notifier *self, int when)
 	return PBOOK_SLEEP_OK;
 }
 
-static struct pmu_sleep_notifier time_sleep_notifier = {
+static struct pmu_sleep_notifier time_sleep_notifier __pmacdata = {
 	time_sleep_notify, SLEEP_LEVEL_MISC,
 };
 #endif /* CONFIG_PMAC_PBOOK */
@@ -244,7 +250,8 @@ static struct pmu_sleep_notifier time_sleep_notifier = {
  * This was taken from the pmac time_init() when merging the prep/pmac
  * time functions.
  */
-void __init pmac_calibrate_decr(void)
+void __init
+pmac_calibrate_decr(void)
 {
 	struct device_node *cpu;
 	unsigned int freq, *fp;
@@ -253,8 +260,13 @@ void __init pmac_calibrate_decr(void)
 	pmu_register_sleep_notifier(&time_sleep_notifier);
 #endif /* CONFIG_PMAC_PBOOK */
 
-	if (via_calibrate_decr())
-		return;
+	/* We assume MacRISC2 machines have correct device-tree
+	 * calibration. That's better since the VIA itself seems
+	 * to be slightly off. --BenH
+	 */
+	if (!machine_is_compatible("MacRISC2"))
+		if (via_calibrate_decr())
+			return;
 
 	/*
 	 * The cpu node should have a timebase-frequency property
@@ -272,4 +284,3 @@ void __init pmac_calibrate_decr(void)
 	tb_ticks_per_jiffy = freq / HZ;
 	tb_to_us = mulhwu_scale_factor(freq, 1000000);
 }
-

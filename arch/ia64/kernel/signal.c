@@ -1,8 +1,8 @@
 /*
  * Architecture-specific signal handling support.
  *
- * Copyright (C) 1999-2000 Hewlett-Packard Co
- * Copyright (C) 1999-2000 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1999-2001 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  *
  * Derived from i386 and Alpha versions.
  */
@@ -25,6 +25,8 @@
 #include <asm/rse.h>
 #include <asm/sigcontext.h>
 
+#include "sigframe.h"
+
 #define DEBUG_SIG	0
 #define STACK_ALIGN	16		/* minimal alignment for stack pointer */
 #define _BLOCKABLE	(~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
@@ -37,22 +39,6 @@
 # define GET_SIGSET(k,u)	__get_user((k)->sig[0], &(u)->sig[0])
 #endif
 
-struct sigscratch {
-#ifdef CONFIG_IA64_NEW_UNWIND
-	unsigned long scratch_unat;	/* ar.unat for the general registers saved in pt */
-	unsigned long pad;
-#else
-	struct switch_stack sw;
-#endif
-	struct pt_regs pt;
-};
-
-struct sigframe {
-	struct siginfo info;
-	struct sigcontext sc;
-};
-
-extern long sys_wait4 (int, int *, int, struct rusage *);
 extern long ia64_do_signal (sigset_t *, struct sigscratch *, long);	/* forward decl */
 
 long
@@ -63,6 +49,10 @@ ia64_rt_sigsuspend (sigset_t *uset, size_t sigsetsize, struct sigscratch *scr)
 	/* XXX: Don't preclude handling different sized sigset_t's.  */
 	if (sigsetsize != sizeof(sigset_t))
 		return -EINVAL;
+
+	if (!access_ok(VERIFY_READ, uset, sigsetsize))
+		return -EFAULT;
+
 	if (GET_SIGSET(&set, uset))
 		return -EFAULT;
 
@@ -81,15 +71,9 @@ ia64_rt_sigsuspend (sigset_t *uset, size_t sigsetsize, struct sigscratch *scr)
 	 * pre-set the correct error code here to ensure that the right values
 	 * get saved in sigcontext by ia64_do_signal.
 	 */
-#ifdef CONFIG_IA32_SUPPORT
-        if (IS_IA32_PROCESS(&scr->pt)) {
-                scr->pt.r8 = -EINTR;
-        } else
-#endif
-	{
-		scr->pt.r8 = EINTR;
-		scr->pt.r10 = -1;
-	}
+	scr->pt.r8 = EINTR;
+	scr->pt.r10 = -1;
+
 	while (1) {
 		current->state = TASK_INTERRUPTIBLE;
 		schedule();
@@ -141,20 +125,15 @@ restore_sigcontext (struct sigcontext *sc, struct sigscratch *scr)
 	ia64_psr(&scr->pt)->ri = ip & 0x3;
 	scr->pt.cr_ipsr = (scr->pt.cr_ipsr & ~IA64_PSR_UM) | (um & IA64_PSR_UM);
 
-#ifdef CONFIG_IA64_NEW_UNWIND
 	scr->scratch_unat = ia64_put_scratch_nat_bits(&scr->pt, nat);
-#else
-	ia64_put_nat_bits(&scr->pt, &scr->sw, nat);	/* restore the original scratch NaT bits */
-#endif
 
 	if ((flags & IA64_SC_FLAG_FPH_VALID) != 0) {
 		struct ia64_psr *psr = ia64_psr(&scr->pt);
 
 		__copy_from_user(current->thread.fph, &sc->sc_fr[32], 96*16);
-		if (!psr->dfh) {
-			psr->mfh = 0;
+		psr->mfh = 0;	/* drop signal handler's fph contents... */
+		if (!psr->dfh)
 			__ia64_load_fpu(current->thread.fph);
-		}
 	}
 	return err;
 }
@@ -162,7 +141,7 @@ restore_sigcontext (struct sigcontext *sc, struct sigscratch *scr)
 int
 copy_siginfo_to_user (siginfo_t *to, siginfo_t *from)
 {
-	if (!access_ok (VERIFY_WRITE, to, sizeof(siginfo_t)))
+	if (!access_ok(VERIFY_WRITE, to, sizeof(siginfo_t)))
 		return -EFAULT;
 	if (from->si_code < 0)
 		return __copy_to_user(to, from, sizeof(siginfo_t));
@@ -190,6 +169,11 @@ copy_siginfo_to_user (siginfo_t *to, siginfo_t *from)
 			err |= __put_user(from->si_utime, &to->si_utime);
 			err |= __put_user(from->si_stime, &to->si_stime);
 			err |= __put_user(from->si_status, &to->si_status);
+		      case __SI_PROF >> 16:
+			err |= __put_user(from->si_uid, &to->si_uid);
+			err |= __put_user(from->si_pid, &to->si_pid);
+			err |= __put_user(from->si_pfm_ovfl, &to->si_pfm_ovfl);
+			break;
 		      default:
 			err |= __put_user(from->si_uid, &to->si_uid);
 			err |= __put_user(from->si_pid, &to->si_pid);
@@ -198,6 +182,43 @@ copy_siginfo_to_user (siginfo_t *to, siginfo_t *from)
 		}
 		return err;
 	}
+}
+
+int
+copy_siginfo_from_user (siginfo_t *to, siginfo_t *from)
+{
+	if (!access_ok(VERIFY_READ, from, sizeof(siginfo_t)))
+		return -EFAULT;
+	if (__copy_from_user(to, from, sizeof(siginfo_t)) != 0)
+		return -EFAULT;
+
+	if (SI_FROMUSER(to))
+		return 0;
+
+	to->si_code &= ~__SI_MASK;
+	if (to->si_code != 0) {
+		switch (to->si_signo) {
+		      case SIGILL: case SIGFPE: case SIGSEGV: case SIGBUS: case SIGTRAP:
+			to->si_code |= __SI_FAULT;
+			break;
+
+		      case SIGCHLD:
+			to->si_code |= __SI_CHLD;
+			break;
+
+		      case SIGPOLL:
+			to->si_code |= __SI_POLL;
+			break;
+
+		      case SIGPROF:
+			to->si_code |= __SI_PROF;
+			break;
+
+		      default:
+			break;
+		}
+	}
+	return 0;
 }
 
 long
@@ -212,19 +233,17 @@ ia64_rt_sigreturn (struct sigscratch *scr)
 	sc = &((struct sigframe *) (scr->pt.r12 + 16))->sc;
 
 	/*
-	 * When we return to the previously executing context, r8 and
-	 * r10 have already been setup the way we want them.  Indeed,
-	 * if the signal wasn't delivered while in a system call, we
-	 * must not touch r8 or r10 as otherwise user-level stat could
-	 * be corrupted.
+	 * When we return to the previously executing context, r8 and r10 have already
+	 * been setup the way we want them.  Indeed, if the signal wasn't delivered while
+	 * in a system call, we must not touch r8 or r10 as otherwise user-level state
+	 * could be corrupted.
 	 */
 	retval = (long) &ia64_leave_kernel;
 	if (current->ptrace & PT_TRACESYS)
 		/*
-		 * strace expects to be notified after sigreturn
-		 * returns even though the context to which we return
-		 * may not be in the middle of a syscall.  Thus, the
-		 * return-value that strace displays for sigreturn is
+		 * strace expects to be notified after sigreturn returns even though the
+		 * context to which we return may not be in the middle of a syscall.
+		 * Thus, the return-value that strace displays for sigreturn is
 		 * meaningless.
 		 */
 		retval = (long) &ia64_strace_leave_kernel;
@@ -301,11 +320,7 @@ setup_sigcontext (struct sigcontext *sc, sigset_t *mask, struct sigscratch *scr)
 	 * preserved registers (r4-r7) are never being looked at by
 	 * the signal handler (registers r4-r7 are used instead).
 	 */
-#ifdef CONFIG_IA64_NEW_UNWIND
 	nat = ia64_get_scratch_nat_bits(&scr->pt, scr->scratch_unat);
-#else
-	nat = ia64_get_nat_bits(&scr->pt, &scr->sw);
-#endif
 
 	err  = __put_user(flags, &sc->sc_flags);
 
@@ -353,7 +368,14 @@ setup_frame (int sig, struct k_sigaction *ka, siginfo_t *info, sigset_t *set,
 	if (!access_ok(VERIFY_WRITE, frame, sizeof(*frame)))
 		goto give_sigsegv;
 
-	err  = copy_siginfo_to_user(&frame->info, info);
+	err  = __put_user(sig, &frame->arg0);
+	err |= __put_user(&frame->info, &frame->arg1);
+	err |= __put_user(&frame->sc, &frame->arg2);
+	err |= __put_user(new_rbs, &frame->sc.sc_rbs_base);
+	err |= __put_user(0, &frame->sc.sc_loadrs);	/* initialize to zero */
+	err |= __put_user(ka->sa.sa_handler, &frame->handler);
+
+	err |= copy_siginfo_to_user(&frame->info, info);
 
 	err |= __put_user(current->sas_ss_sp, &frame->sc.sc_stack.ss_sp);
 	err |= __put_user(current->sas_ss_size, &frame->sc.sc_stack.ss_size);
@@ -363,29 +385,16 @@ setup_frame (int sig, struct k_sigaction *ka, siginfo_t *info, sigset_t *set,
 	if (err)
 		goto give_sigsegv;
 
-	scr->pt.r12 = (unsigned long) frame - 16;		/* new stack pointer */
-	scr->pt.r2  = sig;					/* signal number */
-	scr->pt.r3  = (unsigned long) ka->sa.sa_handler;	/* addr. of handler's proc desc */
-	scr->pt.r15 = new_rbs;
+	scr->pt.r12 = (unsigned long) frame - 16;	/* new stack pointer */
 	scr->pt.ar_fpsr = FPSR_DEFAULT;			/* reset fpsr for signal handler */
 	scr->pt.cr_iip = tramp_addr;
 	ia64_psr(&scr->pt)->ri = 0;			/* start executing in first slot */
 
-#ifdef CONFIG_IA64_NEW_UNWIND
 	/*
-	 * Note: this affects only the NaT bits of the scratch regs
-	 * (the ones saved in pt_regs), which is exactly what we want.
+	 * Note: this affects only the NaT bits of the scratch regs (the ones saved in
+	 * pt_regs), which is exactly what we want.
 	 */
-	scr->scratch_unat = 0; /* ensure NaT bits of at least r2, r3, r12, and r15 are clear */
-#else
-	/*
-	 * Note: this affects only the NaT bits of the scratch regs
-	 * (the ones saved in pt_regs), which is exactly what we want.
-	 * The NaT bits for the preserved regs (r4-r7) are in
-	 * sw->ar_unat iff this process is being PTRACED.
-	 */
-	scr->sw.caller_unat = 0; /* ensure NaT bits of at least r2, r3, r12, and r15 are clear */
-#endif
+	scr->scratch_unat = 0; /* ensure NaT bits of r12 is clear */
 
 #if DEBUG_SIG
 	printk("SIG deliver (%s:%d): sig=%d sp=%lx ip=%lx handler=%lx\n",
@@ -437,26 +446,22 @@ handle_signal (unsigned long sig, struct k_sigaction *ka, siginfo_t *info, sigse
 }
 
 /*
- * Note that `init' is a special process: it doesn't get signals it
- * doesn't want to handle.  Thus you cannot kill init even with a
- * SIGKILL even by mistake.
- *
- * Note that we go through the signals twice: once to check the
- * signals that the kernel can handle, and then we build all the
- * user-level signal handling stack-frames in one go after that.
+ * Note that `init' is a special process: it doesn't get signals it doesn't want to
+ * handle.  Thus you cannot kill init even with a SIGKILL even by mistake.
  */
 long
 ia64_do_signal (sigset_t *oldset, struct sigscratch *scr, long in_syscall)
 {
+	struct signal_struct *sig;
 	struct k_sigaction *ka;
 	siginfo_t info;
 	long restart = in_syscall;
 	long errno = scr->pt.r8;
 
 	/*
-	 * In the ia64_leave_kernel code path, we want the common case
-	 * to go fast, which is why we may in certain cases get here
-	 * from kernel mode. Just return without doing anything if so.
+	 * In the ia64_leave_kernel code path, we want the common case to go fast, which
+	 * is why we may in certain cases get here from kernel mode. Just return without
+	 * doing anything if so.
 	 */
 	if (!user_mode(&scr->pt))
 		return 0;
@@ -476,11 +481,10 @@ ia64_do_signal (sigset_t *oldset, struct sigscratch *scr, long in_syscall)
 #endif
 	if (scr->pt.r10 != -1) {
 		/*
-		 * A system calls has to be restarted only if one of
-		 * the error codes ERESTARTNOHAND, ERESTARTSYS, or
-		 * ERESTARTNOINTR is returned.  If r10 isn't -1 then
-		 * r8 doesn't hold an error code and we don't need to
-		 * restart the syscall, so we set in_syscall to zero.
+		 * A system calls has to be restarted only if one of the error codes
+		 * ERESTARTNOHAND, ERESTARTSYS, or ERESTARTNOINTR is returned.  If r10
+		 * isn't -1 then r8 doesn't hold an error code and we don't need to
+		 * restart the syscall, so we can clear the "restart" flag here.
 		 */
 		restart = 0;
 	}
@@ -560,8 +564,8 @@ ia64_do_signal (sigset_t *oldset, struct sigscratch *scr, long in_syscall)
 			      case SIGSTOP:
 				current->state = TASK_STOPPED;
 				current->exit_code = signr;
-				if (!(current->p_pptr->sig->action[SIGCHLD-1].sa.sa_flags
-				      & SA_NOCLDSTOP))
+				sig = current->p_pptr->sig;
+				if (sig && !(sig->action[SIGCHLD-1].sa.sa_flags & SA_NOCLDSTOP))
 					notify_parent(current, SIGCHLD);
 				schedule();
 				continue;

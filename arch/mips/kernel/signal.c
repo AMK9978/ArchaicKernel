@@ -30,11 +30,10 @@
 
 #define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
 
-extern asmlinkage int sys_wait4(pid_t pid, unsigned long *stat_addr,
-                         int options, unsigned long *ru);
 extern asmlinkage int do_signal(sigset_t *oldset, struct pt_regs *regs);
-extern asmlinkage int save_fp_context(struct sigcontext *sc);
-extern asmlinkage int restore_fp_context(struct sigcontext *sc);
+
+extern asmlinkage int (*save_fp_context)(struct sigcontext *sc);
+extern asmlinkage int (*restore_fp_context)(struct sigcontext *sc);
 
 extern asmlinkage void syscall_trace(void);
 
@@ -76,12 +75,12 @@ int copy_siginfo_to_user(siginfo_t *to, siginfo_t *from)
 /*
  * Atomically swap in the new signal mask, and wait for a signal.
  */
-asmlinkage inline int
-sys_sigsuspend(struct pt_regs regs)
+save_static_function(sys_sigsuspend);
+static_unused int
+_sys_sigsuspend(struct pt_regs regs)
 {
 	sigset_t *uset, saveset, newset;
 
-	save_static(&regs);
 	uset = (sigset_t *) regs.regs[4];
 	if (copy_from_user(&newset, uset, sizeof(sigset_t)))
 		return -EFAULT;
@@ -103,13 +102,13 @@ sys_sigsuspend(struct pt_regs regs)
 	}
 }
 
-asmlinkage int
-sys_rt_sigsuspend(struct pt_regs regs)
+
+save_static_function(sys_rt_sigsuspend);
+static_unused int
+_sys_rt_sigsuspend(struct pt_regs regs)
 {
 	sigset_t *unewset, saveset, newset;
         size_t sigsetsize;
-
-	save_static(&regs);
 
 	/* XXX Don't preclude handling different sized sigset_t's.  */
 	sigsetsize = regs.regs[5];
@@ -355,7 +354,7 @@ setup_sigcontext(struct pt_regs *regs, struct sigcontext *sc)
 	err |= __put_user(owned_fp, &sc->sc_ownedfp);
 
 	if (current->used_math) {	/* fp is active.  */
-		set_cp0_status(ST0_CU1, ST0_CU1);
+		set_cp0_status(ST0_CU1);
 		err |= save_fp_context(sc);
 		last_task_used_math = NULL;
 		regs->cp0_status &= ~ST0_CU1;
@@ -465,10 +464,10 @@ setup_rt_frame(struct k_sigaction * ka, struct pt_regs *regs,
 		/*
 		 * Set up the return code ...
 		 *
-		 *         li      v0, __NR_sigreturn
+		 *         li      v0, __NR_rt_sigreturn
 		 *         syscall
 		 */
-		err |= __put_user(0x24020000 + __NR_sigreturn,
+		err |= __put_user(0x24020000 + __NR_rt_sigreturn,
 		                  frame->rs_code + 0);
 		err |= __put_user(0x0000000c                 ,
 		                  frame->rs_code + 1);

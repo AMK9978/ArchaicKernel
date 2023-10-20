@@ -1,4 +1,4 @@
-/*  $Id: init.c,v 1.161 2000/12/09 20:16:58 davem Exp $
+/*  $Id: init.c,v 1.202 2001/11/13 00:49:28 davem Exp $
  *  arch/sparc64/mm/init.c
  *
  *  Copyright (C) 1996-1999 David S. Miller (davem@caip.rutgers.edu)
@@ -12,10 +12,13 @@
 #include <linux/init.h>
 #include <linux/bootmem.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/blk.h>
 #include <linux/swap.h>
 #include <linux/swapctl.h>
+#include <linux/pagemap.h>
+#include <linux/fs.h>
+#include <linux/seq_file.h>
 
 #include <asm/head.h>
 #include <asm/system.h>
@@ -27,9 +30,12 @@
 #include <asm/io.h>
 #include <asm/uaccess.h>
 #include <asm/mmu_context.h>
-#include <asm/vaddrs.h>
 #include <asm/dma.h>
 #include <asm/starfire.h>
+#include <asm/tlb.h>
+#include <asm/spitfire.h>
+
+mmu_gather_t mmu_gathers[NR_CPUS];
 
 extern void device_scan(void);
 
@@ -39,6 +45,8 @@ unsigned long *sparc64_valid_addr_bitmap;
 
 /* Ugly, but necessary... -DaveM */
 unsigned long phys_base;
+
+enum ultra_tlb_layout tlb_type = spitfire;
 
 /* get_new_mmu_context() uses "cache + 1".  */
 spinlock_t ctx_alloc_lock = SPIN_LOCK_UNLOCKED;
@@ -53,21 +61,23 @@ extern char __init_begin, __init_end, _start, _end, etext, edata;
 extern unsigned int sparc_ramdisk_image;
 extern unsigned int sparc_ramdisk_size;
 
+struct page *mem_map_zero;
+
 int do_check_pgt_cache(int low, int high)
 {
         int freed = 0;
 
-	if(pgtable_cache_size > high) {
+	if (pgtable_cache_size > high) {
 		do {
 #ifdef CONFIG_SMP
-			if(pgd_quicklist)
+			if (pgd_quicklist)
 				free_pgd_slow(get_pgd_fast()), freed++;
 #endif
-			if(pte_quicklist[0])
-				free_pte_slow(get_pte_fast(0)), freed++;
-			if(pte_quicklist[1])
-				free_pte_slow(get_pte_fast(1)), freed++;
-		} while(pgtable_cache_size > low);
+			if (pte_quicklist[0])
+				free_pte_slow(pte_alloc_one_fast(NULL, 0)), freed++;
+			if (pte_quicklist[1])
+				free_pte_slow(pte_alloc_one_fast(NULL, 1 << (PAGE_SHIFT + 10))), freed++;
+		} while (pgtable_cache_size > low);
 	}
 #ifndef CONFIG_SMP 
         if (pgd_cache_size > high / 4) {
@@ -101,49 +111,130 @@ int do_check_pgt_cache(int low, int high)
 
 extern void __update_mmu_cache(struct vm_area_struct *, unsigned long, pte_t);
 
+#ifdef DCFLUSH_DEBUG
+atomic_t dcpage_flushes = ATOMIC_INIT(0);
+#ifdef CONFIG_SMP
+atomic_t dcpage_flushes_xcall = ATOMIC_INIT(0);
+#endif
+#endif
+
+__inline__ void flush_dcache_page_impl(struct page *page)
+{
+#ifdef DCFLUSH_DEBUG
+	atomic_inc(&dcpage_flushes);
+#endif
+
+#if (L1DCACHE_SIZE > PAGE_SIZE)
+	__flush_dcache_page(page->virtual,
+			    ((tlb_type == spitfire) &&
+			     page->mapping != NULL));
+#else
+	if (page->mapping != NULL &&
+	    tlb_type == spitfire)
+		__flush_icache_page(__pa(page->virtual));
+#endif
+}
+
+#define PG_dcache_dirty		PG_arch_1
+
+#define dcache_dirty_cpu(page) \
+	(((page)->flags >> 24) & (NR_CPUS - 1UL))
+
+static __inline__ void set_dcache_dirty(struct page *page)
+{
+	unsigned long mask = smp_processor_id();
+	unsigned long non_cpu_bits = (1UL << 24UL) - 1UL;
+	mask = (mask << 24) | (1UL << PG_dcache_dirty);
+	__asm__ __volatile__("1:\n\t"
+			     "ldx	[%2], %%g7\n\t"
+			     "and	%%g7, %1, %%g5\n\t"
+			     "or	%%g5, %0, %%g5\n\t"
+			     "casx	[%2], %%g7, %%g5\n\t"
+			     "cmp	%%g7, %%g5\n\t"
+			     "bne,pn	%%xcc, 1b\n\t"
+			     " nop"
+			     : /* no outputs */
+			     : "r" (mask), "r" (non_cpu_bits), "r" (&page->flags)
+			     : "g5", "g7");
+}
+
+static __inline__ void clear_dcache_dirty_cpu(struct page *page, unsigned long cpu)
+{
+	unsigned long mask = (1UL << PG_dcache_dirty);
+
+	__asm__ __volatile__("! test_and_clear_dcache_dirty\n"
+			     "1:\n\t"
+			     "ldx	[%2], %%g7\n\t"
+			     "srlx	%%g7, 24, %%g5\n\t"
+			     "cmp	%%g5, %0\n\t"
+			     "bne,pn	%%icc, 2f\n\t"
+			     " andn	%%g7, %1, %%g5\n\t"
+			     "casx	[%2], %%g7, %%g5\n\t"
+			     "cmp	%%g7, %%g5\n\t"
+			     "bne,pn	%%xcc, 1b\n\t"
+			     " nop\n"
+			     "2:"
+			     : /* no outputs */
+			     : "r" (cpu), "r" (mask), "r" (&page->flags)
+			     : "g5", "g7");
+}
+
 void update_mmu_cache(struct vm_area_struct *vma, unsigned long address, pte_t pte)
 {
 	struct page *page = pte_page(pte);
+	unsigned long pg_flags;
 
-	if (VALID_PAGE(page) && page->mapping &&
-	    test_bit(PG_dcache_dirty, &page->flags)) {
-		__flush_dcache_page(page->virtual, 1);
-		clear_bit(PG_dcache_dirty, &page->flags);
+	if (VALID_PAGE(page) &&
+	    page->mapping &&
+	    ((pg_flags = page->flags) & (1UL << PG_dcache_dirty))) {
+		int cpu = (pg_flags >> 24);
+
+		/* This is just to optimize away some function calls
+		 * in the SMP case.
+		 */
+		if (cpu == smp_processor_id())
+			flush_dcache_page_impl(page);
+		else
+			smp_flush_dcache_page_impl(page, cpu);
+
+		clear_dcache_dirty_cpu(page, cpu);
 	}
 	__update_mmu_cache(vma, address, pte);
 }
 
-/* In arch/sparc64/mm/ultra.S */
-extern void __flush_icache_page(unsigned long);
+void flush_dcache_page(struct page *page)
+{
+	int dirty = test_bit(PG_dcache_dirty, &page->flags);
+	int dirty_cpu = dcache_dirty_cpu(page);
+
+	if (page->mapping &&
+	    page->mapping->i_mmap == NULL &&
+	    page->mapping->i_mmap_shared == NULL) {
+		if (dirty) {
+			if (dirty_cpu == smp_processor_id())
+				return;
+			smp_flush_dcache_page_impl(page, dirty_cpu);
+		}
+		set_dcache_dirty(page);
+	} else {
+		/* We could delay the flush for the !page->mapping
+		 * case too.  But that case is for exec env/arg
+		 * pages and those are %99 certainly going to get
+		 * faulted into the tlb (and thus flushed) anyways.
+		 */
+		flush_dcache_page_impl(page);
+	}
+}
 
 void flush_icache_range(unsigned long start, unsigned long end)
 {
-	unsigned long kaddr;
+	/* Cheetah has coherent I-cache. */
+	if (tlb_type == spitfire) {
+		unsigned long kaddr;
 
-	for (kaddr = start; kaddr < end; kaddr += PAGE_SIZE)
-		__flush_icache_page(__get_phys(kaddr));
-}
-
-/*
- * BAD_PAGE is the page that is used for page faults when linux
- * is out-of-memory. Older versions of linux just did a
- * do_exit(), but using this instead means there is less risk
- * for a process dying in kernel mode, possibly leaving an inode
- * unused etc..
- *
- * BAD_PAGETABLE is the accompanying page-table: it is initialized
- * to point to BAD_PAGE entries.
- *
- * ZERO_PAGE is a special page that is used for zero-initialized
- * data and COW.
- */
-pte_t __bad_page(void)
-{
-	memset((void *) &empty_bad_page, 0, PAGE_SIZE);
-	return pte_mkdirty(mk_pte_phys((((unsigned long) &empty_bad_page) 
-					- ((unsigned long)&empty_zero_page)
-					+ phys_base),
-				       PAGE_SHARED));
+		for (kaddr = start; kaddr < end; kaddr += PAGE_SIZE)
+			__flush_icache_page(__get_phys(kaddr));
+	}
 }
 
 void show_mem(void)
@@ -161,15 +252,23 @@ void show_mem(void)
 	show_buffers();
 }
 
-int mmu_info(char *buf)
+void mmu_info(struct seq_file *m)
 {
-	/* We'll do the rest later to make it nice... -DaveM */
-#if 0
-	if (this_is_cheetah)
-		sprintf(buf, "MMU Type\t: One bad ass cpu\n");
+	if (tlb_type == cheetah)
+		seq_printf(m, "MMU Type\t: Cheetah\n");
+	else if (tlb_type == spitfire)
+		seq_printf(m, "MMU Type\t: Spitfire\n");
 	else
-#endif
-	return sprintf(buf, "MMU Type\t: Spitfire\n");
+		seq_printf(m, "MMU Type\t: ???\n");
+
+#ifdef DCFLUSH_DEBUG
+	seq_printf(m, "DCPageFlushes\t: %d\n",
+		   atomic_read(&dcpage_flushes));
+#ifdef CONFIG_SMP
+	seq_printf(m, "DCPageFlushesXC\t: %d\n",
+		   atomic_read(&dcpage_flushes_xcall));
+#endif /* CONFIG_SMP */
+#endif /* DCFLUSH_DEBUG */
 }
 
 struct linux_prom_translation {
@@ -192,15 +291,47 @@ void __init early_pgtable_allocfail(char *type)
 	prom_halt();
 }
 
+#define BASE_PAGE_SIZE 8192
+static pmd_t *prompmd;
+
+/*
+ * Translate PROM's mapping we capture at boot time into physical address.
+ * The second parameter is only set from prom_callback() invocations.
+ */
+unsigned long prom_virt_to_phys(unsigned long promva, int *error)
+{
+	pmd_t *pmdp = prompmd + ((promva >> 23) & 0x7ff);
+	pte_t *ptep;
+	unsigned long base;
+
+	if (pmd_none(*pmdp)) {
+		if (error)
+			*error = 1;
+		return(0);
+	}
+	ptep = (pte_t *)pmd_page(*pmdp) + ((promva >> 13) & 0x3ff);
+	if (!pte_present(*ptep)) {
+		if (error)
+			*error = 1;
+		return(0);
+	}
+	if (error) {
+		*error = 0;
+		return(pte_val(*ptep));
+	}
+	base = pte_val(*ptep) & _PAGE_PADDR;
+	return(base + (promva & (BASE_PAGE_SIZE - 1)));
+}
+
 static void inherit_prom_mappings(void)
 {
 	struct linux_prom_translation *trans;
 	unsigned long phys_page, tte_vaddr, tte_data;
 	void (*remap_func)(unsigned long, unsigned long, int);
-	pgd_t *pgdp;
 	pmd_t *pmdp;
 	pte_t *ptep;
 	int node, n, i, tsz;
+	extern unsigned int obp_iaddr_patch[2], obp_daddr_patch[2];
 
 	node = prom_finddevice("/virtual-memory");
 	n = prom_getproplen(node, "translations");
@@ -224,39 +355,58 @@ static void inherit_prom_mappings(void)
 	}
 	n = n / sizeof(*trans);
 
+	/*
+	 * The obp translations are saved based on 8k pagesize, since obp can use
+	 * a mixture of pagesizes. Misses to the 0xf0000000 - 0x100000000, ie obp 
+	 * range, are handled in entry.S and do not use the vpte scheme (see rant
+	 * in inherit_locked_prom_mappings()).
+	 */
+#define OBP_PMD_SIZE 2048
+	prompmd = __alloc_bootmem(OBP_PMD_SIZE, OBP_PMD_SIZE, 0UL);
+	if (prompmd == NULL)
+		early_pgtable_allocfail("pmd");
+	memset(prompmd, 0, OBP_PMD_SIZE);
 	for (i = 0; i < n; i++) {
 		unsigned long vaddr;
 
-		if (trans[i].virt >= 0xf0000000 && trans[i].virt < 0x100000000) {
+		if (trans[i].virt >= LOW_OBP_ADDRESS && trans[i].virt < HI_OBP_ADDRESS) {
 			for (vaddr = trans[i].virt;
-			     vaddr < trans[i].virt + trans[i].size;
-			     vaddr += PAGE_SIZE) {
-				pgdp = pgd_offset(&init_mm, vaddr);
-				if (pgd_none(*pgdp)) {
-					pmdp = __alloc_bootmem(PMD_TABLE_SIZE,
-							       PMD_TABLE_SIZE,
-							       0UL);
-					if (pmdp == NULL)
-						early_pgtable_allocfail("pmd");
-					memset(pmdp, 0, PMD_TABLE_SIZE);
-					pgd_set(pgdp, pmdp);
-				}
-				pmdp = pmd_offset(pgdp, vaddr);
+			     ((vaddr < trans[i].virt + trans[i].size) && 
+			     (vaddr < HI_OBP_ADDRESS));
+			     vaddr += BASE_PAGE_SIZE) {
+				unsigned long val;
+
+				pmdp = prompmd + ((vaddr >> 23) & 0x7ff);
 				if (pmd_none(*pmdp)) {
-					ptep = __alloc_bootmem(PTE_TABLE_SIZE,
-							       PTE_TABLE_SIZE,
+					ptep = __alloc_bootmem(BASE_PAGE_SIZE,
+							       BASE_PAGE_SIZE,
 							       0UL);
 					if (ptep == NULL)
 						early_pgtable_allocfail("pte");
-					memset(ptep, 0, PTE_TABLE_SIZE);
+					memset(ptep, 0, BASE_PAGE_SIZE);
 					pmd_set(pmdp, ptep);
 				}
-				ptep = pte_offset(pmdp, vaddr);
-				set_pte (ptep, __pte(trans[i].data | _PAGE_MODIFIED));
-				trans[i].data += PAGE_SIZE;
+				ptep = (pte_t *)pmd_page(*pmdp) +
+						((vaddr >> 13) & 0x3ff);
+
+				val = trans[i].data;
+
+				/* Clear diag TTE bits. */
+				if (tlb_type == spitfire)
+					val &= ~0x0003fe0000000000UL;
+
+				set_pte (ptep, __pte(val | _PAGE_MODIFIED));
+				trans[i].data += BASE_PAGE_SIZE;
 			}
 		}
 	}
+	phys_page = __pa(prompmd);
+	obp_iaddr_patch[0] |= (phys_page >> 10);
+	obp_iaddr_patch[1] |= (phys_page & 0x3ff);
+	flushi((long)&obp_iaddr_patch[0]);
+	obp_daddr_patch[0] |= (phys_page >> 10);
+	obp_daddr_patch[1] |= (phys_page & 0x3ff);
+	flushi((long)&obp_daddr_patch[0]);
 
 	/* Now fixup OBP's idea about where we really are mapped. */
 	prom_printf("Remapping the kernel... ");
@@ -268,28 +418,61 @@ static void inherit_prom_mappings(void)
 			     : "r" (0),
 			     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
 
-	phys_page = spitfire_get_dtlb_data(63) & _PAGE_PADDR;
+	switch (tlb_type) {
+	default:
+	case spitfire:
+		phys_page = spitfire_get_dtlb_data(sparc64_highest_locked_tlbent());
+		break;
+
+	case cheetah:
+		phys_page = cheetah_get_litlb_data(sparc64_highest_locked_tlbent());
+		break;
+	};
+
+	phys_page &= _PAGE_PADDR;
 	phys_page += ((unsigned long)&prom_boot_page -
-		      (unsigned long)&empty_zero_page);
+		      (unsigned long)KERNBASE);
 
-	/* Lock this into i/d tlb entry 59 */
-	__asm__ __volatile__(
-		"stxa	%%g0, [%2] %3\n\t"
-		"stxa	%0, [%1] %4\n\t"
-		"membar	#Sync\n\t"
-		"flush	%%g6\n\t"
-		"stxa	%%g0, [%2] %5\n\t"
-		"stxa	%0, [%1] %6\n\t"
-		"membar	#Sync\n\t"
-		"flush	%%g6"
-		: : "r" (phys_page | _PAGE_VALID | _PAGE_SZ8K | _PAGE_CP |
-			 _PAGE_CV | _PAGE_P | _PAGE_L | _PAGE_W),
-		    "r" (59 << 3), "r" (TLB_TAG_ACCESS),
-		    "i" (ASI_DMMU), "i" (ASI_DTLB_DATA_ACCESS),
-		    "i" (ASI_IMMU), "i" (ASI_ITLB_DATA_ACCESS)
-		: "memory");
+	if (tlb_type == spitfire) {
+		/* Lock this into i/d tlb entry 59 */
+		__asm__ __volatile__(
+			"stxa	%%g0, [%2] %3\n\t"
+			"stxa	%0, [%1] %4\n\t"
+			"membar	#Sync\n\t"
+			"flush	%%g6\n\t"
+			"stxa	%%g0, [%2] %5\n\t"
+			"stxa	%0, [%1] %6\n\t"
+			"membar	#Sync\n\t"
+			"flush	%%g6"
+			: : "r" (phys_page | _PAGE_VALID | _PAGE_SZ8K | _PAGE_CP |
+				 _PAGE_CV | _PAGE_P | _PAGE_L | _PAGE_W),
+			"r" (59 << 3), "r" (TLB_TAG_ACCESS),
+			"i" (ASI_DMMU), "i" (ASI_DTLB_DATA_ACCESS),
+			"i" (ASI_IMMU), "i" (ASI_ITLB_DATA_ACCESS)
+			: "memory");
+	} else if (tlb_type == cheetah) {
+		/* Lock this into i/d tlb-0 entry 11 */
+		__asm__ __volatile__(
+			"stxa	%%g0, [%2] %3\n\t"
+			"stxa	%0, [%1] %4\n\t"
+			"membar	#Sync\n\t"
+			"flush	%%g6\n\t"
+			"stxa	%%g0, [%2] %5\n\t"
+			"stxa	%0, [%1] %6\n\t"
+			"membar	#Sync\n\t"
+			"flush	%%g6"
+			: : "r" (phys_page | _PAGE_VALID | _PAGE_SZ8K | _PAGE_CP |
+				 _PAGE_CV | _PAGE_P | _PAGE_L | _PAGE_W),
+			"r" ((0 << 16) | (11 << 3)), "r" (TLB_TAG_ACCESS),
+			"i" (ASI_DMMU), "i" (ASI_DTLB_DATA_ACCESS),
+			"i" (ASI_IMMU), "i" (ASI_ITLB_DATA_ACCESS)
+			: "memory");
+	} else {
+		/* Implement me :-) */
+		BUG();
+	}
 
-	tte_vaddr = (unsigned long) &empty_zero_page;
+	tte_vaddr = (unsigned long) KERNBASE;
 
 	/* Spitfire Errata #32 workaround */
 	__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
@@ -298,7 +481,12 @@ static void inherit_prom_mappings(void)
 			     : "r" (0),
 			     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
 
-	kern_locked_tte_data = tte_data = spitfire_get_dtlb_data(63);
+	if (tlb_type == spitfire)
+		tte_data = spitfire_get_dtlb_data(sparc64_highest_locked_tlbent());
+	else
+		tte_data = cheetah_get_ldtlb_data(sparc64_highest_locked_tlbent());
+
+	kern_locked_tte_data = tte_data;
 
 	remap_func = (void *)  ((unsigned long) &prom_remap -
 				(unsigned long) &prom_boot_page);
@@ -311,8 +499,10 @@ static void inherit_prom_mappings(void)
 			     : "r" (0),
 			     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
 
-	remap_func(spitfire_get_dtlb_data(63) & _PAGE_PADDR,
-		   (unsigned long) &empty_zero_page,
+	remap_func((tlb_type == spitfire ?
+		    (spitfire_get_dtlb_data(sparc64_highest_locked_tlbent()) & _PAGE_PADDR) :
+		    (cheetah_get_litlb_data(sparc64_highest_locked_tlbent()) & _PAGE_PADDR)),
+		   (unsigned long) KERNBASE,
 		   prom_get_mmu_ihandle());
 
 	/* Flush out that temporary mapping. */
@@ -320,8 +510,8 @@ static void inherit_prom_mappings(void)
 	spitfire_flush_itlb_nucleus_page(0x0);
 
 	/* Now lock us back into the TLBs via OBP. */
-	prom_dtlb_load(63, tte_data, tte_vaddr);
-	prom_itlb_load(63, tte_data, tte_vaddr);
+	prom_dtlb_load(sparc64_highest_locked_tlbent(), tte_data, tte_vaddr);
+	prom_itlb_load(sparc64_highest_locked_tlbent(), tte_data, tte_vaddr);
 
 	/* Re-read translations property. */
 	if ((n = prom_getproperty(node, "translations", (char *)trans, tsz)) == -1) {
@@ -335,7 +525,7 @@ static void inherit_prom_mappings(void)
 		unsigned long size = trans[i].size;
 
 		if (vaddr < 0xf0000000UL) {
-			unsigned long avoid_start = (unsigned long) &empty_zero_page;
+			unsigned long avoid_start = (unsigned long) KERNBASE;
 			unsigned long avoid_end = avoid_start + (4 * 1024 * 1024);
 
 			if (vaddr < avoid_start) {
@@ -372,26 +562,43 @@ static void __flush_nucleus_vptes(void)
 	int i;
 
 	/* Only DTLB must be checked for VPTE entries. */
-	for(i = 0; i < 63; i++) {
-		unsigned long tag;
+	if (tlb_type == spitfire) {
+		for (i = 0; i < 63; i++) {
+			unsigned long tag;
 
-		/* Spitfire Errata #32 workaround */
-		__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
-				     "flush	%%g6"
-				     : /* No outputs */
-				     : "r" (0),
-				     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
+			/* Spitfire Errata #32 workaround */
+			__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
+					     "flush	%%g6"
+					     : /* No outputs */
+					     : "r" (0),
+					     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
 
-		tag = spitfire_get_dtlb_tag(i);
-		if(((tag & ~(PAGE_MASK)) == 0) &&
-		   ((tag &  (PAGE_MASK)) >= prom_reserved_base)) {
-			__asm__ __volatile__("stxa %%g0, [%0] %1"
-					     : /* no outputs */
-					     : "r" (TLB_TAG_ACCESS), "i" (ASI_DMMU));
-			membar("#Sync");
-			spitfire_put_dtlb_data(i, 0x0UL);
-			membar("#Sync");
+			tag = spitfire_get_dtlb_tag(i);
+			if (((tag & ~(PAGE_MASK)) == 0) &&
+			    ((tag &  (PAGE_MASK)) >= prom_reserved_base)) {
+				__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
+						     "membar #Sync"
+						     : /* no outputs */
+						     : "r" (TLB_TAG_ACCESS), "i" (ASI_DMMU));
+				spitfire_put_dtlb_data(i, 0x0UL);
+			}
 		}
+	} else if (tlb_type == cheetah) {
+		for (i = 0; i < 512; i++) {
+			unsigned long tag = cheetah_get_dtlb_tag(i);
+
+			if ((tag & ~PAGE_MASK) == 0 &&
+			    (tag & PAGE_MASK) >= prom_reserved_base) {
+				__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
+						     "membar #Sync"
+						     : /* no outputs */
+						     : "r" (TLB_TAG_ACCESS), "i" (ASI_DMMU));
+				cheetah_put_dtlb_data(i, 0x0UL);
+			}
+		}
+	} else {
+		/* Implement me :-) */
+		BUG();
 	}
 }
 
@@ -401,7 +608,7 @@ struct prom_tlb_entry {
 	unsigned long	tlb_tag;
 	unsigned long	tlb_data;
 };
-struct prom_tlb_entry prom_itlb[8], prom_dtlb[8];
+struct prom_tlb_entry prom_itlb[16], prom_dtlb[16];
 
 void prom_world(int enter)
 {
@@ -426,42 +633,53 @@ void prom_world(int enter)
 		__flush_nucleus_vptes();
 
 		/* Install PROM world. */
-		for (i = 0; i < 8; i++) {
+		for (i = 0; i < 16; i++) {
 			if (prom_dtlb[i].tlb_ent != -1) {
-				__asm__ __volatile__("stxa %0, [%1] %2"
+				__asm__ __volatile__("stxa %0, [%1] %2\n\t"
+						     "membar #Sync"
 					: : "r" (prom_dtlb[i].tlb_tag), "r" (TLB_TAG_ACCESS),
 					"i" (ASI_DMMU));
-				membar("#Sync");
-				spitfire_put_dtlb_data(prom_dtlb[i].tlb_ent,
-						       prom_dtlb[i].tlb_data);
-				membar("#Sync");
+				if (tlb_type == spitfire)
+					spitfire_put_dtlb_data(prom_dtlb[i].tlb_ent,
+							       prom_dtlb[i].tlb_data);
+				else if (tlb_type == cheetah)
+					cheetah_put_ldtlb_data(prom_dtlb[i].tlb_ent,
+							       prom_dtlb[i].tlb_data);
 			}
-
 			if (prom_itlb[i].tlb_ent != -1) {
-				__asm__ __volatile__("stxa %0, [%1] %2"
-					: : "r" (prom_itlb[i].tlb_tag), "r" (TLB_TAG_ACCESS),
-					"i" (ASI_IMMU));
-				membar("#Sync");
-				spitfire_put_itlb_data(prom_itlb[i].tlb_ent,
-						       prom_itlb[i].tlb_data);
-				membar("#Sync");
+				__asm__ __volatile__("stxa %0, [%1] %2\n\t"
+						     "membar #Sync"
+						     : : "r" (prom_itlb[i].tlb_tag),
+						     "r" (TLB_TAG_ACCESS),
+						     "i" (ASI_IMMU));
+				if (tlb_type == spitfire)
+					spitfire_put_itlb_data(prom_itlb[i].tlb_ent,
+							       prom_itlb[i].tlb_data);
+				else if (tlb_type == cheetah)
+					cheetah_put_litlb_data(prom_itlb[i].tlb_ent,
+							       prom_itlb[i].tlb_data);
 			}
 		}
 	} else {
-		for (i = 0; i < 8; i++) {
+		for (i = 0; i < 16; i++) {
 			if (prom_dtlb[i].tlb_ent != -1) {
-				__asm__ __volatile__("stxa %%g0, [%0] %1"
+				__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
+						     "membar #Sync"
 					: : "r" (TLB_TAG_ACCESS), "i" (ASI_DMMU));
-				membar("#Sync");
-				spitfire_put_dtlb_data(prom_dtlb[i].tlb_ent, 0x0UL);
-				membar("#Sync");
+				if (tlb_type == spitfire)
+					spitfire_put_dtlb_data(prom_dtlb[i].tlb_ent, 0x0UL);
+				else
+					cheetah_put_ldtlb_data(prom_dtlb[i].tlb_ent, 0x0UL);
 			}
 			if (prom_itlb[i].tlb_ent != -1) {
-				__asm__ __volatile__("stxa %%g0, [%0] %1"
-					: : "r" (TLB_TAG_ACCESS), "i" (ASI_IMMU));
-				membar("#Sync");
-				spitfire_put_itlb_data(prom_itlb[i].tlb_ent, 0x0UL);
-				membar("#Sync");
+				__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
+						     "membar #Sync"
+						     : : "r" (TLB_TAG_ACCESS),
+						     "i" (ASI_IMMU));
+				if (tlb_type == spitfire)
+					spitfire_put_itlb_data(prom_itlb[i].tlb_ent, 0x0UL);
+				else
+					cheetah_put_litlb_data(prom_itlb[i].tlb_ent, 0x0UL);
 			}
 		}
 	}
@@ -490,25 +708,14 @@ void inherit_locked_prom_mappings(int save_p)
 	 * UNDOCUMENTED!!!!!! Thanks S(t)un!
 	 */
 	if (save_p) {
-		for(i = 0; i < 8; i++) {
-			prom_dtlb[i].tlb_ent = -1;
+		for (i = 0; i < 16; i++) {
 			prom_itlb[i].tlb_ent = -1;
+			prom_dtlb[i].tlb_ent = -1;
 		}
 	}
-	for(i = 0; i < 63; i++) {
-		unsigned long data;
-
-
-		/* Spitfire Errata #32 workaround */
-		__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
-				     "flush	%%g6"
-				     : /* No outputs */
-				     : "r" (0),
-				     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
-
-		data = spitfire_get_dtlb_data(i);
-		if((data & (_PAGE_L|_PAGE_VALID)) == (_PAGE_L|_PAGE_VALID)) {
-			unsigned long tag;
+	if (tlb_type == spitfire) {
+		for (i = 0; i < SPITFIRE_HIGHEST_LOCKED_TLBENT; i++) {
+			unsigned long data;
 
 			/* Spitfire Errata #32 workaround */
 			__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
@@ -517,36 +724,36 @@ void inherit_locked_prom_mappings(int save_p)
 					     : "r" (0),
 					     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
 
-			tag = spitfire_get_dtlb_tag(i);
-			if(save_p) {
-				prom_dtlb[dtlb_seen].tlb_ent = i;
-				prom_dtlb[dtlb_seen].tlb_tag = tag;
-				prom_dtlb[dtlb_seen].tlb_data = data;
+			data = spitfire_get_dtlb_data(i);
+			if ((data & (_PAGE_L|_PAGE_VALID)) == (_PAGE_L|_PAGE_VALID)) {
+				unsigned long tag;
+
+				/* Spitfire Errata #32 workaround */
+				__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
+						     "flush	%%g6"
+						     : /* No outputs */
+						     : "r" (0),
+						     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
+
+				tag = spitfire_get_dtlb_tag(i);
+				if (save_p) {
+					prom_dtlb[dtlb_seen].tlb_ent = i;
+					prom_dtlb[dtlb_seen].tlb_tag = tag;
+					prom_dtlb[dtlb_seen].tlb_data = data;
+				}
+				__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
+						     "membar #Sync"
+						     : : "r" (TLB_TAG_ACCESS), "i" (ASI_DMMU));
+				spitfire_put_dtlb_data(i, 0x0UL);
+
+				dtlb_seen++;
+				if (dtlb_seen > 15)
+					break;
 			}
-			__asm__ __volatile__("stxa %%g0, [%0] %1"
-					     : : "r" (TLB_TAG_ACCESS), "i" (ASI_DMMU));
-			membar("#Sync");
-			spitfire_put_dtlb_data(i, 0x0UL);
-			membar("#Sync");
-
-			dtlb_seen++;
-			if(dtlb_seen > 7)
-				break;
 		}
-	}
-	for(i = 0; i < 63; i++) {
-		unsigned long data;
 
-		/* Spitfire Errata #32 workaround */
-		__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
-				     "flush	%%g6"
-				     : /* No outputs */
-				     : "r" (0),
-				     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
-
-		data = spitfire_get_itlb_data(i);
-		if((data & (_PAGE_L|_PAGE_VALID)) == (_PAGE_L|_PAGE_VALID)) {
-			unsigned long tag;
+		for (i = 0; i < SPITFIRE_HIGHEST_LOCKED_TLBENT; i++) {
+			unsigned long data;
 
 			/* Spitfire Errata #32 workaround */
 			__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
@@ -555,22 +762,84 @@ void inherit_locked_prom_mappings(int save_p)
 					     : "r" (0),
 					     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
 
-			tag = spitfire_get_itlb_tag(i);
-			if(save_p) {
-				prom_itlb[itlb_seen].tlb_ent = i;
-				prom_itlb[itlb_seen].tlb_tag = tag;
-				prom_itlb[itlb_seen].tlb_data = data;
-			}
-			__asm__ __volatile__("stxa %%g0, [%0] %1"
-					     : : "r" (TLB_TAG_ACCESS), "i" (ASI_IMMU));
-			membar("#Sync");
-			spitfire_put_itlb_data(i, 0x0UL);
-			membar("#Sync");
+			data = spitfire_get_itlb_data(i);
+			if ((data & (_PAGE_L|_PAGE_VALID)) == (_PAGE_L|_PAGE_VALID)) {
+				unsigned long tag;
 
-			itlb_seen++;
-			if(itlb_seen > 7)
-				break;
+				/* Spitfire Errata #32 workaround */
+				__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
+						     "flush	%%g6"
+						     : /* No outputs */
+						     : "r" (0),
+						     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
+
+				tag = spitfire_get_itlb_tag(i);
+				if (save_p) {
+					prom_itlb[itlb_seen].tlb_ent = i;
+					prom_itlb[itlb_seen].tlb_tag = tag;
+					prom_itlb[itlb_seen].tlb_data = data;
+				}
+				__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
+						     "membar #Sync"
+						     : : "r" (TLB_TAG_ACCESS), "i" (ASI_IMMU));
+				spitfire_put_itlb_data(i, 0x0UL);
+
+				itlb_seen++;
+				if (itlb_seen > 15)
+					break;
+			}
 		}
+	} else if (tlb_type == cheetah) {
+		for (i = 0; i < CHEETAH_HIGHEST_LOCKED_TLBENT; i++) {
+			unsigned long data;
+
+			data = cheetah_get_ldtlb_data(i);
+			if ((data & (_PAGE_L|_PAGE_VALID)) == (_PAGE_L|_PAGE_VALID)) {
+				unsigned long tag;
+
+				tag = cheetah_get_ldtlb_tag(i);
+				if (save_p) {
+					prom_dtlb[dtlb_seen].tlb_ent = i;
+					prom_dtlb[dtlb_seen].tlb_tag = tag;
+					prom_dtlb[dtlb_seen].tlb_data = data;
+				}
+				__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
+						     "membar #Sync"
+						     : : "r" (TLB_TAG_ACCESS), "i" (ASI_DMMU));
+				cheetah_put_ldtlb_data(i, 0x0UL);
+
+				dtlb_seen++;
+				if (dtlb_seen > 15)
+					break;
+			}
+		}
+
+		for (i = 0; i < CHEETAH_HIGHEST_LOCKED_TLBENT; i++) {
+			unsigned long data;
+
+			data = cheetah_get_litlb_data(i);
+			if ((data & (_PAGE_L|_PAGE_VALID)) == (_PAGE_L|_PAGE_VALID)) {
+				unsigned long tag;
+
+				tag = cheetah_get_litlb_tag(i);
+				if (save_p) {
+					prom_itlb[itlb_seen].tlb_ent = i;
+					prom_itlb[itlb_seen].tlb_tag = tag;
+					prom_itlb[itlb_seen].tlb_data = data;
+				}
+				__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
+						     "membar #Sync"
+						     : : "r" (TLB_TAG_ACCESS), "i" (ASI_IMMU));
+				cheetah_put_litlb_data(i, 0x0UL);
+
+				itlb_seen++;
+				if (itlb_seen > 15)
+					break;
+			}
+		}
+	} else {
+		/* Implement me :-) */
+		BUG();
 	}
 	if (save_p)
 		prom_ditlb_set = 1;
@@ -581,25 +850,32 @@ void prom_reload_locked(void)
 {
 	int i;
 
-	for (i = 0; i < 8; i++) {
+	for (i = 0; i < 16; i++) {
 		if (prom_dtlb[i].tlb_ent != -1) {
-			__asm__ __volatile__("stxa %0, [%1] %2"
+			__asm__ __volatile__("stxa %0, [%1] %2\n\t"
+					     "membar #Sync"
 				: : "r" (prom_dtlb[i].tlb_tag), "r" (TLB_TAG_ACCESS),
 				"i" (ASI_DMMU));
-			membar("#Sync");
-			spitfire_put_dtlb_data(prom_dtlb[i].tlb_ent,
-					       prom_dtlb[i].tlb_data);
-			membar("#Sync");
+			if (tlb_type == spitfire)
+				spitfire_put_dtlb_data(prom_dtlb[i].tlb_ent,
+						       prom_dtlb[i].tlb_data);
+			else if (tlb_type == cheetah)
+				cheetah_put_ldtlb_data(prom_dtlb[i].tlb_ent,
+						      prom_dtlb[i].tlb_data);
 		}
 
 		if (prom_itlb[i].tlb_ent != -1) {
-			__asm__ __volatile__("stxa %0, [%1] %2"
-				: : "r" (prom_itlb[i].tlb_tag), "r" (TLB_TAG_ACCESS),
-				"i" (ASI_IMMU));
-			membar("#Sync");
-			spitfire_put_itlb_data(prom_itlb[i].tlb_ent,
-					       prom_itlb[i].tlb_data);
-			membar("#Sync");
+			__asm__ __volatile__("stxa %0, [%1] %2\n\t"
+					     "membar #Sync"
+					     : : "r" (prom_itlb[i].tlb_tag),
+					     "r" (TLB_TAG_ACCESS),
+					     "i" (ASI_IMMU));
+			if (tlb_type == spitfire)
+				spitfire_put_itlb_data(prom_itlb[i].tlb_ent,
+						       prom_itlb[i].tlb_data);
+			else
+				cheetah_put_litlb_data(prom_itlb[i].tlb_ent,
+						       prom_itlb[i].tlb_data);
 		}
 	}
 }
@@ -607,22 +883,38 @@ void prom_reload_locked(void)
 void __flush_dcache_range(unsigned long start, unsigned long end)
 {
 	unsigned long va;
-	int n = 0;
 
-	for (va = start; va < end; va += 32) {
-		spitfire_put_dcache_tag(va & 0x3fe0, 0x0);
-		if (++n >= 512)
-			break;
+	if (tlb_type == spitfire) {
+		int n = 0;
+
+		for (va = start; va < end; va += 32) {
+			spitfire_put_dcache_tag(va & 0x3fe0, 0x0);
+			if (++n >= 512)
+				break;
+		}
+	} else {
+		start = __pa(start);
+		end = __pa(end);
+		for (va = start; va < end; va += 32)
+			__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
+					     "membar #Sync"
+					     : /* no outputs */
+					     : "r" (va),
+					       "i" (ASI_DCACHE_INVALIDATE));
 	}
 }
 
 void __flush_cache_all(void)
 {
-	unsigned long va;
+	/* Cheetah should be fine here too. */
+	if (tlb_type == spitfire) {
+		unsigned long va;
 
-	flushw_all();
-	for(va =  0; va < (PAGE_SIZE << 1); va += 32)
-		spitfire_put_icache_tag(va, 0x0);
+		flushw_all();
+		for (va =  0; va < (PAGE_SIZE << 1); va += 32)
+			spitfire_put_icache_tag(va, 0x0);
+		__asm__ __volatile__("flush %g6");
+	}
 }
 
 /* If not locked, zap it. */
@@ -636,44 +928,48 @@ void __flush_tlb_all(void)
 			     "wrpr	%0, %1, %%pstate"
 			     : "=r" (pstate)
 			     : "i" (PSTATE_IE));
-	for(i = 0; i < 64; i++) {
-		/* Spitfire Errata #32 workaround */
-		__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
-				     "flush	%%g6"
-				     : /* No outputs */
-				     : "r" (0),
-				     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
+	if (tlb_type == spitfire) {
+		for (i = 0; i < 64; i++) {
+			/* Spitfire Errata #32 workaround */
+			__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
+					     "flush	%%g6"
+					     : /* No outputs */
+					     : "r" (0),
+					     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
 
-		if(!(spitfire_get_dtlb_data(i) & _PAGE_L)) {
-			__asm__ __volatile__("stxa %%g0, [%0] %1"
-					     : /* no outputs */
-					     : "r" (TLB_TAG_ACCESS), "i" (ASI_DMMU));
-			membar("#Sync");
-			spitfire_put_dtlb_data(i, 0x0UL);
-			membar("#Sync");
+			if (!(spitfire_get_dtlb_data(i) & _PAGE_L)) {
+				__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
+						     "membar #Sync"
+						     : /* no outputs */
+						     : "r" (TLB_TAG_ACCESS), "i" (ASI_DMMU));
+				spitfire_put_dtlb_data(i, 0x0UL);
+			}
+
+			/* Spitfire Errata #32 workaround */
+			__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
+					     "flush	%%g6"
+					     : /* No outputs */
+					     : "r" (0),
+					     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
+
+			if (!(spitfire_get_itlb_data(i) & _PAGE_L)) {
+				__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
+						     "membar #Sync"
+						     : /* no outputs */
+						     : "r" (TLB_TAG_ACCESS), "i" (ASI_IMMU));
+				spitfire_put_itlb_data(i, 0x0UL);
+			}
 		}
-
-		/* Spitfire Errata #32 workaround */
-		__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
-				     "flush	%%g6"
-				     : /* No outputs */
-				     : "r" (0),
-				     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
-
-		if(!(spitfire_get_itlb_data(i) & _PAGE_L)) {
-			__asm__ __volatile__("stxa %%g0, [%0] %1"
-					     : /* no outputs */
-					     : "r" (TLB_TAG_ACCESS), "i" (ASI_IMMU));
-			membar("#Sync");
-			spitfire_put_itlb_data(i, 0x0UL);
-			membar("#Sync");
-		}
+	} else if (tlb_type == cheetah) {
+		cheetah_flush_dtlb_all();
+		cheetah_flush_itlb_all();
 	}
 	__asm__ __volatile__("wrpr	%0, 0, %%pstate"
 			     : : "r" (pstate));
 }
 
 /* Caller does TLB context flushing on local CPU if necessary.
+ * The caller also ensures that CTX_VALID(mm->context) is false.
  *
  * We must be careful about boundary cases so that we never
  * let the user have CTX 0 (nucleus) or we ever use a CTX
@@ -686,12 +982,6 @@ void get_new_mmu_context(struct mm_struct *mm)
 	
 	spin_lock(&ctx_alloc_lock);
 	ctx = CTX_HWBITS(tlb_context_cache + 1);
-	if (ctx == 0)
-		ctx = 1;
-	if (CTX_VALID(mm->context)) {
-		unsigned long nr = CTX_HWBITS(mm->context);
-		mmu_context_bmap[nr>>6] &= ~(1UL << (nr & 63));
-	}
 	new_ctx = find_next_zero_bit(mmu_context_bmap, 1UL << CTX_VERSION_SHIFT, ctx);
 	if (new_ctx >= (1UL << CTX_VERSION_SHIFT)) {
 		new_ctx = find_next_zero_bit(mmu_context_bmap, ctx, 1);
@@ -709,7 +999,7 @@ void get_new_mmu_context(struct mm_struct *mm)
 			mmu_context_bmap[1] = 0;
 			mmu_context_bmap[2] = 0;
 			mmu_context_bmap[3] = 0;
-			for(i = 4; i < CTX_BMAP_SLOTS; i += 4) {
+			for (i = 4; i < CTX_BMAP_SLOTS; i += 4) {
 				mmu_context_bmap[i + 0] = 0;
 				mmu_context_bmap[i + 1] = 0;
 				mmu_context_bmap[i + 2] = 0;
@@ -731,49 +1021,38 @@ out:
 struct pgtable_cache_struct pgt_quicklists;
 #endif
 
-/* For PMDs we don't care about the color, writes are
- * only done via Dcache which is write-thru, so non-Dcache
- * reads will always see correct data.
+/* OK, we have to color these pages. The page tables are accessed
+ * by non-Dcache enabled mapping in the VPTE area by the dtlb_backend.S
+ * code, as well as by PAGE_OFFSET range direct-mapped addresses by 
+ * other parts of the kernel. By coloring, we make sure that the tlbmiss 
+ * fast handlers do not get data from old/garbage dcache lines that 
+ * correspond to an old/stale virtual address (user/kernel) that 
+ * previously mapped the pagetable page while accessing vpte range 
+ * addresses. The idea is that if the vpte color and PAGE_OFFSET range 
+ * color is the same, then when the kernel initializes the pagetable 
+ * using the later address range, accesses with the first address
+ * range will see the newly initialized data rather than the garbage.
  */
-pmd_t *get_pmd_slow(pgd_t *pgd, unsigned long offset)
+#if (L1DCACHE_SIZE > PAGE_SIZE)			/* is there D$ aliasing problem */
+#define DC_ALIAS_SHIFT	1
+#else
+#define DC_ALIAS_SHIFT	0
+#endif
+pte_t *pte_alloc_one(struct mm_struct *mm, unsigned long address)
 {
-	pmd_t *pmd;
-
-	pmd = (pmd_t *) __get_free_page(GFP_KERNEL);
-	if(pmd) {
-		memset(pmd, 0, PAGE_SIZE);
-		pgd_set(pgd, pmd);
-		return pmd + offset;
-	}
-	return NULL;
-}
-
-/* OK, we have to color these pages because during DTLB
- * protection faults we set the dirty bit via a non-Dcache
- * enabled mapping in the VPTE area.  The kernel can end
- * up missing the dirty bit resulting in processes crashing
- * _iff_ the VPTE mapping of the ptes have a virtual address
- * bit 13 which is different from bit 13 of the physical address.
- *
- * The sequence is:
- *	1) DTLB protection fault, write dirty bit into pte via VPTE
- *	   mappings.
- *	2) Swapper checks pte, does not see dirty bit, frees page.
- *	3) Process faults back in the page, the old pre-dirtied copy
- *	   is provided and here is the corruption.
- */
-pte_t *get_pte_slow(pmd_t *pmd, unsigned long offset, unsigned long color)
-{
-	struct page *page = alloc_pages(GFP_KERNEL, 1);
+	struct page *page = alloc_pages(GFP_KERNEL, DC_ALIAS_SHIFT);
+	unsigned long color = VPTE_COLOR(address);
 
 	if (page) {
 		unsigned long *to_free;
 		unsigned long paddr;
 		pte_t *pte;
 
+#if (L1DCACHE_SIZE > PAGE_SIZE)			/* is there D$ aliasing problem */
 		set_page_count((page + 1), 1);
+#endif
 		paddr = (unsigned long) page_address(page);
-		memset((char *)paddr, 0, (PAGE_SIZE << 1));
+		memset((char *)paddr, 0, (PAGE_SIZE << DC_ALIAS_SHIFT));
 
 		if (!color) {
 			pte = (pte_t *) paddr;
@@ -783,13 +1062,14 @@ pte_t *get_pte_slow(pmd_t *pmd, unsigned long offset, unsigned long color)
 			to_free = (unsigned long *) paddr;
 		}
 
+#if (L1DCACHE_SIZE > PAGE_SIZE)			/* is there D$ aliasing problem */
 		/* Now free the other one up, adjust cache size. */
 		*to_free = (unsigned long) pte_quicklist[color ^ 0x1];
 		pte_quicklist[color ^ 0x1] = to_free;
 		pgtable_cache_size++;
+#endif
 
-		pmd_set(pmd, pte);
-		return pte + offset;
+		return pte;
 	}
 	return NULL;
 }
@@ -798,31 +1078,77 @@ void sparc_ultra_dump_itlb(void)
 {
         int slot;
 
-        printk ("Contents of itlb: ");
-	for (slot = 0; slot < 14; slot++) printk ("    ");
-	printk ("%2x:%016lx,%016lx\n", 0, spitfire_get_itlb_tag(0), spitfire_get_itlb_data(0));
-        for (slot = 1; slot < 64; slot+=3) {
-        	printk ("%2x:%016lx,%016lx %2x:%016lx,%016lx %2x:%016lx,%016lx\n", 
-        		slot, spitfire_get_itlb_tag(slot), spitfire_get_itlb_data(slot),
-        		slot+1, spitfire_get_itlb_tag(slot+1), spitfire_get_itlb_data(slot+1),
-        		slot+2, spitfire_get_itlb_tag(slot+2), spitfire_get_itlb_data(slot+2));
-        }
+	if (tlb_type == spitfire) {
+		printk ("Contents of itlb: ");
+		for (slot = 0; slot < 14; slot++) printk ("    ");
+		printk ("%2x:%016lx,%016lx\n",
+			0,
+			spitfire_get_itlb_tag(0), spitfire_get_itlb_data(0));
+		for (slot = 1; slot < 64; slot+=3) {
+			printk ("%2x:%016lx,%016lx %2x:%016lx,%016lx %2x:%016lx,%016lx\n", 
+				slot,
+				spitfire_get_itlb_tag(slot), spitfire_get_itlb_data(slot),
+				slot+1,
+				spitfire_get_itlb_tag(slot+1), spitfire_get_itlb_data(slot+1),
+				slot+2,
+				spitfire_get_itlb_tag(slot+2), spitfire_get_itlb_data(slot+2));
+		}
+	} else if (tlb_type == cheetah) {
+		printk ("Contents of itlb0:\n");
+		for (slot = 0; slot < 16; slot+=2) {
+			printk ("%2x:%016lx,%016lx %2x:%016lx,%016lx\n",
+				slot,
+				cheetah_get_litlb_tag(slot), cheetah_get_litlb_data(slot),
+				slot+1,
+				cheetah_get_litlb_tag(slot+1), cheetah_get_litlb_data(slot+1));
+		}
+		printk ("Contents of itlb2:\n");
+		for (slot = 0; slot < 128; slot+=2) {
+			printk ("%2x:%016lx,%016lx %2x:%016lx,%016lx\n",
+				slot,
+				cheetah_get_itlb_tag(slot), cheetah_get_itlb_data(slot),
+				slot+1,
+				cheetah_get_itlb_tag(slot+1), cheetah_get_itlb_data(slot+1));
+		}
+	}
 }
 
 void sparc_ultra_dump_dtlb(void)
 {
         int slot;
 
-        printk ("Contents of dtlb: ");
-	for (slot = 0; slot < 14; slot++) printk ("    ");
-	printk ("%2x:%016lx,%016lx\n", 0, spitfire_get_dtlb_tag(0),
-		spitfire_get_dtlb_data(0));
-        for (slot = 1; slot < 64; slot+=3) {
-        	printk ("%2x:%016lx,%016lx %2x:%016lx,%016lx %2x:%016lx,%016lx\n", 
-        		slot, spitfire_get_dtlb_tag(slot), spitfire_get_dtlb_data(slot),
-        		slot+1, spitfire_get_dtlb_tag(slot+1), spitfire_get_dtlb_data(slot+1),
-        		slot+2, spitfire_get_dtlb_tag(slot+2), spitfire_get_dtlb_data(slot+2));
-        }
+	if (tlb_type == spitfire) {
+		printk ("Contents of dtlb: ");
+		for (slot = 0; slot < 14; slot++) printk ("    ");
+		printk ("%2x:%016lx,%016lx\n", 0,
+			spitfire_get_dtlb_tag(0), spitfire_get_dtlb_data(0));
+		for (slot = 1; slot < 64; slot+=3) {
+			printk ("%2x:%016lx,%016lx %2x:%016lx,%016lx %2x:%016lx,%016lx\n", 
+				slot,
+				spitfire_get_dtlb_tag(slot), spitfire_get_dtlb_data(slot),
+				slot+1,
+				spitfire_get_dtlb_tag(slot+1), spitfire_get_dtlb_data(slot+1),
+				slot+2,
+				spitfire_get_dtlb_tag(slot+2), spitfire_get_dtlb_data(slot+2));
+		}
+	} else if (tlb_type == cheetah) {
+		printk ("Contents of dtlb0:\n");
+		for (slot = 0; slot < 16; slot+=2) {
+			printk ("%2x:%016lx,%016lx %2x:%016lx,%016lx\n",
+				slot,
+				cheetah_get_ldtlb_tag(slot), cheetah_get_ldtlb_data(slot),
+				slot+1,
+				cheetah_get_ldtlb_tag(slot+1), cheetah_get_ldtlb_data(slot+1));
+		}
+		printk ("Contents of dtlb2:\n");
+		for (slot = 0; slot < 512; slot+=2) {
+			printk ("%2x:%016lx,%016lx %2x:%016lx,%016lx\n",
+				slot,
+				cheetah_get_dtlb_tag(slot), cheetah_get_dtlb_data(slot),
+				slot+1,
+				cheetah_get_dtlb_tag(slot+1), cheetah_get_dtlb_data(slot+1));
+		}
+	}
 }
 
 extern unsigned long cmdline_memory_size;
@@ -865,7 +1191,7 @@ unsigned long __init bootmem_init(unsigned long *pages_avail)
 	 * 4MB locked TLB translation.
 	 */
 	start_pfn  = PAGE_ALIGN((unsigned long) &_end) -
-		((unsigned long) &empty_zero_page);
+		((unsigned long) KERNBASE);
 
 	/* Adjust up to the physical address where the kernel begins. */
 	start_pfn += phys_base;
@@ -938,6 +1264,7 @@ unsigned long __init bootmem_init(unsigned long *pages_avail)
 /* paging_init() sets up the page tables */
 
 extern void sun_serial_setup(void);
+extern void cheetah_ecache_flush_init(void);
 
 static unsigned long last_valid_pfn;
 
@@ -949,9 +1276,17 @@ void __init paging_init(void)
 	unsigned long alias_base = phys_base + PAGE_OFFSET;
 	unsigned long second_alias_page = 0;
 	unsigned long pt, flags, end_pfn, pages_avail;
-	unsigned long shift = alias_base - ((unsigned long)&empty_zero_page);
+	unsigned long shift = alias_base - ((unsigned long)KERNBASE);
+	unsigned long real_end;
 
 	set_bit(0, mmu_context_bmap);
+
+	real_end = (unsigned long)&_end;
+#ifdef CONFIG_BLK_DEV_INITRD
+	if (sparc_ramdisk_image)
+		real_end = (PAGE_ALIGN(real_end) + PAGE_ALIGN(sparc_ramdisk_size));
+#endif
+
 	/* We assume physical memory starts at some 4mb multiple,
 	 * if this were not true we wouldn't boot up to this point
 	 * anyways.
@@ -959,32 +1294,62 @@ void __init paging_init(void)
 	pt  = phys_base | _PAGE_VALID | _PAGE_SZ4MB;
 	pt |= _PAGE_CP | _PAGE_CV | _PAGE_P | _PAGE_L | _PAGE_W;
 	__save_and_cli(flags);
-	__asm__ __volatile__("
-	stxa	%1, [%0] %3
-	stxa	%2, [%5] %4
-	membar	#Sync
-	flush	%%g6
-	nop
-	nop
-	nop"
-	: /* No outputs */
-	: "r" (TLB_TAG_ACCESS), "r" (alias_base), "r" (pt),
-	  "i" (ASI_DMMU), "i" (ASI_DTLB_DATA_ACCESS), "r" (61 << 3)
-	: "memory");
-	if (((unsigned long)&_end) >= KERNBASE + 0x340000) {
-		second_alias_page = alias_base + 0x400000;
-		__asm__ __volatile__("
-		stxa	%1, [%0] %3
-		stxa	%2, [%5] %4
-		membar	#Sync
-		flush	%%g6
-		nop
-		nop
-		nop"
+	if (tlb_type == spitfire) {
+		__asm__ __volatile__(
+	"	stxa	%1, [%0] %3\n"
+	"	stxa	%2, [%5] %4\n"
+	"	membar	#Sync\n"
+	"	flush	%%g6\n"
+	"	nop\n"
+	"	nop\n"
+	"	nop\n"
 		: /* No outputs */
-		: "r" (TLB_TAG_ACCESS), "r" (second_alias_page), "r" (pt + 0x400000),
-		  "i" (ASI_DMMU), "i" (ASI_DTLB_DATA_ACCESS), "r" (60 << 3)
+		: "r" (TLB_TAG_ACCESS), "r" (alias_base), "r" (pt),
+		  "i" (ASI_DMMU), "i" (ASI_DTLB_DATA_ACCESS), "r" (61 << 3)
 		: "memory");
+		if (real_end >= KERNBASE + 0x340000) {
+			second_alias_page = alias_base + 0x400000;
+			__asm__ __volatile__(
+		"	stxa	%1, [%0] %3\n"
+		"	stxa	%2, [%5] %4\n"
+		"	membar	#Sync\n"
+		"	flush	%%g6\n"
+		"	nop\n"
+		"	nop\n"
+		"	nop\n"
+			: /* No outputs */
+			: "r" (TLB_TAG_ACCESS), "r" (second_alias_page), "r" (pt + 0x400000),
+			  "i" (ASI_DMMU), "i" (ASI_DTLB_DATA_ACCESS), "r" (60 << 3)
+			: "memory");
+		}
+	} else if (tlb_type == cheetah) {
+		__asm__ __volatile__(
+	"	stxa	%1, [%0] %3\n"
+	"	stxa	%2, [%5] %4\n"
+	"	membar	#Sync\n"
+	"	flush	%%g6\n"
+	"	nop\n"
+	"	nop\n"
+	"	nop\n"
+		: /* No outputs */
+		: "r" (TLB_TAG_ACCESS), "r" (alias_base), "r" (pt),
+		  "i" (ASI_DMMU), "i" (ASI_DTLB_DATA_ACCESS), "r" ((0<<16) | (13<<3))
+		: "memory");
+		if (real_end >= KERNBASE + 0x340000) {
+			second_alias_page = alias_base + 0x400000;
+			__asm__ __volatile__(
+		"	stxa	%1, [%0] %3\n"
+		"	stxa	%2, [%5] %4\n"
+		"	membar	#Sync\n"
+		"	flush	%%g6\n"
+		"	nop\n"
+		"	nop\n"
+		"	nop\n"
+			: /* No outputs */
+			: "r" (TLB_TAG_ACCESS), "r" (second_alias_page), "r" (pt + 0x400000),
+			  "i" (ASI_DMMU), "i" (ASI_DTLB_DATA_ACCESS), "r" ((0<<16) | (12<<3))
+			: "memory");
+		}
 	}
 	__restore_flags(flags);
 	
@@ -1034,7 +1399,7 @@ void __init paging_init(void)
 	if (second_alias_page)
 		spitfire_flush_dtlb_nucleus_page(second_alias_page);
 
-	flush_tlb_all();
+	__flush_tlb_all();
 
 	{
 		unsigned long zones_size[MAX_NR_ZONES];
@@ -1207,7 +1572,7 @@ void __init mem_init(void)
 
 	addr = PAGE_OFFSET + phys_base;
 	last = PAGE_ALIGN((unsigned long)&_end) -
-		((unsigned long) &empty_zero_page);
+		((unsigned long) KERNBASE);
 	last += PAGE_OFFSET + phys_base;
 	while (addr < last) {
 		set_bit(__pa(addr) >> 22, sparc64_valid_addr_bitmap);
@@ -1219,7 +1584,20 @@ void __init mem_init(void)
 	max_mapnr = last_valid_pfn - (phys_base >> PAGE_SHIFT);
 	high_memory = __va(last_valid_pfn << PAGE_SHIFT);
 
-	num_physpages = free_all_bootmem();
+	num_physpages = free_all_bootmem() - 1;
+
+	/*
+	 * Set up the zero page, mark it reserved, so that page count
+	 * is not manipulated when freeing the page from user ptes.
+	 */
+	mem_map_zero = _alloc_pages(GFP_KERNEL, 0);
+	if (mem_map_zero == NULL) {
+		prom_printf("paging_init: Cannot alloc zero page.\n");
+		prom_halt();
+	}
+	SetPageReserved(mem_map_zero);
+	clear_page(page_address(mem_map_zero));
+
 	codepages = (((unsigned long) &etext) - ((unsigned long)&_start));
 	codepages = PAGE_ALIGN(codepages) >> PAGE_SHIFT;
 	datapages = (((unsigned long) &edata) - ((unsigned long)&etext));
@@ -1233,7 +1611,7 @@ void __init mem_init(void)
 		extern pgd_t empty_pg_dir[1024];
 		unsigned long addr = (unsigned long)empty_pg_dir;
 		unsigned long alias_base = phys_base + PAGE_OFFSET -
-			(long)(&empty_zero_page);
+			(long)(KERNBASE);
 		
 		memset(empty_pg_dir, 0, sizeof(empty_pg_dir));
 		addr += alias_base;
@@ -1248,20 +1626,27 @@ void __init mem_init(void)
 	       datapages << (PAGE_SHIFT-10), 
 	       initpages << (PAGE_SHIFT-10), 
 	       PAGE_OFFSET, (last_valid_pfn << PAGE_SHIFT));
+
+	if (tlb_type == cheetah)
+		cheetah_ecache_flush_init();
 }
 
 void free_initmem (void)
 {
-	unsigned long addr;
+	unsigned long addr, initend;
 
-	addr = (unsigned long)(&__init_begin);
-	for (; addr < (unsigned long)(&__init_end); addr += PAGE_SIZE) {
+	/*
+	 * The init section is aligned to 8k in vmlinux.lds. Page align for >8k pagesizes.
+	 */
+	addr = PAGE_ALIGN((unsigned long)(&__init_begin));
+	initend = (unsigned long)(&__init_end) & PAGE_MASK;
+	for (; addr < initend; addr += PAGE_SIZE) {
 		unsigned long page;
 		struct page *p;
 
 		page = (addr +
 			((unsigned long) __va(phys_base)) -
-			((unsigned long) &empty_zero_page));
+			((unsigned long) KERNBASE));
 		p = virt_to_page(page);
 
 		ClearPageReserved(p);

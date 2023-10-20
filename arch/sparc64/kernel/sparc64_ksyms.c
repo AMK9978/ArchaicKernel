@@ -1,4 +1,4 @@
-/* $Id: sparc64_ksyms.c,v 1.99 2000/12/09 04:15:24 anton Exp $
+/* $Id: sparc64_ksyms.c,v 1.116 2001/10/26 15:49:21 davem Exp $
  * arch/sparc64/kernel/sparc64_ksyms.c: Sparc64 specific ksyms support.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -24,6 +24,7 @@
 #include <asm/oplib.h>
 #include <asm/delay.h>
 #include <asm/system.h>
+#include <asm/auxio.h>
 #include <asm/pgtable.h>
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -47,6 +48,7 @@
 #endif
 #ifdef CONFIG_PCI
 #include <asm/ebus.h>
+#include <asm/isa.h>
 #endif
 #include <asm/a.out.h>
 
@@ -124,7 +126,9 @@ EXPORT_SYMBOL(kernel_flag);
 
 /* Hard IRQ locking */
 EXPORT_SYMBOL(global_irq_holder);
+#ifdef CONFIG_SMP
 EXPORT_SYMBOL(synchronize_irq);
+#endif
 EXPORT_SYMBOL(__global_cli);
 EXPORT_SYMBOL(__global_sti);
 EXPORT_SYMBOL(__global_save_flags);
@@ -134,7 +138,9 @@ EXPORT_SYMBOL(__global_restore_flags);
 EXPORT_SYMBOL(cpu_data);
 
 /* Misc SMP information */
+#ifdef CONFIG_SMP
 EXPORT_SYMBOL(smp_num_cpus);
+#endif
 EXPORT_SYMBOL(__cpu_number_map);
 EXPORT_SYMBOL(__cpu_logical_map);
 
@@ -149,29 +155,30 @@ EXPORT_SYMBOL(_do_write_lock);
 EXPORT_SYMBOL(_do_write_unlock);
 #endif
 
+#ifdef CONFIG_SMP
+EXPORT_SYMBOL(smp_call_function);
+#endif
+
 #endif
 
 /* semaphores */
 EXPORT_SYMBOL(__down);
 EXPORT_SYMBOL(__down_interruptible);
-EXPORT_SYMBOL(__down_trylock);
 EXPORT_SYMBOL(__up);
-
-/* rw semaphores */
-EXPORT_SYMBOL_NOVERS(__down_read_failed);
-EXPORT_SYMBOL_NOVERS(__down_write_failed);
-EXPORT_SYMBOL_NOVERS(__rwsem_wake);
 
 /* Atomic counter implementation. */
 EXPORT_SYMBOL(__atomic_add);
 EXPORT_SYMBOL(__atomic_sub);
+#ifdef CONFIG_SMP
+EXPORT_SYMBOL(atomic_dec_and_lock);
+#endif
 
 /* Atomic bit operations. */
-EXPORT_SYMBOL(__test_and_set_bit);
-EXPORT_SYMBOL(__test_and_clear_bit);
-EXPORT_SYMBOL(__test_and_change_bit);
-EXPORT_SYMBOL(__test_and_set_le_bit);
-EXPORT_SYMBOL(__test_and_clear_le_bit);
+EXPORT_SYMBOL(___test_and_set_bit);
+EXPORT_SYMBOL(___test_and_clear_bit);
+EXPORT_SYMBOL(___test_and_change_bit);
+EXPORT_SYMBOL(___test_and_set_le_bit);
+EXPORT_SYMBOL(___test_and_clear_le_bit);
 
 EXPORT_SYMBOL(ivector_table);
 EXPORT_SYMBOL(enable_irq);
@@ -179,11 +186,17 @@ EXPORT_SYMBOL(disable_irq);
 
 EXPORT_SYMBOL(__flushw_user);
 
+EXPORT_SYMBOL(tlb_type);
+EXPORT_SYMBOL(get_fb_unmapped_area);
 EXPORT_SYMBOL(flush_icache_range);
-EXPORT_SYMBOL(__flush_dcache_page);
+EXPORT_SYMBOL(flush_dcache_page);
 
+EXPORT_SYMBOL(mostek_lock);
 EXPORT_SYMBOL(mstk48t02_regs);
 EXPORT_SYMBOL(request_fast_irq);
+#if CONFIG_SUN_AUXIO
+EXPORT_SYMBOL(auxio_register);
+#endif
 #if CONFIG_SBUS
 EXPORT_SYMBOL(sbus_root);
 EXPORT_SYMBOL(dma_chain);
@@ -199,8 +212,8 @@ EXPORT_SYMBOL(sbus_dma_sync_sg);
 #endif
 #ifdef CONFIG_PCI
 EXPORT_SYMBOL(ebus_chain);
+EXPORT_SYMBOL(isa_chain);
 EXPORT_SYMBOL(pci_memspace_mask);
-EXPORT_SYMBOL(empty_zero_page);
 EXPORT_SYMBOL(outsb);
 EXPORT_SYMBOL(outsw);
 EXPORT_SYMBOL(outsl);
@@ -231,8 +244,7 @@ EXPORT_SYMBOL(_sigpause_common);
 /* Should really be in linux/kernel/ksyms.c */
 EXPORT_SYMBOL(dump_thread);
 EXPORT_SYMBOL(dump_fpu);
-EXPORT_SYMBOL(get_pmd_slow);
-EXPORT_SYMBOL(get_pte_slow);
+EXPORT_SYMBOL(pte_alloc_one);
 #ifndef CONFIG_SMP
 EXPORT_SYMBOL(pgt_quicklists);
 #endif
@@ -272,6 +284,7 @@ EXPORT_SYMBOL(__strlen);
 EXPORT_SYMBOL(strlen);
 EXPORT_SYMBOL(strnlen);
 EXPORT_SYMBOL(__strlen_user);
+EXPORT_SYMBOL(__strnlen_user);
 EXPORT_SYMBOL(strcpy);
 EXPORT_SYMBOL(strncpy);
 EXPORT_SYMBOL(strcat);
@@ -300,8 +313,6 @@ EXPORT_SYMBOL(prom_cpu_nodes);
 EXPORT_SYMBOL(sys_ioctl);
 EXPORT_SYMBOL(sys32_ioctl);
 EXPORT_SYMBOL(sparc32_open);
-EXPORT_SYMBOL(move_addr_to_kernel);
-EXPORT_SYMBOL(move_addr_to_user);
 #endif
 
 /* Special internal versions of library functions. */

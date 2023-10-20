@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.start_8xx.c 1.10 09/14/01 18:01:17 trini
+ */
+/*
  * Copyright (C) 1996 Paul Mackerras.
  * Copyright (C) 2000 Dan Malek.
  * Quick hack of Paul's code to make XMON work on 8xx processors.  Lots
@@ -15,7 +18,7 @@
 #include <asm/processor.h>
 #include <asm/8xx_immap.h>
 #include <asm/mpc8xx.h>
-#include "commproc.h"
+#include <asm/commproc.h>
 
 extern void xmon_printf(const char *fmt, ...);
 extern int xmon_8xx_write(char *str, int nb);

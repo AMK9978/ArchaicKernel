@@ -16,6 +16,10 @@
  *
  *	10/6/99 sameer			Merged the ISA and PCI drivers to
  *					a new unified driver.
+ *	09/06/01 acme@conectiva.com.br	use capable, not suser, do
+ *					restore_flags on failure in
+ *					isicom_send_break, verify put_user
+ *					result
  *	***********************************************************
  *
  *	To use this driver you also need the support package. You 
@@ -56,24 +60,27 @@
 
 #include <linux/isicom.h>
 
-static int device_id[] = {      0x2028,
-				0x2051,
-				0x2052,
-				0x2053,
-				0x2054,
-				0x2055,
-				0x2056,
-				0x2057,
-				0x2058
-			};
+static struct pci_device_id isicom_pci_tbl[] = {
+	{ VENDOR_ID, 0x2028, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ VENDOR_ID, 0x2051, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ VENDOR_ID, 0x2052, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ VENDOR_ID, 0x2053, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ VENDOR_ID, 0x2054, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ VENDOR_ID, 0x2055, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ VENDOR_ID, 0x2056, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ VENDOR_ID, 0x2057, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ VENDOR_ID, 0x2058, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ 0 }
+};
+MODULE_DEVICE_TABLE(pci, isicom_pci_tbl);
 
-static int isicom_refcount = 0;
+static int isicom_refcount;
 static int prev_card = 3;	/*	start servicing isi_card[0]	*/
-static struct isi_board * irq_to_board[16] = { NULL, };
+static struct isi_board * irq_to_board[16];
 static struct tty_driver isicom_normal, isicom_callout;
-static struct tty_struct * isicom_table[PORT_COUNT] = { NULL, };
-static struct termios * isicom_termios[PORT_COUNT] = { NULL, };
-static struct termios * isicom_termios_locked[PORT_COUNT] = { NULL, };
+static struct tty_struct * isicom_table[PORT_COUNT];
+static struct termios * isicom_termios[PORT_COUNT];
+static struct termios * isicom_termios_locked[PORT_COUNT];
 
 static struct isi_board isi_card[BOARD_COUNT];
 static struct isi_port  isi_ports[PORT_COUNT];
@@ -993,7 +1000,7 @@ static int block_til_ready(struct tty_struct * tty, struct file * filp, struct i
 		}
 		schedule();		
 	}
-	current->state = TASK_RUNNING;
+	set_current_state(TASK_RUNNING);
 	remove_wait_queue(&port->open_wait, &wait);
 	if (!tty_hung_up_p(filp))
 		port->count++;
@@ -1198,7 +1205,7 @@ static void isicom_close(struct tty_struct * tty, struct file * filp)
 	port->tty = 0;
 	if (port->blocked_open) {
 		if (port->close_delay) {
-			current->state = TASK_INTERRUPTIBLE;
+			set_current_state(TASK_INTERRUPTIBLE);
 #ifdef ISICOM_DEBUG			
 			printk(KERN_DEBUG "ISICOM: scheduling until time out.\n");
 #endif			
@@ -1354,13 +1361,13 @@ extern inline void isicom_send_break(struct isi_port * port, unsigned long lengt
 	while (((inw(base + 0x0e) & 0x0001) == 0) && (wait-- > 0));	
 	if (!wait) {
 		printk(KERN_DEBUG "ISICOM: Card found busy in isicom_send_break.\n");
-		return;
+		goto out;
 	}	
 	outw(0x8000 | ((port->channel) << (card->shift_count)) | 0x3, base);
 	outw((length & 0xff) << 8 | 0x00, base);
 	outw((length & 0xff00), base);
 	InterruptTheCard(base);
-	restore_flags(flags);
+out:	restore_flags(flags);
 }
 
 static int isicom_get_modem_info(struct isi_port * port, unsigned int * value)
@@ -1375,8 +1382,7 @@ static int isicom_get_modem_info(struct isi_port * port, unsigned int * value)
 		((status & ISI_DSR) ? TIOCM_DSR : 0) |
 		((status & ISI_CTS) ? TIOCM_CTS : 0) |
 		((status & ISI_RI ) ? TIOCM_RI  : 0);
-	put_user(info, (unsigned int *) value);
-	return 0;	
+	return put_user(info, (unsigned int *) value);
 }
 
 static int isicom_set_modem_info(struct isi_port * port, unsigned int cmd,
@@ -1438,7 +1444,7 @@ static int isicom_set_serial_info(struct isi_port * port,
 	reconfig_port = ((port->flags & ASYNC_SPD_MASK) != 
 			 (newinfo.flags & ASYNC_SPD_MASK));
 	
-	if (!suser()) {
+	if (!capable(CAP_SYS_ADMIN)) {
 		if ((newinfo.close_delay != port->close_delay) ||
 		    (newinfo.closing_wait != port->closing_wait) ||
 		    ((newinfo.flags & ~ASYNC_USR_MASK) != 
@@ -1924,6 +1930,7 @@ static int irq[4];
 
 MODULE_AUTHOR("MultiTech");
 MODULE_DESCRIPTION("Driver for the ISI series of cards by MultiTech");
+MODULE_LICENSE("GPL");
 MODULE_PARM(io, "1-4i");
 MODULE_PARM_DESC(io, "I/O ports for the cards");
 MODULE_PARM(irq, "1-4i");
@@ -1970,7 +1977,7 @@ int init_module(void)
 		for (idx=0; idx < DEVID_COUNT; idx++) {
 			dev = NULL;
 			for (;;){
-				if (!(dev = pci_find_device(VENDOR_ID, device_id[idx], dev)))
+				if (!(dev = pci_find_device(VENDOR_ID, isicom_pci_tbl[idx].device, dev)))
 					break;
 				if (card >= BOARD_COUNT)
 					break;
@@ -1984,7 +1991,7 @@ int init_module(void)
 								       * space.
 								       */
 				pciirq = dev->irq;
-				printk(KERN_INFO "ISI PCI Card(Device ID 0x%x)\n", device_id[idx]);
+				printk(KERN_INFO "ISI PCI Card(Device ID 0x%x)\n", isicom_pci_tbl[idx].device);
 				/*
 				 * allot the first empty slot in the array
 				 */				
@@ -2031,7 +2038,7 @@ int init_module(void)
 void cleanup_module(void)
 {
 	re_schedule = 0;
-	current->state = TASK_INTERRUPTIBLE;
+	set_current_state(TASK_INTERRUPTIBLE);
 	schedule_timeout(HZ);
 
 	remove_bh(ISICOM_BH);

@@ -429,11 +429,17 @@
                            <mporter@eng.mcd.mot.com>
                           Remove double checking for DEBUG_RX in de4x5_dbg_rx()
 			   from report by <geert@linux-m68k.org>
- 
+      0.546  22-Feb-01    Fixes Alpha XP1000 oops.  The srom_search function
+                           was causing a page fault when initializing the
+                           variable 'pb', on a non de4x5 PCI device, in this
+                           case a PCI bridge (DEC chip 21152). The value of
+                           'pb' is now only initialized if a de4x5 chip is
+                           present. 
+                           <france@handhelds.org>  
     =========================================================================
 */
 
-static const char *version = "de4x5.c:V0.545 1999/11/28 davies@maniac.ultranet.com\n";
+static const char *version = "de4x5.c:V0.546 2001/02/22 davies@maniac.ultranet.com\n";
 
 #include <linux/config.h>
 #include <linux/module.h>
@@ -445,7 +451,7 @@ static const char *version = "de4x5.c:V0.545 1999/11/28 davies@maniac.ultranet.c
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/pci.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -585,7 +591,7 @@ static int de4x5_debug = (DEBUG_MEDIA | DEBUG_VERSION);
 #ifdef DE4X5_PARM
 static char *args = DE4X5_PARM;
 #else
-static char *args = NULL;
+static char *args;
 #endif
 
 struct parameters {
@@ -666,7 +672,7 @@ struct parameters {
 #define DESC_ALIGN
 
 #ifndef DEC_ONLY                        /* See README.de4x5 for using this */
-static int dec_only = 0;
+static int dec_only;
 #else
 static int dec_only = 1;
 #endif
@@ -929,8 +935,6 @@ static int     de4x5_rx_ovfc(struct net_device *dev);
 
 static int     autoconf_media(struct net_device *dev);
 static void    create_packet(struct net_device *dev, char *frame, int len);
-static void    de4x5_us_delay(u32 usec);
-static void    de4x5_ms_delay(u32 msec);
 static void    load_packet(struct net_device *dev, char *buf, u32 flags, struct sk_buff *skb);
 static int     dc21040_autoconf(struct net_device *dev);
 static int     dc21041_autoconf(struct net_device *dev);
@@ -1040,25 +1044,30 @@ static int loading_module = 1;
 MODULE_PARM(de4x5_debug, "i");
 MODULE_PARM(dec_only, "i");
 MODULE_PARM(args, "s");
+MODULE_PARM_DESC(de4x5_debug, "de4x5 debug mask");
+MODULE_PARM_DESC(dec_only, "de4x5 probe only for Digital boards (0-1)");
+MODULE_PARM_DESC(args, "de4x5 full duplex and media type settings; see de4x5.c for details");
+MODULE_LICENSE("GPL");
+
 # else
-static int loading_module = 0;
+static int loading_module;
 #endif /* MODULE */
 
 static char name[DE4X5_NAME_LENGTH + 1];
 #if !defined(__sparc_v9__) && !defined(__powerpc__) && !defined(__alpha__)
 static u_char de4x5_irq[] = EISA_ALLOWED_IRQ_LIST;
-static int lastEISA = 0;
+static int lastEISA;
 #  ifdef DE4X5_FORCE_EISA                 /* Force an EISA bus probe or not */
 static int forceEISA = 1;
 #  else
-static int forceEISA = 0;
+static int forceEISA;
 #  endif
 #endif
-static int num_de4x5s = 0;
-static int cfrv = 0, useSROM = 0;
+static int num_de4x5s;
+static int cfrv, useSROM;
 static int lastPCI = -1;
-static struct net_device *lastModule = NULL;
-static struct pci_dev *pdev = NULL;
+static struct net_device *lastModule;
+static struct pci_dev *pdev;
 
 /*
 ** List the SROM infoleaf functions and chipsets
@@ -1096,13 +1105,13 @@ static int (*dc_infoblock[])(struct net_device *dev, u_char, u_char *) = {
 #define RESET_DE4X5 {\
     int i;\
     i=inl(DE4X5_BMR);\
-    de4x5_ms_delay(1);\
+    mdelay(1);\
     outl(i | BMR_SWR, DE4X5_BMR);\
-    de4x5_ms_delay(1);\
+    mdelay(1);\
     outl(i, DE4X5_BMR);\
-    de4x5_ms_delay(1);\
-    for (i=0;i<5;i++) {inl(DE4X5_BMR); de4x5_ms_delay(1);}\
-    de4x5_ms_delay(1);\
+    mdelay(1);\
+    for (i=0;i<5;i++) {inl(DE4X5_BMR); mdelay(1);}\
+    mdelay(1);\
 }
 
 #define PHY_HARD_RESET {\
@@ -1146,7 +1155,7 @@ de4x5_hw_init(struct net_device *dev, u_long iobase, struct pci_dev *pdev)
 	pcibios_write_config_byte(lp->bus_num, lp->device << 3, 
 				  PCI_CFDA_PSM, WAKEUP);
     }
-    de4x5_ms_delay(10);
+    mdelay(10);
 
     RESET_DE4X5;
     
@@ -1662,6 +1671,7 @@ de4x5_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	    STOP_DE4X5;
 	    printk("%s: Fatal bus error occurred, sts=%#8x, device stopped.\n",
 		   dev->name, sts);
+	    spin_unlock(&lp->lock);
 	    return;
 	}
     }
@@ -1730,12 +1740,13 @@ de4x5_rx(struct net_device *dev)
 
 		    /* Push up the protocol stack */
 		    skb->protocol=eth_type_trans(skb,dev);
+		    de4x5_local_stats(dev, skb->data, pkt_len);
 		    netif_rx(skb);
 		    
 		    /* Update stats */
+		    dev->last_rx = jiffies;
 		    lp->stats.rx_packets++;
  		    lp->stats.rx_bytes += pkt_len;
-		    de4x5_local_stats(dev, skb->data, pkt_len);
 		}
 	    }
 	    
@@ -2301,12 +2312,15 @@ srom_search(struct pci_dev *dev)
     for (walk = walk->next; walk != &dev->bus_list; walk = walk->next) {
 	struct pci_dev *this_dev = pci_dev_b(walk);
 
-	pb = this_dev->bus->number;
+	/* Skip the pci_bus list entry */
+	if (list_entry(walk, struct pci_bus, devices) == dev->bus) continue;
+
 	vendor = this_dev->vendor;
 	device = this_dev->device << 8;
 	if (!(is_DC21040 || is_DC21041 || is_DC21140 || is_DC2114x)) continue;
 
 	/* Get the chip configuration revision register */
+	pb = this_dev->bus->number;
 	pcibios_read_config_dword(pb, this_dev->devfn, PCI_REVISION_ID, &cfrv);
 
 	/* Set the device number information */
@@ -3919,7 +3933,7 @@ reset_init_sia(struct net_device *dev, s32 csr13, s32 csr14, s32 csr15)
     outl(csr14, DE4X5_STRR);
     outl(csr13, DE4X5_SICR);
 
-    de4x5_ms_delay(10);
+    mdelay(10);
 
     return;
 }
@@ -3945,33 +3959,6 @@ create_packet(struct net_device *dev, char *frame, int len)
     
     return;
 }
-
-/*
-** Known delay in microseconds
-*/
-static void
-de4x5_us_delay(u32 usec)
-{
-    udelay(usec);
-    
-    return;
-}
-
-/*
-** Known delay in milliseconds, in millisecond steps.
-*/
-static void
-de4x5_ms_delay(u32 msec)
-{
-    u_int i;
-    
-    for (i=0; i<msec; i++) {
-	de4x5_us_delay(1000);
-    }
-    
-    return;
-}
-
 
 /*
 ** Look for a particular board name in the EISA configuration space
@@ -4365,7 +4352,7 @@ srom_address(u_int command, u_long addr, u_char offset)
     for (i=0; i<6; i++, a <<= 1) {
 	srom_latch(command | ((a & 0x80) ? DT_IN : 0), addr);
     }
-    de4x5_us_delay(1);
+    udelay(1);
     
     i = (getfrom_srom(addr) >> 3) & 0x01;
     
@@ -4399,7 +4386,7 @@ srom_busy(u_int command, u_long addr)
    sendto_srom((command & 0x0000ff00) | DT_CS, addr);
    
    while (!((getfrom_srom(addr) >> 3) & 0x01)) {
-       de4x5_ms_delay(1);
+       mdelay(1);
    }
    
    sendto_srom(command & 0x0000ff00, addr);
@@ -5330,7 +5317,7 @@ yawn(struct net_device *dev, int state)
 	switch(state) {
 	  case WAKEUP:
 	    outb(WAKEUP, PCI_CFPM);
-	    de4x5_ms_delay(10);
+	    mdelay(10);
 	    break;
 
 	  case SNOOZE:
@@ -5347,7 +5334,7 @@ yawn(struct net_device *dev, int state)
 	  case WAKEUP:
 	    pcibios_write_config_byte(lp->bus_num, lp->device << 3, 
 				      PCI_CFDA_PSM, WAKEUP);
-	    de4x5_ms_delay(10);
+	    mdelay(10);
 	    break;
 
 	  case SNOOZE:
@@ -5802,6 +5789,7 @@ de4x5_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 static struct net_device *mdev = NULL;
 static int io=0x0;/* EDIT THIS LINE FOR YOUR CONFIGURATION IF NEEDED        */
 MODULE_PARM(io, "i");
+MODULE_PARM_DESC(io, "de4x5 I/O base address");
 
 int
 init_module(void)

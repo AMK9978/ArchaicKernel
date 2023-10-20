@@ -1,4 +1,4 @@
-/* $Id: pbm.h,v 1.22 2000/03/25 05:18:30 davem Exp $
+/* $Id: pbm.h,v 1.27 2001/08/12 13:18:23 davem Exp $
  * pbm.h: UltraSparc PCI controller software state.
  *
  * Copyright (C) 1997, 1998, 1999 David S. Miller (davem@redhat.com)
@@ -18,11 +18,12 @@
 
 /* The abstraction used here is that there are PCI controllers,
  * each with one (Sabre) or two (PSYCHO/SCHIZO) PCI bus modules
- * underneath.  Each PCI controller has a single IOMMU shared
- * by the PCI bus modules underneath, and if a streaming buffer
+ * underneath.  Each PCI bus module uses an IOMMU (shared by both
+ * PBMs of a controller, or per-PBM), and if a streaming buffer
  * is present, each PCI bus module has it's own. (ie. the IOMMU
- * is shared between PBMs, the STC is not)  Furthermore, each
- * PCI bus module controls it's own autonomous PCI bus.
+ * might be shared between PBMs, the STC is never shared)
+ * Furthermore, each PCI bus module controls it's own autonomous
+ * PCI bus.
  */
 
 #define PBM_LOGCLUSTERS 3
@@ -143,12 +144,21 @@ struct pci_pbm_info {
 	struct resource			io_space;
 	struct resource			mem_space;
 
+	/* Base of PCI Config space, can be per-PBM or shared. */
+	unsigned long			config_space;
+
 	/* State of 66MHz capabilities on this PBM. */
 	int				is_66mhz_capable;
 	int				all_devs_66mhz;
 
 	/* This PBM's streaming buffer. */
 	struct pci_strbuf		stc;
+
+	/* IOMMU state, potentially shared by both PBM segments. */
+	struct pci_iommu		*iommu;
+
+	/* PCI slot mapping. */
+	unsigned int			pci_first_slot;
 
 	/* Now things for the actual PCI bus probes. */
 	unsigned int			pci_first_busno;
@@ -160,11 +170,8 @@ struct pci_controller_info {
 	/* List of all PCI controllers. */
 	struct pci_controller_info	*next;
 
-	/* Physical address base of controller registers
-	 * and PCI config space.
-	 */
+	/* Physical address base of controller registers. */
 	unsigned long			controller_regs;
-	unsigned long			config_space;
 
 	/* Opaque 32-bit system bus Port ID. */
 	u32				portid;
@@ -174,13 +181,16 @@ struct pci_controller_info {
 	 */
 	int				index;
 
+	/* Do the PBMs both exist in the same PCI domain? */
+	int				pbms_same_domain;
+
 	/* The PCI bus modules controlled by us. */
 	struct pci_pbm_info		pbm_A;
 	struct pci_pbm_info		pbm_B;
 
 	/* Operations which are controller specific. */
 	void (*scan_bus)(struct pci_controller_info *);
-	unsigned int (*irq_build)(struct pci_controller_info *, struct pci_dev *, unsigned int);
+	unsigned int (*irq_build)(struct pci_pbm_info *, struct pci_dev *, unsigned int);
 	void (*base_address_update)(struct pci_dev *, int);
 	void (*resource_adjust)(struct pci_dev *, struct resource *, struct resource *);
 
@@ -188,9 +198,6 @@ struct pci_controller_info {
 	struct pci_ops			*pci_ops;
 	unsigned int			pci_first_busno;
 	unsigned int			pci_last_busno;
-
-	/* IOMMU state shared by both PBM segments. */
-	struct pci_iommu		iommu;
 
 	void				*starfire_cookie;
 };

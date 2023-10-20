@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.hardirq.h 1.12 07/10/01 11:26:58 trini
+ */
 #ifdef __KERNEL__
 #ifndef __ASM_HARDIRQ_H
 #define __ASM_HARDIRQ_H
@@ -12,11 +15,11 @@
  * for uniformity.
  */
 typedef struct {
-	unsigned int __softirq_active;
-	unsigned int __softirq_mask;
+	unsigned long __softirq_pending;	/* set_bit is used on this */
 	unsigned int __local_irq_count;
 	unsigned int __local_bh_count;
 	unsigned int __syscall_count;
+	struct task_struct * __ksoftirqd_task;
 	unsigned int __last_jiffy_stamp;
 } ____cacheline_aligned irq_cpustat_t;
 
@@ -47,7 +50,7 @@ typedef struct {
 #include <asm/atomic.h>
 
 extern unsigned char global_irq_holder;
-extern unsigned volatile int global_irq_lock;
+extern unsigned volatile long global_irq_lock;
 extern atomic_t global_irq_count;
 
 static inline void release_irqlock(int cpu)
@@ -66,8 +69,8 @@ static inline void hardirq_enter(int cpu)
 	++local_irq_count(cpu);
 	atomic_inc(&global_irq_count);
 	while (test_bit(0,&global_irq_lock)) {
-		if (smp_processor_id() == global_irq_holder) {
-			printk("uh oh, interrupt while we hold global irq lock!\n");
+		if (cpu == global_irq_holder) {
+			printk("uh oh, interrupt while we hold global irq lock! (CPU %d)\n", cpu);
 #ifdef CONFIG_XMON
 			xmon(0);
 #endif

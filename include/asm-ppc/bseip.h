@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.bseip.h 1.10 08/17/01 15:23:17 paulus
+ */
 
 /*
  * A collection of structures, addresses, and values associated with
@@ -8,6 +11,7 @@
 #ifndef __MACH_BSEIP_DEFS
 #define __MACH_BSEIP_DEFS
 
+#ifndef __ASSEMBLY__
 /* A Board Information structure that is given to a program when
  * prom starts it up.
  */
@@ -29,13 +33,10 @@ extern bd_t m8xx_board_info;
 #define IMAP_SIZE		((uint)(64 * 1024))
 #define PCMCIA_MEM_ADDR		((uint)0x04000000)
 #define PCMCIA_MEM_SIZE		((uint)(64 * 1024))
+#endif	/* !__ASSEMBLY__ */
 
 /* We don't use the 8259.
 */
 #define NR_8259_INTS	0
-
-/* Machine type
-*/
-#define _MACH_8xx (_MACH_bseip)
 
 #endif

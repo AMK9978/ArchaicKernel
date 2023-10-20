@@ -18,7 +18,7 @@
 unsigned long __irq_attempt[NR_IRQS];
 #endif
 
-/* Hack minimum IPL during interupt processing for broken hardware.  */
+/* Hack minimum IPL during interrupt processing for broken hardware.  */
 #ifdef CONFIG_ALPHA_BROKEN_IRQ_MASK
 int __min_ipl;
 #endif
@@ -108,11 +108,6 @@ init_IRQ(void)
 	wrent(entInt, 0);
 
 	alpha_mv.init_irq();
-
-	/* If we had wanted SRM console printk echoing early, undo it now. */
-	if (alpha_using_srm && srmcons_output) {
-		unregister_srm_console();
-	}
 }
 
 /*

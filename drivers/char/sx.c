@@ -257,6 +257,11 @@
 #define PCI_DEVICE_ID_SPECIALIX_SX_XIO_IO8 0x2000
 #endif
 
+static struct pci_device_id sx_pci_tbl[] = {
+	{ PCI_VENDOR_ID_SPECIALIX, PCI_DEVICE_ID_SPECIALIX_SX_XIO_IO8, PCI_ANY_ID, PCI_ANY_ID },
+	{ 0 }
+};
+MODULE_DEVICE_TABLE(pci, sx_pci_tbl);
 
 /* Configurable options: 
    (Don't be too sure that it'll work if you toggle them) */
@@ -365,6 +370,8 @@ MODULE_PARM(sx_maxints, "i");
 MODULE_PARM(sx_debug, "i");
 MODULE_PARM(sx_irqmask, "i");
 
+MODULE_LICENSE("GPL");
+
 static struct real_driver sx_real_driver = {
 	sx_disable_tx_interrupts,
 	sx_enable_tx_interrupts,
@@ -467,7 +474,7 @@ static void my_hd (unsigned char *addr, int len)
 	int i, j, ch;
 
 	for (i=0;i<len;i+=16) {
-		printk ("%08x ", (int) addr+i);
+		printk ("%p ", addr+i);
 		for (j=0;j<16;j++) {
 			printk ("%02x %s", addr[j+i], (j==7)?" ":"");
 		}
@@ -918,7 +925,6 @@ static int sx_set_real_termios (void *ptr)
 	                       SP_DCEN);
 
 	sx_write_channel_byte (port, hi_break, 
-	                       I_OTHER(port->gs.tty) ? 0:
 	                       (I_IGNBRK(port->gs.tty)?BR_IGN:0 |
 	                        I_BRKINT(port->gs.tty)?BR_INT:0));
 
@@ -1140,9 +1146,7 @@ static inline void sx_check_modem_signals (struct sx_port *port)
 		sx_dprintk (SX_DEBUG_MODEMSIGNALS, "got a break.\n");
 
 		sx_write_channel_byte (port, hi_state, hi_state);
-		if (port->gs.flags & ASYNC_SAK) {
-			do_SAK (port->gs.tty);
-		}
+		gs_got_break (&port->gs);
 	}
 	if (hi_state & ST_DCD) {
 		hi_state &= ~ST_DCD;
@@ -1617,6 +1621,7 @@ static int do_memtest (struct sx_board *board, int min, int max)
 #define R0         if (read_sx_word (board, i) != 0x55aa) return 1
 #define R1         if (read_sx_word (board, i) != 0xaa55) return 1
 
+#if 0
 /* This memtest takes a human-noticable time. You normally only do it
    once a boot, so I guess that it is worth it. */
 static int do_memtest_w (struct sx_board *board, int min, int max)
@@ -1631,6 +1636,7 @@ static int do_memtest_w (struct sx_board *board, int min, int max)
 
 	return 0;
 }
+#endif
 
 
 static int sx_fw_ioctl (struct inode *inode, struct file *filp,
@@ -1639,7 +1645,8 @@ static int sx_fw_ioctl (struct inode *inode, struct file *filp,
 	int rc = 0;
 	int *descr = (int *)arg, i;
 	static struct sx_board *board = NULL;
-	int nbytes, offset, data;
+	int nbytes, offset;
+	unsigned long data;
 	char *tmp;
 
 	func_enter();
@@ -1647,7 +1654,7 @@ static int sx_fw_ioctl (struct inode *inode, struct file *filp,
 #if 0 
 	/* Removed superuser check: Sysops can use the permissions on the device
 	   file to restrict access. Recommendation: Root only. (root.root 600) */
-	if (!suser ()) {
+	if (!capable(CAP_SYS_ADMIN)) {
 		return -EPERM;
 	}
 #endif
@@ -1767,6 +1774,20 @@ static int sx_fw_ioctl (struct inode *inode, struct file *filp,
 }
 
 
+static void sx_break (struct tty_struct * tty, int flag)
+{
+	struct sx_port *port = tty->driver_data;
+	int rv;
+
+	if (flag) 
+		rv = sx_send_command (port, HS_START, -1, HS_IDLE_BREAK);
+	else 
+		rv = sx_send_command (port, HS_STOP, -1, HS_IDLE_OPEN);
+	if (rv != 1) printk (KERN_ERR "sx: couldn't send break (%x).\n",
+			read_sx_byte (port->board, CHAN_OFFSET (port, hi_hstat)));
+}
+
+
 static int sx_ioctl (struct tty_struct * tty, struct file * filp, 
                      unsigned int cmd, unsigned long arg)
 {
@@ -1835,7 +1856,6 @@ static int sx_ioctl (struct tty_struct * tty, struct file * filp,
 			sx_reconfigure_port(port);
 		}
 		break;
-
 	default:
 		rc = -ENOIOCTLCMD;
 		break;
@@ -2085,7 +2105,7 @@ static int probe_sx (struct sx_board *board)
 	func_enter();
 
 	if (!IS_CF_BOARD (board)) {    
-		sx_dprintk (SX_DEBUG_PROBE, "Going to verify vpd prom at %x.\n", 
+		sx_dprintk (SX_DEBUG_PROBE, "Going to verify vpd prom at %lx.\n", 
 		            board->base + SX_VPD_ROM);
 
 		if (sx_debug & SX_DEBUG_PROBE)
@@ -2110,7 +2130,7 @@ static int probe_sx (struct sx_board *board)
 	printheader ();
 
 	if (!IS_CF_BOARD (board)) {
-		printk (KERN_DEBUG "sx: Found an SX board at %x\n", board->hw_base);
+		printk (KERN_DEBUG "sx: Found an SX board at %lx\n", board->hw_base);
 		printk (KERN_DEBUG "sx: hw_rev: %d, assembly level: %d, uniq ID:%08x, ", 
 		        vpdp.hwrev, vpdp.hwass, vpdp.uniqid);
 		printk (           "Manufactured: %d/%d\n", 
@@ -2127,7 +2147,7 @@ static int probe_sx (struct sx_board *board)
 
 		if (((vpdp.uniqid >> 24) & SX_UNIQUEID_MASK) == SX_ISA_UNIQUEID1) {
 			if (board->base & 0x8000) {
-				printk (KERN_WARNING "sx: Warning: There may be hardware problems with the card at %x.\n", board->base);
+				printk (KERN_WARNING "sx: Warning: There may be hardware problems with the card at %lx.\n", board->base);
 				printk (KERN_WARNING "sx: Read sx.txt for more info.\n");
 			}
 		}
@@ -2159,7 +2179,7 @@ static int probe_si (struct sx_board *board)
 	int i;
 
 	func_enter();
-	sx_dprintk (SX_DEBUG_PROBE, "Going to verify SI signature %x.\n", 
+	sx_dprintk (SX_DEBUG_PROBE, "Going to verify SI signature %lx.\n", 
 	            board->base + SI2_ISA_ID_BASE);
 
 	if (sx_debug & SX_DEBUG_PROBE)
@@ -2175,7 +2195,7 @@ static int probe_si (struct sx_board *board)
 
 	printheader ();
 
-	printk (KERN_DEBUG "sx: Found an SI board at %x\n", board->hw_base);
+	printk (KERN_DEBUG "sx: Found an SI board at %lx\n", board->hw_base);
 	/* Compared to the SX boards, it is a complete guess as to what
 		 this card is up to... */
 
@@ -2215,6 +2235,7 @@ static int sx_init_drivers(void)
 	sx_driver.table = sx_table;
 	sx_driver.termios = sx_termios;
 	sx_driver.termios_locked = sx_termios_locked;
+	sx_driver.break_ctl = sx_break;
 
 	sx_driver.open	= sx_open;
 	sx_driver.close = gs_close;
@@ -2493,7 +2514,7 @@ static int __init sx_init(void)
 
 			board->irq = get_irq (pdev);
 
-			sx_dprintk (SX_DEBUG_PROBE, "Got a specialix card: %x/%x(%d) %x.\n", 
+			sx_dprintk (SX_DEBUG_PROBE, "Got a specialix card: %x/%lx(%d) %x.\n", 
 			            tint, boards[found].base, board->irq, board->flags);
 
 			if (probe_sx (board)) {
@@ -2555,8 +2576,8 @@ static int __init sx_init(void)
 			board->base2 =
 			board->base = (ulong) ioremap(board->hw_base, SI2_EISA_WINDOW_LEN);
 
-			sx_dprintk(SX_DEBUG_PROBE, "IO hw_base address: %x\n", board->hw_base);
-			sx_dprintk(SX_DEBUG_PROBE, "base: %x\n", board->base);
+			sx_dprintk(SX_DEBUG_PROBE, "IO hw_base address: %lx\n", board->hw_base);
+			sx_dprintk(SX_DEBUG_PROBE, "base: %lx\n", board->base);
 			board->irq = inb(board->eisa_base+0xc02)>>4; 
 			sx_dprintk(SX_DEBUG_PROBE, "IRQ: %d\n", board->irq);
 			
@@ -2588,7 +2609,7 @@ static void __exit sx_exit (void)
 	for (i = 0; i < SX_NBOARDS; i++) {
 		board = &boards[i];
 		if (board->flags & SX_BOARD_INITIALIZED) {
-			sx_dprintk (SX_DEBUG_CLEANUP, "Cleaning up board at %x\n", board->base);
+			sx_dprintk (SX_DEBUG_CLEANUP, "Cleaning up board at %lx\n", board->base);
 			/* The board should stop messing with us.
 			   (actually I mean the interrupt) */
 			sx_reset (board);

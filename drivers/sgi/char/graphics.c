@@ -1,5 +1,4 @@
-/* $Id: graphics.c,v 1.22 2000/02/18 00:24:43 ralf Exp $
- *
+/*
  * gfx.c: support for SGI's /dev/graphics, /dev/opengl
  *
  * Author: Miguel de Icaza (miguel@nuclecu.unam.mx)
@@ -31,7 +30,7 @@
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/smp_lock.h>
 #include <asm/uaccess.h>
@@ -153,11 +152,11 @@ sgi_graphics_ioctl (struct inode *inode, struct file *file, unsigned int cmd, un
 		 * sgi_graphics_mmap
 		 */
 		disable_gconsole ();
-		down(&current->mm->mmap_sem);
+		down_write(&current->mm->mmap_sem);
 		r = do_mmap (file, (unsigned long)vaddr,
 			     cards[board].g_regs_size, PROT_READ|PROT_WRITE,
 			     MAP_FIXED|MAP_PRIVATE, 0);
-		up(&current->mm->mmap_sem);
+		up_write(&current->mm->mmap_sem);
 		if (r)
 			return r;
 	}
@@ -214,8 +213,7 @@ sgi_graphics_close (struct inode *inode, struct file *file)
 /* 
  * This is the core of the direct rendering engine.
  */
-
-unsigned long
+struct page *
 sgi_graphics_nopage (struct vm_area_struct *vma, unsigned long address, int
 		     no_share)
 {
@@ -250,7 +248,6 @@ sgi_graphics_nopage (struct vm_area_struct *vma, unsigned long address, int
 	pgd = pgd_offset(current->mm, address);
 	pmd = pmd_offset(pgd, address);
 	pte = pte_offset(pmd, address);
-	printk("page: %08lx\n", pte_page(*pte));
 	return pte_page(*pte);
 }
 
@@ -346,6 +343,8 @@ void __init gfx_init (const char **name)
 }
 
 #ifdef MODULE
+MODULE_LICENSE("GPL");
+
 int init_module(void) {
 	static int initiated = 0;
 

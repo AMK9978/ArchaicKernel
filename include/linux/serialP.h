@@ -52,6 +52,7 @@ struct serial_state {
 	struct termios		callout_termios;
 	int	io_type;
 	struct async_struct *info;
+	struct pci_dev	*dev;
 };
 
 struct async_struct {
@@ -141,10 +142,6 @@ struct rs_multiport_struct {
  */
 struct pci_dev;
 struct pci_board {
-	unsigned short vendor;
-	unsigned short device;
-	unsigned short subvendor;
-	unsigned short subdevice;
 	int flags;
 	int num_ports;
 	int base_baud;
@@ -180,7 +177,7 @@ struct pci_board_inst {
 #define SPCI_FL_IRQBASE4       (0x0004 << 4)
 #define SPCI_FL_GET_IRQBASE(x)        ((x & SPCI_FL_IRQ_MASK) >> 4)
 
-/* Use sucessive BARs (PCI base address registers), 
+/* Use successive BARs (PCI base address registers), 
    else use offset into some specified BAR */
 #define SPCI_FL_BASE_TABLE	0x0100
 

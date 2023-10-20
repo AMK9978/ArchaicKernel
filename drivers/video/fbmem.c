@@ -3,6 +3,9 @@
  *
  *  Copyright (C) 1994 Martin Schaller
  *
+ *	2001 - Documented with DocBook
+ *	- Brad Douglas <brad@neruo.com>
+ *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file COPYING in the main directory of this archive
  * for more details.
@@ -17,7 +20,7 @@
 #include <linux/smp_lock.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mman.h>
 #include <linux/tty.h>
 #include <linux/console.h>
@@ -115,6 +118,14 @@ extern int sisfb_init(void);
 extern int sisfb_setup(char*);
 extern int stifb_init(void);
 extern int stifb_setup(char*);
+extern int radeonfb_init(void);
+extern int radeonfb_setup(char*);
+extern int e1355fb_init(void);
+extern int e1355fb_setup(char*);
+extern int pvr2fb_init(void);
+extern int pvr2fb_setup(char*);
+extern int sstfb_init(void);
+extern int sstfb_setup(char*);
 
 static struct {
 	const char *name;
@@ -166,6 +177,9 @@ static struct {
 #endif
 #ifdef CONFIG_FB_RIVA
 	{ "riva", rivafb_init, rivafb_setup },
+#endif
+#ifdef CONFIG_FB_RADEON
+	{ "radeon", radeonfb_init, radeonfb_setup },
 #endif
 #ifdef CONFIG_FB_CONTROL
 	{ "controlfb", control_init, control_setup },
@@ -256,7 +270,15 @@ static struct {
 #ifdef CONFIG_FB_HIT
 	{ "hitfb", hitfb_init, NULL },
 #endif
-
+#ifdef CONFIG_FB_E1355
+	{ "e1355fb", e1355fb_init, e1355fb_setup },
+#endif
+#ifdef CONFIG_FB_PVR2
+	{ "pvr2", pvr2fb_init, pvr2fb_setup },
+#endif
+#ifdef CONFIG_FB_VOODOO1
+	{ "sst", sstfb_init, sstfb_setup },
+#endif
 	/*
 	 * Generic drivers that don't use resource management (yet)
 	 */
@@ -541,8 +563,10 @@ fb_mmap(struct file *file, struct vm_area_struct * vma)
 		/* memory mapped io */
 		off -= len;
 		fb->fb_get_var(&var, PROC_CONSOLE(info), info);
-		if (var.accel_flags)
+		if (var.accel_flags) {
+			unlock_kernel();
 			return -EINVAL;
+		}
 		start = fix.mmio_start;
 		len = PAGE_ALIGN((start & ~PAGE_MASK)+fix.mmio_len);
 	}
@@ -554,22 +578,6 @@ fb_mmap(struct file *file, struct vm_area_struct * vma)
 	vma->vm_pgoff = off >> PAGE_SHIFT;
 #if defined(__sparc_v9__)
 	vma->vm_flags |= (VM_SHM | VM_LOCKED);
-	{
-		unsigned long align, j;
-		for (align = 0x400000; align > PAGE_SIZE; align >>= 3)
-			if (len >= align && !((start & ~PAGE_MASK) & (align - 1)))
-				break;
-		if (align > PAGE_SIZE && vma->vm_start & (align - 1)) {
-			/* align as much as possible */
-			struct vm_area_struct *vmm;
-			j = (-vma->vm_start) & (align - 1);
-			vmm = find_vma(current->mm, vma->vm_start);
-			if (!vmm || vmm->vm_start >= vma->vm_end + j) {
-				vma->vm_start += j;
-				vma->vm_end += j;
-			}
-		}
-	}
 	if (io_remap_page_range(vma->vm_start, off,
 				vma->vm_end - vma->vm_start, vma->vm_page_prot, 0))
 		return -EAGAIN;
@@ -591,19 +599,16 @@ fb_mmap(struct file *file, struct vm_area_struct * vma)
 	pgprot_val(vma->vm_page_prot) |= _PAGE_NO_CACHE|_PAGE_GUARDED;
 #elif defined(__alpha__)
 	/* Caching is off in the I/O space quadrant by design.  */
-#elif defined(__i386__)
+#elif defined(__i386__) || defined(__x86_64__)
 	if (boot_cpu_data.x86 > 3)
 		pgprot_val(vma->vm_page_prot) |= _PAGE_PCD;
 #elif defined(__mips__)
 	pgprot_val(vma->vm_page_prot) &= ~_CACHE_MASK;
 	pgprot_val(vma->vm_page_prot) |= _CACHE_UNCACHED;
 #elif defined(__arm__)
-#if defined(CONFIG_CPU_32) && !defined(CONFIG_ARCH_ACORN)
-	/* On Acorn architectures, we want to keep the framebuffer
-	 * cached.
-	 */
-	pgprot_val(vma->vm_page_prot) &= ~(PTE_CACHEABLE | PTE_BUFFERABLE);
-#endif
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+	/* This is an IO map - tell maydump to skip this VMA */
+	vma->vm_flags |= VM_IO;
 #elif defined(__sh__)
 	pgprot_val(vma->vm_page_prot) &= ~_PAGE_CACHABLE;
 #else
@@ -682,9 +687,23 @@ static struct file_operations fb_fops = {
 	mmap:		fb_mmap,
 	open:		fb_open,
 	release:	fb_release,
+#ifdef HAVE_ARCH_FB_UNMAPPED_AREA
+	get_unmapped_area: get_fb_unmapped_area,
+#endif
 };
 
 static devfs_handle_t devfs_handle;
+
+
+/**
+ *	register_framebuffer - registers a frame buffer device
+ *	@fb_info: frame buffer info structure
+ *
+ *	Registers a frame buffer device @fb_info.
+ *
+ *	Returns negative errno on error, or zero for success.
+ *
+ */
 
 int
 register_framebuffer(struct fb_info *fb_info)
@@ -735,6 +754,17 @@ register_framebuffer(struct fb_info *fb_info)
 	return 0;
 }
 
+
+/**
+ *	unregister_framebuffer - releases a frame buffer device
+ *	@fb_info: frame buffer info structure
+ *
+ *	Unregisters a frame buffer device @fb_info.
+ *
+ *	Returns negative errno on error, or zero for success.
+ *
+ */
+
 int
 unregister_framebuffer(struct fb_info *fb_info)
 {
@@ -754,6 +784,16 @@ unregister_framebuffer(struct fb_info *fb_info)
 	num_registered_fb--;
 	return 0;
 }
+
+
+/**
+ *	fbmem_init - init frame buffer subsystem
+ *
+ *	Initialize the frame buffer subsystem.
+ *
+ *	NOTE: This function is _only_ to be called by drivers/char/mem.c.
+ *
+ */
 
 void __init 
 fbmem_init(void)
@@ -784,9 +824,18 @@ fbmem_init(void)
 			fb_drivers[i].init();
 }
 
-    /*
-     *  Command line options
-     */
+
+/**
+ *	video_setup - process command line options
+ *	@options: string of options
+ *
+ *	Process command line options for frame buffer subsystem.
+ *
+ *	NOTE: This function is a __setup and __init function.
+ *
+ *	Returns zero.
+ *
+ */
 
 int __init video_setup(char *options)
 {

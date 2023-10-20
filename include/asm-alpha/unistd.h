@@ -315,6 +315,9 @@
 #define __NR_mincore			375
 #define __NR_pciconfig_iobase		376
 #define __NR_getdents64			377
+#define __NR_gettid			378
+#define __NR_readahead			379
+#define __NR_security			380 /* syscall for security modules */
 
 #if defined(__GNUC__)
 
@@ -572,7 +575,6 @@ static inline long sync(void)
 	return sys_sync();
 }
 
-extern long sys_wait4(int, int *, int, struct rusage *);
 static inline pid_t waitpid(int pid, int * wait_stat, int flags)
 {
 	return sys_wait4(pid, wait_stat, flags, NULL);

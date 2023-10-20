@@ -26,7 +26,7 @@
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/poll.h>
@@ -54,14 +54,19 @@
 #include "cs8420.h"
 
 #define DEBUG(x) 		/* debug driver */
-#undef  IDEBUG(x) 		/* debug irq handler */
-#undef  MDEBUG(x) 		/* debug memory management */
+#undef  IDEBUG	 		/* debug irq handler */
+#undef  MDEBUG	 		/* debug memory management */
 
 #define SAA7146_MAX 6
 
 static struct saa7146 saa7146s[SAA7146_MAX];
 
 static int saa_num = 0;		/* number of SAA7146s in use */
+
+static int video_nr = -1;
+MODULE_PARM(video_nr,"i");
+MODULE_LICENSE("GPL");
+
 
 #define nDebNormal	0x00480000
 #define nDebNoInc	0x00480000
@@ -672,7 +677,7 @@ static void initialize_cs4341(struct saa7146 *saa)
 		/* auto mute off, power on, no de-emphasis */
 		/* I2S data up to 24-bit 64xFs internal SCLK */
 		I2CWrite(&(saa->i2c), 0x22, 0x01, 0x11, 2);
-		/* ATAPI mixer setings */
+		/* ATAPI mixer settings */
 		I2CWrite(&(saa->i2c), 0x22, 0x02, 0x49, 2);
 		/* attenuation left 3db */
 		I2CWrite(&(saa->i2c), 0x22, 0x03, 0x00, 2);
@@ -1988,6 +1993,7 @@ static void saa_close(struct video_device *dev)
 /* template for video_device-structure */
 static struct video_device saa_template =
 {
+	owner:		THIS_MODULE,
 	name:		"SAA7146A",
 	type:		VID_TYPE_CAPTURE | VID_TYPE_OVERLAY,
 	hardware:	VID_HARDWARE_SAA7146,
@@ -2067,11 +2073,15 @@ static int configure_saa7146(struct pci_dev *dev, int num)
 	if (result == -EBUSY)
 		printk(KERN_ERR "stradis%d: IRQ %ld busy, change your PnP"
 		       " config in BIOS\n", num, saa->irq);
-	if (result < 0)
+	if (result < 0) {
+		iounmap(saa->saa7146_mem);
 		return result;
+	}
 	pci_set_master(dev);
-	if (video_register_device(&saa->video_dev, VFL_TYPE_GRABBER) < 0)
+	if (video_register_device(&saa->video_dev, VFL_TYPE_GRABBER, video_nr) < 0) {
+		iounmap(saa->saa7146_mem);
 		return -1;
+	}
 #if 0
 	/* i2c generic interface is currently BROKEN */
 	i2c_register_bus(&saa->i2c);
@@ -2191,9 +2201,9 @@ static void release_saa(void)
 
 		/* disable PCI bus-mastering */
 		pci_read_config_byte(saa->dev, PCI_COMMAND, &command);
-		/* Should this be &=~ ?? */
 		command &= ~PCI_COMMAND_MASTER;
 		pci_write_config_byte(saa->dev, PCI_COMMAND, command);
+
 		/* unmap and free memory */
 		saa->audhead = saa->audtail = saa->osdhead = 0;
 		saa->vidhead = saa->vidtail = saa->osdtail = 0;

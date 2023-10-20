@@ -9,7 +9,7 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/fcntl.h>
 #include <linux/init.h>
@@ -76,7 +76,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		unsigned char mon, day, hrs, min, sec, leap_yr;
 		unsigned int yrs;
 
-		if (!suser())
+		if (!capable(CAP_SYS_ADMIN))
 			return -EACCES;
 
 		if (copy_from_user(&rtc_tm, (struct rtc_time*)arg,

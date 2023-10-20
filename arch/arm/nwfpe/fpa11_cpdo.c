@@ -1,6 +1,6 @@
 /*
     NetWinder Floating Point Emulator
-    (c) Rebel.com, 1998-1999
+    (c) Rebel.COM, 1998,1999
 
     Direct questions, comments to Scott Bambrough <scottb@netwinder.org>
 
@@ -28,6 +28,7 @@ unsigned int ExtendedCPDO(const unsigned int opcode);
 
 unsigned int EmulateCPDO(const unsigned int opcode)
 {
+   FPA11 *fpa11 = GET_FPA11();
    unsigned int Fd, nType, nDest, nRc = 1;
    
    //printk("EmulateCPDO(0x%08x)\n",opcode);

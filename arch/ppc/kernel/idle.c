@@ -1,6 +1,7 @@
 /*
- * $Id: idle.c,v 1.68 1999/10/15 18:16:03 cort Exp $
- *
+ * BK Id: SCCS/s.idle.c 1.16 10/16/01 15:58:42 trini
+ */
+/*
  * Idle daemon for PowerPC.  Idle daemon will handle any action
  * that needs to be taken when the system becomes idle.
  *
@@ -21,7 +22,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
@@ -30,12 +31,11 @@
 #include <asm/processor.h>
 #include <asm/mmu.h>
 #include <asm/cache.h>
+#include <asm/cputable.h>
 
 void zero_paged(void);
 void power_save(void);
-void inline htab_reclaim(void);
 
-unsigned long htab_reclaim_on = 0;
 unsigned long zero_paged_on = 0;
 unsigned long powersave_nap = 0;
 
@@ -47,24 +47,38 @@ atomic_t zeropage_calls; /* # zero'd pages request that've been made */
 
 int idled(void)
 {
+	int do_power_save = 0;
+
+	if (cur_cpu_spec[smp_processor_id()]->cpu_features & CPU_FTR_CAN_DOZE)
+		do_power_save = 1;
+
 	/* endless loop with no priority at all */
 	current->nice = 20;
 	current->counter = -100;
-	init_idle();	
-	for (;;)
-	{
-		__sti();
-		
-		check_pgt_cache();
-
-		/*if ( !current->need_resched && zero_paged_on ) zero_paged();*/
-		if ( !current->need_resched && htab_reclaim_on ) htab_reclaim();
-		if ( !current->need_resched ) power_save();
-
+	init_idle();
+	for (;;) {
 #ifdef CONFIG_SMP
-		if (current->need_resched)
+
+		if (!do_power_save) {
+			/*
+			 * Deal with another CPU just having chosen a thread to
+			 * run here:
+			 */
+			int oldval = xchg(&current->need_resched, -1);
+
+			if (!oldval) {
+				while(current->need_resched == -1)
+					; /* Do Nothing */
+			}
+		}
 #endif
+		if (do_power_save && !current->need_resched)
+			power_save();
+
+		if (current->need_resched) {
 			schedule();
+			check_pgt_cache();
+		}
 	}
 	return 0;
 }
@@ -77,68 +91,6 @@ int cpu_idle(void)
 {
 	idled();
 	return 0; 
-}
-
-/*
- * Mark 'zombie' pte's in the hash table as invalid.
- * This improves performance for the hash table reload code
- * a bit since we don't consider unused pages as valid.
- *  -- Cort
- */
-PTE *reclaim_ptr = 0;
-void inline htab_reclaim(void)
-{
-#ifndef CONFIG_8xx		
-#if 0	
-	PTE *ptr, *start;
-	static int dir = 1;
-#endif	
-	struct task_struct *p;
-	unsigned long valid = 0;
-	extern PTE *Hash, *Hash_end;
-	extern unsigned long Hash_size;
-
-	/* if we don't have a htab */
-	if ( Hash_size == 0 )
-		return;
-#if 0	
-	/* find a random place in the htab to start each time */
-	start = &Hash[jiffies%(Hash_size/sizeof(PTE))];
-	/* go a different direction each time */
-	dir *= -1;
-        for ( ptr = start;
-	      !current->need_resched && (ptr != Hash_end) && (ptr != Hash);
-	      ptr += dir)
-	{
-#else
-	if ( !reclaim_ptr ) reclaim_ptr = Hash;
-	while ( !current->need_resched )
-	{
-		reclaim_ptr++;
-		if ( reclaim_ptr == Hash_end ) reclaim_ptr = Hash;
-#endif	  
-		if (!reclaim_ptr->v)
-			continue;
-		valid = 0;
-		for_each_task(p)
-		{
-			if ( current->need_resched )
-				goto out;
-			/* if this vsid/context is in use */
-			if ( (reclaim_ptr->vsid >> 4) == p->mm->context )
-			{
-				valid = 1;
-				break;
-			}
-		}
-		if ( valid )
-			continue;
-		/* this pte isn't used */
-		reclaim_ptr->v = 0;
-	}
-out:
-	if ( current->need_resched ) printk("need_resched: %lx\n", current->need_resched);
-#endif /* CONFIG_8xx */
 }
 
 #if 0
@@ -274,35 +226,35 @@ void zero_paged(void)
 		atomic_inc((atomic_t *)&zero_cache_total);
 	}
 }
-#endif
+#endif /* 0 */
 
 void power_save(void)
 {
-	unsigned long msr, hid0;
-
-	/* only sleep on the 603-family/750 processors */
-	switch (_get_PVR() >> 16) {
-	case 3:			/* 603 */
-	case 6:			/* 603e */
-	case 7:			/* 603ev */
-	case 8:			/* 750 */
-	case 12:		/* 7400 */
-		save_flags(msr);
-		__cli();
-		if (!current->need_resched) {
-			asm("mfspr %0,1008" : "=r" (hid0) :);
-			hid0 &= ~(HID0_NAP | HID0_SLEEP | HID0_DOZE);
-			hid0 |= (powersave_nap? HID0_NAP: HID0_DOZE) | HID0_DPM;
-			asm("mtspr 1008,%0" : : "r" (hid0));
+	unsigned long hid0;
+	/*
+	 * Disable interrupts to prevent a lost wakeup
+	 * when going to sleep.  This is necessary even with
+	 * RTLinux since we are not guaranteed an interrupt
+	 * didn't come in and is waiting for a __sti() before
+	 * emulating one.  This way, we really do hard disable.
+	 * 
+	 * We assume that we're sti-ed when we come in here.  We
+	 * are in the idle loop so if we're cli-ed then it's a bug
+	 * anyway.
+	 *  -- Cort
+	 */
+	_nmask_and_or_msr(MSR_EE, 0);
+	if (!current->need_resched)
+	{
+		asm("mfspr %0,1008" : "=r" (hid0) :);
+		hid0 &= ~(HID0_NAP | HID0_SLEEP | HID0_DOZE);
+		hid0 |= (powersave_nap? HID0_NAP: HID0_DOZE) | HID0_DPM;
+		asm("mtspr 1008,%0" : : "r" (hid0));
 		
-			/* set the POW bit in the MSR, and enable interrupts
-			 * so we wake up sometime! */
-			__sti(); /* this keeps rtl from getting confused -- Cort */
-			_nmask_and_or_msr(0, MSR_POW | MSR_EE);
-		}
-		restore_flags(msr);
-	default:
-		return;
+		/* set the POW bit in the MSR, and enable interrupts
+		 * so we wake up sometime! */
+		_nmask_and_or_msr(0, MSR_POW | MSR_EE);
 	}
+	_nmask_and_or_msr(0, MSR_EE);
 }
 

@@ -1,16 +1,19 @@
-/*  $Id: modutil.c,v 1.6 2000/06/26 23:20:24 davem Exp $
+/*  $Id: modutil.c,v 1.9 2001/08/14 22:10:56 davem Exp $
  *  arch/sparc64/mm/modutil.c
  *
  *  Copyright (C) 1997,1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
  *  Based upon code written by Linus Torvalds and others.
  */
  
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
-#include <asm/vaddrs.h>
+
+#define  MODULES_VADDR	0x0000000001000000ULL  /* Where to map modules */
+#define  MODULES_LEN	0x000000007f000000ULL
+#define  MODULES_END	0x0000000080000000ULL
 
 static struct vm_struct * modvmlist = NULL;
 
@@ -59,7 +62,7 @@ void * module_map (unsigned long size)
 	*p = area;
 
 	if (vmalloc_area_pages(VMALLOC_VMADDR(addr), size, GFP_KERNEL, PAGE_KERNEL)) {
-		vfree(addr);
+		module_unmap(addr);
 		return NULL;
 	}
 	return addr;

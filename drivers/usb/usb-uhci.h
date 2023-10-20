@@ -2,7 +2,7 @@
 #define __LINUX_UHCI_H
 
 /*
-   $Id: usb-uhci.h,v 1.55 2000/05/13 12:50:30 acher Exp $
+   $Id: usb-uhci.h,v 1.58 2001/08/28 16:45:00 acher Exp $
  */
 #define MODNAME "usb-uhci"
 #define UHCI_LATENCY_TIMER 0
@@ -146,6 +146,7 @@ typedef struct {
 		uhci_qh_t qh;
 	} hw;
 	uhci_desc_type_t type;
+	dma_addr_t dma_addr;
 	struct list_head horizontal;
 	struct list_head vertical;
 	struct list_head desc_list;
@@ -154,6 +155,8 @@ typedef struct {
 
 typedef struct {
 	struct list_head desc_list;	// list pointer to all corresponding TDs/QHs associated with this request
+	dma_addr_t setup_packet_dma;
+	dma_addr_t transfer_buffer_dma;
 	unsigned long started;
 	urb_t *next_queued_urb;         // next queued urb for this EP
 	urb_t *prev_queued_urb;
@@ -195,6 +198,7 @@ typedef struct uhci {
 	struct usb_bus *bus;	// our bus
 
 	__u32 *framelist;
+	dma_addr_t framelist_dma;
 	uhci_desc_t **iso_td;
 	uhci_desc_t *int_chain[8];
 	uhci_desc_t *ls_control_chain;
@@ -213,12 +217,36 @@ typedef struct uhci {
 	long timeout_check;
 	int timeout_urbs;
 	struct pci_dev *uhci_pci;
+	struct pci_pool *desc_pool;
+	long last_error_time;          // last error output in uhci_interrupt()
 } uhci_t, *puhci_t;
 
 
-#define MAKE_TD_ADDR(a) (virt_to_bus(a)&~UHCI_PTR_QH)
-#define MAKE_QH_ADDR(a) (virt_to_bus(a)|UHCI_PTR_QH)
+#define MAKE_TD_ADDR(a) ((a)->dma_addr&~UHCI_PTR_QH)
+#define MAKE_QH_ADDR(a) ((a)->dma_addr|UHCI_PTR_QH)
 #define UHCI_GET_CURRENT_FRAME(uhci) (inw ((uhci)->io_addr + USBFRNUM))
+
+#define CLEAN_TRANSFER_NO_DELETION 0
+#define CLEAN_TRANSFER_REGULAR 1
+#define CLEAN_TRANSFER_DELETION_MARK 2
+
+#define CLEAN_NOT_FORCED 0
+#define CLEAN_FORCED 1
+
+#define PROCESS_ISO_REGULAR 0
+#define PROCESS_ISO_FORCE 1
+
+#define UNLINK_ASYNC_STORE_URB 0
+#define UNLINK_ASYNC_DONT_STORE 1
+
+#define is_td_active(desc) (desc->hw.td.status & cpu_to_le32(TD_CTRL_ACTIVE))
+
+#define set_qh_head(desc,val) (desc)->hw.qh.head=cpu_to_le32(val)
+#define set_qh_element(desc,val) (desc)->hw.qh.element=cpu_to_le32(val)
+#define set_td_link(desc,val) (desc)->hw.td.link=cpu_to_le32(val)
+#define set_td_ioc(desc) (desc)->hw.td.status |= cpu_to_le32(TD_CTRL_IOC)
+#define clr_td_ioc(desc) (desc)->hw.td.status &= cpu_to_le32(~TD_CTRL_IOC)
+
 
 /* ------------------------------------------------------------------------------------ 
    Virtual Root HUB 
@@ -276,7 +304,5 @@ typedef struct uhci {
 #define RH_ACK                     0x01
 #define RH_REQ_ERR                 -1
 #define RH_NACK                    0x00
-
-#define min(a,b) (((a)<(b))?(a):(b))
 
 #endif

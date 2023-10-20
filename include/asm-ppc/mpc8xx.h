@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.mpc8xx.h 1.15 11/01/01 12:48:53 trini
+ */
 
 /* This is the single file included by all MPC8xx build options.
  * Since there are many different boards and no standard configuration,
@@ -33,12 +36,16 @@
 #include <asm/rpxclassic.h>
 #endif
 
-#if (defined(CONFIG_TQM860) || defined(CONFIG_TQM860L))
-#include <asm/tqm860.h>
+#if defined(CONFIG_TQM8xxL)
+#include <asm/tqm8xx.h>
 #endif
 
-#ifdef CONFIG_TQM8xxL
-#include <asm/tqm8xxL.h>
+#if defined(CONFIG_SPD823TS)
+#include <asm/spd8xx.h>
+#endif
+
+#if defined(CONFIG_IVMS8) || defined(CONFIG_IVML24)
+#include <asm/ivms8.h>
 #endif
 
 /* I need this to get pt_regs.......
@@ -59,11 +66,14 @@
 #define PCI_DRAM_OFFSET 0
 #endif
 #else
+#if !defined(_IO_BASE)  /* defined in board specific header */
 #define _IO_BASE        0
+#endif
 #define _ISA_MEM_BASE   0
 #define PCI_DRAM_OFFSET 0
 #endif
 
+#ifndef __ASSEMBLY__
 extern unsigned long isa_io_base;
 extern unsigned long isa_mem_base;
 extern unsigned long pci_dram_offset;
@@ -78,6 +88,7 @@ extern int request_8xxirq(unsigned int irq,
 		       unsigned long flags, 
 		       const char *device,
 		       void *dev_id);
+#endif /* !__ASSEMBLY__ */
 #endif /* CONFIG_8xx */
 #endif
 #endif /* __KERNEL__ */

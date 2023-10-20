@@ -1,11 +1,10 @@
-/* $Id: processor.h,v 1.25 2000/02/05 06:47:37 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
  * Copyright (C) 1994 Waldorf GMBH
- * Copyright (C) 1995, 1996, 1997, 1998 Ralf Baechle
+ * Copyright (C) 1995, 1996, 1997, 1998, 1999, 2001 Ralf Baechle
  * Copyright (C) 1996 Paul M. Antoine
  * Copyright (C) 1999 Silicon Graphics, Inc.
  */
@@ -30,6 +29,7 @@
 #include <asm/system.h>
 
 struct mips_cpuinfo {
+	unsigned long udelay_val;
 	unsigned long *pgd_quick;
 	unsigned long *pte_quick;
 	unsigned long pgtable_cache_sz;
@@ -43,8 +43,6 @@ extern void (*cpu_wait)(void);	/* only available on R4[26]00 and R3081 */
 extern void r3081_wait(void);
 extern void r4k_wait(void);
 extern char cyclecounter_available;	/* only available from R4000 upwards. */
-extern char dedicated_iv_available;	/* some embedded MIPS like Nevada */
-extern char vce_available;		/* Supports VCED / VCEI exceptions */
 
 extern struct mips_cpuinfo boot_cpu_data;
 extern unsigned int vced_count, vcei_count;
@@ -83,7 +81,7 @@ extern struct task_struct *last_task_used_math;
  * for a 64 bit kernel expandable to 8192EB, of which the current MIPS
  * implementations will "only" be able to use 1TB ...
  */
-#define TASK_SIZE	(0x80000000UL)
+#define TASK_SIZE	(0x7fff8000UL)
 
 /* This decides where the kernel will search for a free chunk of vm
  * space during mmap's.
@@ -98,15 +96,20 @@ extern struct task_struct *last_task_used_math;
 #define NUM_FPU_REGS	32
 
 struct mips_fpu_hard_struct {
-	unsigned int fp_regs[NUM_FPU_REGS];
+	double fp_regs[NUM_FPU_REGS];
 	unsigned int control;
-} __attribute__((aligned(8)));
+};
 
 /*
- * FIXME: no fpu emulator yet (but who cares anyway?)
+ * It would be nice to add some more fields for emulator statistics, but there
+ * are a number of fixed offsets in offset.h and elsewhere that would have to
+ * be recalculated by hand.  So the additional information will be private to
+ * the FPU emulator for now.  See asm-mips/fpu_emulator.h.
  */
+typedef u64 fpureg_t;
 struct mips_fpu_soft_struct {
-	long	dummy;
+	fpureg_t	regs[NUM_FPU_REGS];
+	unsigned int	sr;
 };
 
 union mips_fpu_union {
@@ -126,10 +129,10 @@ typedef struct {
  * If you change thread_struct remember to change the #defines below too!
  */
 struct thread_struct {
-        /* Saved main processor registers. */
-        unsigned long reg16;
+	/* Saved main processor registers. */
+	unsigned long reg16;
 	unsigned long reg17, reg18, reg19, reg20, reg21, reg22, reg23;
-        unsigned long reg29, reg30, reg31;
+	unsigned long reg29, reg30, reg31;
 
 	/* Saved cp0 stuff. */
 	unsigned long cp0_status;
@@ -148,12 +151,24 @@ struct thread_struct {
 	mm_segment_t current_ds;
 	unsigned long irix_trampoline;  /* Wheee... */
 	unsigned long irix_oldctx;
+
+	/*
+	 * These are really only needed if the full FPU emulator is configured.
+	 * Would be made conditional on MIPS_FPU_EMULATOR if it weren't for the
+	 * fact that having offset.h rebuilt differently for different config
+	 * options would be asking for trouble.
+	 *
+	 * Saved EPC during delay-slot emulation (see math-emu/cp1emu.c)
+	 */
+	unsigned long dsemul_epc;
+
+	/*
+	 * Pointer to instruction used to induce address error
+	 */
+	unsigned long dsemul_aerpc;
 };
 
 #endif /* !defined (_LANGUAGE_ASSEMBLY) */
-
-#define INIT_MMAP { &init_mm, KSEG0, KSEG1, NULL, PAGE_SHARED, \
-                    VM_READ | VM_WRITE | VM_EXEC, 1, NULL, NULL }
 
 #define INIT_THREAD  { \
         /* \
@@ -176,7 +191,12 @@ struct thread_struct {
 	/* \
 	 * For now the default is to fix address errors \
 	 */ \
-	MF_FIXADE, { 0 }, 0, 0 \
+	MF_FIXADE, { 0 }, 0, 0, \
+	/* \
+	 * dsemul_epc and dsemul_aerpc should never be used uninitialized, \
+	 * but... \
+	 */ \
+	0 ,0 \
 }
 
 #ifdef __KERNEL__
@@ -238,6 +258,8 @@ unsigned long get_wchan(struct task_struct *p);
 
 #define init_task	(init_task_union.task)
 #define init_stack	(init_task_union.stack)
+
+#define cpu_relax()	do { } while (0)
 
 #endif /* !defined (_LANGUAGE_ASSEMBLY) */
 #endif /* __KERNEL__ */

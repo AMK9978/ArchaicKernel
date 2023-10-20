@@ -4,6 +4,7 @@
 #include <asm/atomic.h>
 #include <asm/rwlock.h>
 #include <asm/page.h>
+#include <linux/config.h>
 
 extern int printk(const char * fmt, ...)
 	__attribute__ ((format (printf, 1, 2)));
@@ -12,7 +13,11 @@ extern int printk(const char * fmt, ...)
  * initialize their spinlocks properly, tsk tsk.
  * Remember to turn this off in 2.4. -ben
  */
+#if defined(CONFIG_DEBUG_SPINLOCK)
+#define SPINLOCK_DEBUG	1
+#else
 #define SPINLOCK_DEBUG	0
+#endif
 
 /*
  * Your basic SMP spinlocks, allowing only a single CPU anywhere
@@ -61,9 +66,52 @@ typedef struct {
 
 /*
  * This works. Despite all the confusion.
+ * (except on PPro SMP or if we are using OOSTORE)
+ * (PPro errata 66, 92)
  */
+ 
+#if !defined(CONFIG_X86_OOSTORE) && !defined(CONFIG_X86_PPRO_FENCE)
+
 #define spin_unlock_string \
-	"movb $1,%0"
+	"movb $1,%0" \
+		:"=m" (lock->lock) : : "memory"
+
+
+static inline void spin_unlock(spinlock_t *lock)
+{
+#if SPINLOCK_DEBUG
+	if (lock->magic != SPINLOCK_MAGIC)
+		BUG();
+	if (!spin_is_locked(lock))
+		BUG();
+#endif
+	__asm__ __volatile__(
+		spin_unlock_string
+	);
+}
+
+#else
+
+#define spin_unlock_string \
+	"xchgb %b0, %1" \
+		:"=q" (oldval), "=m" (lock->lock) \
+		:"0" (oldval) : "memory"
+
+static inline void spin_unlock(spinlock_t *lock)
+{
+	char oldval = 1;
+#if SPINLOCK_DEBUG
+	if (lock->magic != SPINLOCK_MAGIC)
+		BUG();
+	if (!spin_is_locked(lock))
+		BUG();
+#endif
+	__asm__ __volatile__(
+		spin_unlock_string
+	);
+}
+
+#endif
 
 static inline int spin_trylock(spinlock_t *lock)
 {
@@ -90,18 +138,6 @@ printk("eip: %p\n", &&here);
 		:"=m" (lock->lock) : : "memory");
 }
 
-static inline void spin_unlock(spinlock_t *lock)
-{
-#if SPINLOCK_DEBUG
-	if (lock->magic != SPINLOCK_MAGIC)
-		BUG();
-	if (!spin_is_locked(lock))
-		BUG();
-#endif
-	__asm__ __volatile__(
-		spin_unlock_string
-		:"=m" (lock->lock) : : "memory");
-}
 
 /*
  * Read-write spinlocks, allowing multiple readers

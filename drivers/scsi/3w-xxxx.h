@@ -3,8 +3,10 @@
    
    Written By: Adam Radford <linux@3ware.com>
    Modifications By: Joel Jacobson <linux@3ware.com>
+   		     Arnaldo Carvalho de Melo <acme@conectiva.com.br>
+                     Brad Strand <linux@3ware.com>
 
-   Copyright (C) 1999 3ware Inc.
+   Copyright (C) 1999-2001 3ware Inc.
 
    Kernel compatablity By:	Andre Hedrick <andre@suse.com>
    Non-Copyright (C) 2000	Andre Hedrick <andre@suse.com>
@@ -56,6 +58,43 @@
 #include <linux/types.h>
 #include <linux/kdev_t.h>
 
+/* AEN strings */
+static char *tw_aen_string[] = {
+	"AEN queue empty",                      // 0x000
+	"Soft reset occurred",                  // 0x001
+	"Mirorr degraded: Unit #",              // 0x002
+	"Controller error",                     // 0x003 
+	"Rebuild failed: Unit #",               // 0x004
+	"Rebuild complete: Unit #",             // 0x005
+	"Incomplete unit detected: Unit #",     // 0x006
+	"Initialization complete: Unit #",      // 0x007
+	"Unclean shutdown detected: Unit #",    // 0x008
+	"ATA port timeout: Port #",             // 0x009
+	"Drive error: Port #",                  // 0x00A
+	"Rebuild started: Unit #",              // 0x00B 
+	"Initialization started: Unit #",       // 0x00C
+	"Logical unit deleted: Unit #",         // 0x00D
+	NULL,                                   // 0x00E unused
+	"SMART threshold exceeded: Port #",     // 0x00F
+	NULL, NULL, NULL, NULL, NULL,
+	NULL, NULL, NULL, NULL, NULL,
+	NULL, NULL, NULL, NULL, NULL,
+	NULL, NULL,                             // 0x010-0x020 unused
+	"ATA UDMA downgrade: Port #",           // 0x021
+	"ATA UDMA upgrade: Port #",             // 0x022
+	"Sector repair occurred: Port #",       // 0x023
+	"SBUF integrity check failure",         // 0x024
+	"Lost cached write: Port #",            // 0x025
+	"Drive ECC error detected: Port #",     // 0x026
+	"DCB checksum error: Port #",           // 0x027
+	"DCB unsupported version: Port #",      // 0x028
+	"Verify started: Unit #",               // 0x029
+	"Verify failed: Port #",                // 0x02A
+	"Verify complete: Unit #"               // 0x02B
+};
+
+#define TW_AEN_STRING_MAX                      0x02C
+
 /* Control register bit definitions */
 #define TW_CONTROL_CLEAR_HOST_INTERRUPT	       0x00080000
 #define TW_CONTROL_CLEAR_ATTENTION_INTERRUPT   0x00040000
@@ -68,6 +107,7 @@
 #define TW_CONTROL_ENABLE_INTERRUPTS	       0x00000080
 #define TW_CONTROL_DISABLE_INTERRUPTS	       0x00000040
 #define TW_CONTROL_ISSUE_HOST_INTERRUPT	       0x00000020
+#define TW_CONTROL_CLEAR_PARITY_ERROR          0x00800000
 
 /* Status register bit definitions */
 #define TW_STATUS_MAJOR_VERSION_MASK	       0xF0000000
@@ -97,6 +137,9 @@
 #define TW_DEVICE_NAME			       "3ware Storage Controller"
 #define TW_VENDOR_ID (0x13C1)	/* 3ware */
 #define TW_DEVICE_ID (0x1000)	/* Storage Controller */
+#define TW_DEVICE_ID2 (0x1001)  /* 7000 series controller */
+#define TW_NUMDEVICES 2
+#define TW_PCI_CLEAR_PARITY_ERRORS 0xc100
 
 /* Command packet opcodes */
 #define TW_OP_NOP	      0x0
@@ -109,6 +152,7 @@
 #define TW_OP_SECTOR_INFO     0x1a
 #define TW_OP_AEN_LISTEN      0x1c
 #define TW_CMD_PACKET         0x1d
+#define TW_ATA_PASSTHRU       0x1e
 
 /* Asynchronous Event Notification (AEN) Codes */
 #define TW_AEN_QUEUE_EMPTY       0x0000
@@ -119,6 +163,10 @@
 #define TW_AEN_REBUILD_DONE      0x0005
 #define TW_AEN_QUEUE_FULL        0x00ff
 #define TW_AEN_TABLE_UNDEFINED   0x15
+#define TW_AEN_APORT_TIMEOUT     0x0009
+#define TW_AEN_DRIVE_ERROR       0x000A
+#define TW_AEN_SMART_FAIL        0x000F
+#define TW_AEN_SBUF_FAIL         0x0024
 
 /* Misc defines */
 #define TW_ALIGNMENT			      0x200 /* 16 D-WORDS */
@@ -126,9 +174,12 @@
 #define TW_COMMAND_ALIGNMENT_MASK	      0x1ff
 #define TW_INIT_MESSAGE_CREDITS		      0x100
 #define TW_INIT_COMMAND_PACKET_SIZE	      0x3
-#define TW_POLL_MAX_RETRIES        	      10000
+#define TW_POLL_MAX_RETRIES        	      20000
 #define TW_MAX_SGL_LENGTH		      62
+#define TW_ATA_PASS_SGL_MAX                   60
+#define TW_MAX_PASSTHRU_BYTES                 4096
 #define TW_Q_LENGTH			      256
+#define TW_MAX_BOUNCEBUF                      16
 #define TW_Q_START			      0
 #define TW_MAX_SLOT			      32
 #define TW_MAX_PCI_BUSES		      255
@@ -140,6 +191,12 @@
 #define TW_MAX_AEN_TRIES                      100
 #define TW_UNIT_ONLINE                        1
 #define TW_IN_INTR                            1
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,7)
+#define TW_MAX_SECTORS                        256
+#else
+#define TW_MAX_SECTORS                        128
+#endif 
+#define TW_AEN_WAIT_TIME                      1000
 
 /* Macros */
 #define TW_STATUS_ERRORS(x) \
@@ -210,6 +267,7 @@ typedef struct TAG_TW_Ioctl {
 	unsigned short table_id;
 	unsigned char parameter_id;
 	unsigned char parameter_size_bytes;
+	unsigned char unit_index;
 	unsigned char data[1];
 } TW_Ioctl;
 
@@ -246,21 +304,52 @@ typedef struct TAG_TW_Info {
 	int position;
 } TW_Info;
 
-typedef enum TAG_TW_Cmd_State {
-	TW_S_INITIAL,		/* Initial state */
-	TW_S_STARTED,		/* Id in use */
-	TW_S_POSTED,		/* Posted to the controller */
-	TW_S_PENDING,		/* Waiting to be posted in isr */
-	TW_S_COMPLETED,		/* Completed by isr */
-	TW_S_FINISHED,		/* I/O completely done */
-} TW_Cmd_State;
+typedef int TW_Cmd_State;
+
+#define TW_S_INITIAL   0x1  /* Initial state */
+#define TW_S_STARTED   0x2  /* Id in use */
+#define TW_S_POSTED    0x4  /* Posted to the controller */
+#define TW_S_PENDING   0x8  /* Waiting to be posted in isr */
+#define TW_S_COMPLETED 0x10 /* Completed by isr */
+#define TW_S_FINISHED  0x20 /* I/O completely done */
+#define TW_START_MASK (TW_S_STARTED | TW_S_POSTED | TW_S_PENDING | TW_S_COMPLETED)
+
+/* Command header for ATA pass-thru */
+typedef struct TAG_TW_Passthru
+{
+	struct {
+		unsigned char opcode:5;
+		unsigned char sgloff:3;
+	} byte0;
+	unsigned char size;
+	unsigned char request_id;
+	struct {
+		unsigned char aport:4;
+		unsigned char host_id:4;
+	} byte3;
+	unsigned char status;
+	unsigned char flags;
+	unsigned short param;
+	unsigned short features;
+	unsigned short sector_count;
+	unsigned short sector_num;
+	unsigned short cylinder_lo;
+	unsigned short cylinder_hi;
+	unsigned char drive_head;
+	unsigned char command;
+	TW_SG_Entry sg_list[TW_ATA_PASS_SGL_MAX];
+	unsigned char padding[12];
+} TW_Passthru;
 
 typedef struct TAG_TW_Device_Extension {
 	TW_Registers		registers;
 	u32			*alignment_virtual_address[TW_Q_LENGTH];
 	u32			alignment_physical_address[TW_Q_LENGTH];
+	u32			*bounce_buffer[TW_Q_LENGTH];
 	int			is_unit_present[TW_MAX_UNITS];
+	int			is_raid_five[TW_MAX_UNITS];
 	int			num_units;
+	int			num_raid_five;
 	u32			*command_packet_virtual_address[TW_Q_LENGTH];
 	u32			command_packet_physical_address[TW_Q_LENGTH];
 	struct pci_dev		*tw_pci_dev;
@@ -268,6 +357,7 @@ typedef struct TAG_TW_Device_Extension {
 	unsigned char		free_queue[TW_Q_LENGTH];
 	unsigned char		free_head;
 	unsigned char		free_tail;
+	unsigned char           free_wrap;
 	unsigned char		pending_queue[TW_Q_LENGTH];
 	unsigned char		pending_head;
 	unsigned char		pending_tail;
@@ -283,13 +373,14 @@ typedef struct TAG_TW_Device_Extension {
 	u32			num_resets;
 	u32			sector_count;
 	u32			max_sector_count;
+	u32			aen_count;
 	struct Scsi_Host	*host;
 	spinlock_t		tw_lock;
-	unsigned char		ioctl_size[TW_Q_LENGTH];
+	int		        ioctl_size[TW_Q_LENGTH];
 	unsigned short		aen_queue[TW_Q_LENGTH];
 	unsigned char		aen_head;
 	unsigned char		aen_tail;
-	u32			flags;
+	long			flags; /* long req'd for set_bit --RR */
 } TW_Device_Extension;
 
 /* Function prototypes */
@@ -301,6 +392,8 @@ int tw_check_bits(u32 status_reg_value);
 int tw_check_errors(TW_Device_Extension *tw_dev);
 void tw_clear_attention_interrupt(TW_Device_Extension *tw_dev);
 void tw_clear_host_interrupt(TW_Device_Extension *tw_dev);
+void tw_decode_bits(TW_Device_Extension *tw_dev, u32 status_reg_value);
+void tw_decode_error(TW_Device_Extension *tw_dev, unsigned char status, unsigned char flags, unsigned char unit);
 void tw_disable_interrupts(TW_Device_Extension *tw_dev);
 int tw_empty_response_que(TW_Device_Extension *tw_dev);
 void tw_enable_interrupts(TW_Device_Extension *tw_dev);
@@ -328,6 +421,7 @@ int tw_scsiop_inquiry_complete(TW_Device_Extension *tw_dev, int request_id);
 int tw_scsiop_read_capacity(TW_Device_Extension *tw_dev, int request_id);
 int tw_scsiop_read_capacity_complete(TW_Device_Extension *tw_dev, int request_id);
 int tw_scsiop_read_write(TW_Device_Extension *tw_dev, int request_id);
+int tw_scsiop_request_sense(TW_Device_Extension *tw_dev, int request_id);
 int tw_scsiop_test_unit_ready(TW_Device_Extension *tw_dev, int request_id);
 int tw_setfeature(TW_Device_Extension *tw_dev, int parm, int param_size, 
 		  unsigned char *val);

@@ -1,4 +1,4 @@
-# $Id: config.in,v 1.106 2000/11/17 04:27:52 davem Exp $
+# $Id: config.in,v 1.111 2001/06/01 08:12:10 davem Exp $
 # For a description of the syntax of this configuration file,
 # see Documentation/kbuild/config-language.txt.
 #
@@ -29,6 +29,9 @@ define_bool CONFIG_VT_CONSOLE y
 
 bool 'Symmetric multi-processing support (does not work on sun4/sun4c)' CONFIG_SMP
 
+# Identify this as a Sparc32 build
+define_bool CONFIG_SPARC32 y
+
 # Global things across all Sun machines.
 define_bool CONFIG_ISA n
 define_bool CONFIG_EISA n
@@ -45,6 +48,8 @@ define_bool CONFIG_SUN_KEYBOARD y
 define_bool CONFIG_SUN_CONSOLE y
 define_bool CONFIG_SUN_AUXIO y
 define_bool CONFIG_SUN_IO y
+define_bool CONFIG_RWSEM_GENERIC_SPINLOCK y
+define_bool CONFIG_RWSEM_XCHGADD_ALGORITHM n
 
 bool 'Support for SUN4 machines (disables SUN4[CDM] support)' CONFIG_SUN4
 if [ "$CONFIG_SUN4" != "y" ]; then
@@ -157,9 +162,7 @@ if [ "$CONFIG_SCSI" != "n" ]; then
 
    dep_tristate '  SCSI tape support' CONFIG_CHR_DEV_ST $CONFIG_SCSI
 
-   if [ "$CONFIG_BLK_DEV_ST" != "n" ]; then
-      int  'Maximum number of SCSI tapes that can be loaded as modules' CONFIG_ST_EXTRA_DEVS 2
-   fi
+   dep_tristate '  SCSI OnStream SC-x0 tape support' CONFIG_CHR_DEV_OSST $CONFIG_SCSI
 
    dep_tristate '  SCSI CDROM support' CONFIG_BLK_DEV_SR $CONFIG_SCSI
 
@@ -180,8 +183,8 @@ if [ "$CONFIG_SCSI" != "n" ]; then
    mainmenu_option next_comment
    comment 'SCSI low-level drivers'
 
-   tristate 'Sparc ESP Scsi Driver' CONFIG_SCSI_SUNESP $CONFIG_SCSI
-   tristate 'PTI Qlogic,ISP Driver' CONFIG_SCSI_QLOGICPTI $CONFIG_SCSI
+   dep_tristate 'Sparc ESP Scsi Driver' CONFIG_SCSI_SUNESP $CONFIG_SCSI
+   dep_tristate 'PTI Qlogic,ISP Driver' CONFIG_SCSI_QLOGICPTI $CONFIG_SCSI
    endmenu
 fi
 endmenu
@@ -247,6 +250,10 @@ fi
 endmenu
 
 source fs/Config.in
+
+if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
+   source net/bluetooth/Config.in
+fi
 
 mainmenu_option next_comment
 comment 'Watchdog'

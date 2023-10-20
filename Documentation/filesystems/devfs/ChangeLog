@@ -495,7 +495,7 @@ Changes for patch v52
 
 - Replaced dummy .epoch inode with .devfsd character device
 
-- Modified rc.devfs to take acount of above change
+- Modified rc.devfs to take account of above change
 
 - Removed spurious driver warning messages when CONFIG_DEVFS_FS=n
 
@@ -1613,3 +1613,168 @@ Work sponsored by SGI
 - Updated README from master HTML file
 
 - Ported to kernel 2.4.0-test3-pre4 (which had devfs-patch-v174)
+===============================================================================
+Changes for patch v177
+
+- Updated README from master HTML file
+
+- Documentation cleanups
+
+- Ensure <devfs_generate_path> terminates string for root entry
+  Thanks to Tim Jansen <tim@tjansen.de>
+
+- Exported <devfs_get_name> to modules
+
+- Make <devfs_mk_symlink> send events to devfsd
+
+- Cleaned up option processing in <devfs_setup>
+
+- Fixed bugs in handling symlinks: could leak or cause Oops
+
+- Cleaned up directory handling by separating fops
+  Thanks to Alexander Viro <viro@math.psu.edu>
+===============================================================================
+Changes for patch v178
+
+- Fixed handling of inverted options in <devfs_setup>
+===============================================================================
+Changes for patch v179
+
+- Adjusted <try_modload> to account for <devfs_generate_path> fix
+===============================================================================
+Changes for patch v180
+
+- Fixed !CONFIG_DEVFS_FS stub declaration of <devfs_get_info>
+===============================================================================
+Changes for patch v181
+
+- Answered question posed by Al Viro and removed his comments from <devfs_open>
+
+- Moved setting of registered flag after other fields are changed
+
+- Fixed race between <devfsd_close> and <devfsd_notify_one>
+
+- Global VFS changes added bogus BKL to devfsd_close(): removed
+
+- Widened locking in <devfs_readlink> and <devfs_follow_link>
+
+- Replaced <devfsd_read> stack usage with <devfsd_ioctl> kmalloc
+
+- Simplified locking in <devfsd_ioctl> and fixed memory leak
+===============================================================================
+Changes for patch v182
+
+- Created <devfs_*alloc_major> and <devfs_*alloc_devnum>
+
+- Removed broken devnum allocation and use <devfs_alloc_devnum>
+
+- Fixed old devnum leak by calling new <devfs_dealloc_devnum>
+
+- Created <devfs_*alloc_unique_number>
+
+- Fixed number leak for /dev/cdroms/cdrom%d
+
+- Fixed number leak for /dev/discs/disc%d
+===============================================================================
+Changes for patch v183
+
+- Fixed bug in <devfs_setup> which could hang boot process
+===============================================================================
+Changes for patch v184
+
+- Documentation typo fix for fs/devfs/util.c
+
+- Fixed drivers/char/stallion.c for devfs
+
+- Added DEVFSD_NOTIFY_DELETE event
+
+- Updated README from master HTML file
+
+- Removed #include <asm/segment.h> from fs/devfs/base.c
+===============================================================================
+Changes for patch v185
+
+- Made <block_semaphore> and <char_semaphore> in fs/devfs/util.c
+  private
+
+- Fixed inode table races by removing it and using inode->u.generic_ip
+  instead
+
+- Moved <devfs_read_inode> into <get_vfs_inode>
+
+- Moved <devfs_write_inode> into <devfs_notify_change>
+===============================================================================
+Changes for patch v186
+
+- Fixed race in <devfs_do_symlink> for uni-processor
+
+- Updated README from master HTML file
+===============================================================================
+Changes for patch v187
+
+- Fixed drivers/char/stallion.c for devfs
+
+- Fixed drivers/char/rocket.c for devfs
+
+- Fixed bug in <devfs_alloc_unique_number>: limited to 128 numbers
+===============================================================================
+Changes for patch v188
+
+- Updated major masks in fs/devfs/util.c up to Linus' "no new majors"
+  proclamation. Block: were 126 now 122 free, char: were 26 now 19 free
+
+- Updated README from master HTML file
+
+- Removed remnant of multi-mount support in <devfs_mknod>
+
+- Removed unused DEVFS_FL_SHOW_UNREG flag
+===============================================================================
+Changes for patch v189
+
+- Removed nlink field from struct devfs_inode
+
+- Removed auto-ownership for /dev/pty/* (BSD ptys) and used
+  DEVFS_FL_CURRENT_OWNER|DEVFS_FL_NO_PERSISTENCE for /dev/pty/s* (just
+  like Unix98 pty slaves) and made /dev/pty/m* rw-rw-rw- access
+===============================================================================
+Changes for patch v190
+
+- Updated README from master HTML file
+
+- Replaced BKL with global rwsem to protect symlink data (quick and
+  dirty hack)
+===============================================================================
+Changes for patch v191
+
+- Replaced global rwsem for symlink with per-link refcount
+===============================================================================
+Changes for patch v192
+
+- Removed unnecessary #ifdef CONFIG_DEVFS_FS from arch/i386/kernel/mtrr.c
+
+- Ported to kernel 2.4.10-pre11
+
+- Set inode->i_mapping->a_ops for block nodes in <get_vfs_inode>
+===============================================================================
+Changes for patch v193
+
+- Went back to global rwsem for symlinks (refcount scheme no good)
+===============================================================================
+Changes for patch v194
+
+- Fixed overrun in <devfs_link> by removing function (not needed)
+
+- Updated README from master HTML file
+===============================================================================
+Changes for patch v195
+
+- Fixed buffer underrun in <try_modload>
+
+- Moved down_read() from <search_for_entry_in_dir> to <find_entry>
+===============================================================================
+Changes for patch v196
+
+- Fixed race in <devfsd_ioctl> when setting event mask
+  Thanks to Kari Hurtta <hurtta@leija.mh.fmi.fi>
+
+- Avoid deadlock in <devfs_follow_link> by using temporary buffer

@@ -118,6 +118,7 @@
 static long int fd_def_df0 = FD_DD_3;     /* default for df0 if it doesn't identify */
 
 MODULE_PARM(fd_def_df0,"l");
+MODULE_LICENSE("GPL");
 
 /*
  *  Macros
@@ -1540,10 +1541,7 @@ static int fd_ioctl(struct inode *inode, struct file *filp,
 		break;
 	case FDFMTEND:
 		floppy_off(drive);
-		sb = get_super(inode->i_rdev);
-		if (sb)
-			invalidate_inodes(sb);
-		invalidate_buffers(inode->i_rdev);
+		invalidate_device(inode->i_rdev, 0);
 		break;
 	case FDGETPRM:
 		memset((void *)&getprm, 0, sizeof (getprm));
@@ -1557,7 +1555,10 @@ static int fd_ioctl(struct inode *inode, struct file *filp,
 			return -EFAULT;
 		break;
 	case BLKGETSIZE:
-		return put_user(unit[drive].blocks,(long *)param);
+		return put_user(unit[drive].blocks,(unsigned long *)param);
+		break;
+	case BLKGETSIZE64:
+		return put_user((u64)unit[drive].blocks << 9, (u64 *)param);
 		break;
 	case FDSETPRM:
 	case FDDEFPRM:
@@ -1737,6 +1738,7 @@ static int amiga_floppy_change(kdev_t dev)
 }
 
 static struct block_device_operations floppy_fops = {
+	owner:			THIS_MODULE,
 	open:			floppy_open,
 	release:		floppy_release,
 	ioctl:			fd_ioctl,

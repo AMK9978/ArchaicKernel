@@ -5,7 +5,7 @@
  *
  *  Copyright (C) 1994,1995 Troy De Jongh
  *  This software may be used and distributed according to the terms 
- *  of the GNU Public License.
+ *  of the GNU General Public License.
  *
  *  This driver is for the DigiBoard PC/Xe and PC/Xi line of products.
  *
@@ -63,7 +63,7 @@
 #include <linux/delay.h>
 #include <linux/serial.h>
 #include <linux/tty_driver.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/version.h>
 
@@ -113,6 +113,7 @@ static int numports[]     = {0, 0, 0, 0};
 # if (LINUX_VERSION_CODE > 0x020111)
 MODULE_AUTHOR("Bernhard Kaindl");
 MODULE_DESCRIPTION("Digiboard PC/X{i,e,eve} driver");
+MODULE_LICENSE("GPL");
 MODULE_PARM(verbose,     "i");
 MODULE_PARM(debug,       "i");
 MODULE_PARM(io,          "1-4i");
@@ -685,7 +686,6 @@ static int pcxe_write(struct tty_struct * tty, int from_user, const unsigned cha
 	int total, remain, size, stlen;
 	unsigned int head, tail;
 	unsigned long flags;
-
 	/* printk("Entering pcxe_write()\n"); */
 
 	if ((ch=chan(tty))==NULL)
@@ -696,6 +696,7 @@ static int pcxe_write(struct tty_struct * tty, int from_user, const unsigned cha
 
 	if (from_user) {
 
+		down(&ch->tmp_buf_sem);
 		save_flags(flags);
 		cli();
 		globalwinon(ch);
@@ -703,19 +704,21 @@ static int pcxe_write(struct tty_struct * tty, int from_user, const unsigned cha
 		/* It seems to be necessary to make sure that the value is stable here somehow
 		   This is a rather odd pice of code here. */
 		do
-		{ tail = bc->tout;
+		{
+			tail = bc->tout;
 		} while (tail != bc->tout);
 		
 		tail &= (size - 1);
 		stlen = (head >= tail) ? (size - (head - tail) - 1) : (tail - head - 1);
 		count = MIN(stlen, count);
+		memoff(ch);
+		restore_flags(flags);
+
 		if (count)
 			if (copy_from_user(ch->tmp_buf, buf, count))
 				count = 0;
 
 		buf = ch->tmp_buf;
-		memoff(ch);
-		restore_flags(flags);
 	}
 
 	/*
@@ -763,6 +766,9 @@ static int pcxe_write(struct tty_struct * tty, int from_user, const unsigned cha
 	}
 	memoff(ch);
 	restore_flags(flags);
+	
+	if(from_user)
+		up(&ch->tmp_buf_sem);
 
 	return(total);
 }
@@ -1587,6 +1593,7 @@ load_fep:
 			ch->txbufsize = bc->tmax + 1;
 			ch->rxbufsize = bc->rmax + 1;
 			ch->tmp_buf = kmalloc(ch->txbufsize,GFP_KERNEL);
+			init_MUTEX(&ch->tmp_buf_sem);
 
 			if (!ch->tmp_buf) {
 				printk(KERN_ERR "Unable to allocate memory for temp buffers\n");

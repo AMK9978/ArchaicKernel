@@ -80,7 +80,7 @@ struct rpc_task {
 	unsigned short		tk_lock;	/* Task lock counter */
 	unsigned char		tk_active   : 1,/* Task has been activated */
 				tk_wakeup   : 1;/* Task waiting to wake up */
-	unsigned int		tk_runstate;	/* Task run status */
+	unsigned long		tk_runstate;	/* Task run status */
 #ifdef RPC_DEBUG
 	unsigned short		tk_pid;		/* debugging aid */
 #endif
@@ -180,13 +180,13 @@ void		rpciod_wake_up(void);
 void		rpc_show_tasks(void);
 #endif
 
-extern __inline__ void *
+static __inline__ void *
 rpc_malloc(struct rpc_task *task, unsigned int size)
 {
 	return rpc_allocate(task->tk_flags, size);
 }
 
-extern __inline__ void
+static __inline__ void
 rpc_exit(struct rpc_task *task, int status)
 {
 	task->tk_status = status;
@@ -194,7 +194,7 @@ rpc_exit(struct rpc_task *task, int status)
 }
 
 #ifdef RPC_DEBUG
-extern __inline__ char *
+static __inline__ char *
 rpc_qname(struct rpc_wait_queue *q)
 {
 	return q->name? q->name : "unknown";

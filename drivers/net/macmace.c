@@ -200,7 +200,7 @@ static int bitrev(int b)
 int mace68k_probe(struct net_device *unused)
 {
 	int j;
-	static int once=0;
+	static int once;
 	struct mace68k_data *mp;
 	unsigned char *addr;
 	struct net_device *dev;
@@ -632,7 +632,7 @@ static void mace68k_handle_misc_intrs(struct mace68k_data *mp, int intr)
 }
 
 /*
- *	A transmit error has occured. (We kick the transmit side from
+ *	A transmit error has occurred. (We kick the transmit side from
  *	the DMA completion)
  */
  
@@ -661,7 +661,7 @@ static void mace68k_xmit_error(struct net_device *dev)
 }
 
 /*
- *	A receive interrupt occured.
+ *	A receive interrupt occurred.
  */
  
 static void mace68k_recv_interrupt(struct net_device *dev)
@@ -733,6 +733,7 @@ static void mace_dma_rx_frame(struct net_device *dev, struct mace_frame *mf)
 	
 	skb->protocol = eth_type_trans(skb, dev);
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 	mp->stats.rx_packets++;
 	mp->stats.rx_bytes+=mf->len;
 }

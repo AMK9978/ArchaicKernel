@@ -1,12 +1,12 @@
 /******************************************************************************
  *
  * Module Name: psscope - Parser scope stack management routines
- *              $Revision: 22 $
+ *              $Revision: 30 $
  *
  *****************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -27,7 +27,7 @@
 #include "acpi.h"
 #include "acparser.h"
 
-#define _COMPONENT          PARSER
+#define _COMPONENT          ACPI_PARSER
 	 MODULE_NAME         ("psscope")
 
 
@@ -43,9 +43,9 @@
  *
  ******************************************************************************/
 
-ACPI_PARSE_OBJECT *
+acpi_parse_object *
 acpi_ps_get_parent_scope (
-	ACPI_PARSE_STATE        *parser_state)
+	acpi_parse_state        *parser_state)
 {
 	return (parser_state->scope->parse_scope.op);
 }
@@ -67,7 +67,7 @@ acpi_ps_get_parent_scope (
 
 u8
 acpi_ps_has_completed_scope (
-	ACPI_PARSE_STATE        *parser_state)
+	acpi_parse_state        *parser_state)
 {
 	return ((u8) ((parser_state->aml >= parser_state->scope->parse_scope.arg_end ||
 			   !parser_state->scope->parse_scope.arg_count)));
@@ -87,19 +87,23 @@ acpi_ps_has_completed_scope (
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_ps_init_scope (
-	ACPI_PARSE_STATE        *parser_state,
-	ACPI_PARSE_OBJECT       *root_op)
+	acpi_parse_state        *parser_state,
+	acpi_parse_object       *root_op)
 {
-	ACPI_GENERIC_STATE      *scope;
+	acpi_generic_state      *scope;
 
 
-	scope = acpi_cm_create_generic_state ();
+	FUNCTION_TRACE_PTR ("Ps_init_scope", root_op);
+
+
+	scope = acpi_ut_create_generic_state ();
 	if (!scope) {
-		return (AE_NO_MEMORY);
+		return_ACPI_STATUS (AE_NO_MEMORY);
 	}
 
+	scope->common.data_type     = ACPI_DESC_TYPE_STATE_RPSCOPE;
 	scope->parse_scope.op       = root_op;
 	scope->parse_scope.arg_count = ACPI_VAR_ARGS;
 	scope->parse_scope.arg_end  = parser_state->aml_end;
@@ -108,7 +112,7 @@ acpi_ps_init_scope (
 	parser_state->scope         = scope;
 	parser_state->start_op      = root_op;
 
-	return (AE_OK);
+	return_ACPI_STATUS (AE_OK);
 }
 
 
@@ -127,22 +131,26 @@ acpi_ps_init_scope (
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_ps_push_scope (
-	ACPI_PARSE_STATE        *parser_state,
-	ACPI_PARSE_OBJECT       *op,
+	acpi_parse_state        *parser_state,
+	acpi_parse_object       *op,
 	u32                     remaining_args,
 	u32                     arg_count)
 {
-	ACPI_GENERIC_STATE      *scope;
+	acpi_generic_state      *scope;
 
 
-	scope = acpi_cm_create_generic_state ();
+	FUNCTION_TRACE_PTR ("Ps_push_scope", op);
+
+
+	scope = acpi_ut_create_generic_state ();
 	if (!scope) {
 		return (AE_NO_MEMORY);
 	}
 
 
+	scope->common.data_type        = ACPI_DESC_TYPE_STATE_PSCOPE;
 	scope->parse_scope.op          = op;
 	scope->parse_scope.arg_list    = remaining_args;
 	scope->parse_scope.arg_count   = arg_count;
@@ -150,7 +158,7 @@ acpi_ps_push_scope (
 
 	/* Push onto scope stack */
 
-	acpi_cm_push_generic_state (&parser_state->scope, scope);
+	acpi_ut_push_generic_state (&parser_state->scope, scope);
 
 
 	if (arg_count == ACPI_VAR_ARGS) {
@@ -165,7 +173,7 @@ acpi_ps_push_scope (
 		scope->parse_scope.arg_end = ACPI_MAX_AML;
 	}
 
-	return (AE_OK);
+	return_ACPI_STATUS (AE_OK);
 }
 
 
@@ -187,20 +195,22 @@ acpi_ps_push_scope (
 
 void
 acpi_ps_pop_scope (
-	ACPI_PARSE_STATE        *parser_state,
-	ACPI_PARSE_OBJECT       **op,
+	acpi_parse_state        *parser_state,
+	acpi_parse_object       **op,
 	u32                     *arg_list,
 	u32                     *arg_count)
 {
-	ACPI_GENERIC_STATE      *scope = parser_state->scope;
+	acpi_generic_state      *scope = parser_state->scope;
+
+
+	FUNCTION_TRACE ("Ps_pop_scope");
 
 
 	/*
 	 * Only pop the scope if there is in fact a next scope
 	 */
 	if (scope->common.next) {
-		scope = acpi_cm_pop_generic_state (&parser_state->scope);
-
+		scope = acpi_ut_pop_generic_state (&parser_state->scope);
 
 		/* return to parsing previous op */
 
@@ -211,7 +221,7 @@ acpi_ps_pop_scope (
 
 		/* All done with this scope state structure */
 
-		acpi_cm_delete_generic_state (scope);
+		acpi_ut_delete_generic_state (scope);
 	}
 
 	else {
@@ -223,7 +233,8 @@ acpi_ps_pop_scope (
 	}
 
 
-	return;
+	ACPI_DEBUG_PRINT ((ACPI_DB_PARSE, "Popped Op %p Args %X\n", *op, *arg_count));
+	return_VOID;
 }
 
 
@@ -242,9 +253,11 @@ acpi_ps_pop_scope (
 
 void
 acpi_ps_cleanup_scope (
-	ACPI_PARSE_STATE        *parser_state)
+	acpi_parse_state        *parser_state)
 {
-	ACPI_GENERIC_STATE      *scope;
+	acpi_generic_state      *scope;
+
+	FUNCTION_TRACE_PTR ("Ps_cleanup_scope", parser_state);
 
 
 	if (!parser_state) {
@@ -255,10 +268,10 @@ acpi_ps_cleanup_scope (
 	/* Delete anything on the scope stack */
 
 	while (parser_state->scope) {
-		scope = acpi_cm_pop_generic_state (&parser_state->scope);
-		acpi_cm_delete_generic_state (scope);
+		scope = acpi_ut_pop_generic_state (&parser_state->scope);
+		acpi_ut_delete_generic_state (scope);
 	}
 
-	return;
+	return_VOID;
 }
 

@@ -6,7 +6,7 @@
  */
 
 struct pci_dev;
-struct pci_controler;
+struct pci_controller;
 struct pci_iommu_arena;
 
 /*
@@ -49,7 +49,7 @@ struct pci_iommu_arena;
  * APECS and LCA have only 34 bits for physical addresses, thus limiting PCI
  * bus memory addresses for SPARSE access to be less than 128Mb.
  */
-#define APECS_AND_LCA_DEFAULT_MEM_BASE ((32+2)*1024*1024)
+#define APECS_AND_LCA_DEFAULT_MEM_BASE ((16+2)*1024*1024)
 
 /*
  * Because the MCPCIA core logic supports more bits for physical addresses,
@@ -68,6 +68,7 @@ struct pci_iommu_arena;
 /* ??? Experimenting with no HAE for CIA.  */
 #define CIA_DEFAULT_MEM_BASE ((32+2)*1024*1024)
 
+#define IRONGATE_DEFAULT_MEM_BASE ((256*8-16)*1024*1024)
 
 /* 
  * A small note about bridges and interrupts.  The DECchip 21050 (and
@@ -133,7 +134,9 @@ static inline u8 bridge_swizzle(u8 pin, u8 slot)
 struct pci_iommu_arena
 {
 	spinlock_t lock;
-	struct pci_controler *hose;
+	struct pci_controller *hose;
+#define IOMMU_INVALID_PTE 0x2 /* 32:63 bits MBZ */
+#define IOMMU_RESERVED_PTE 0xface
 	unsigned long *ptes;
 	dma_addr_t dma_base;
 	unsigned int size;
@@ -143,15 +146,15 @@ struct pci_iommu_arena
 
 
 /* The hose list.  */
-extern struct pci_controler *hose_head, **hose_tail;
-extern struct pci_controler *pci_isa_hose;
+extern struct pci_controller *hose_head, **hose_tail;
+extern struct pci_controller *pci_isa_hose;
 
 extern void common_init_pci(void);
 extern u8 common_swizzle(struct pci_dev *, u8 *);
-extern struct pci_controler *alloc_pci_controler(void);
+extern struct pci_controller *alloc_pci_controller(void);
 extern struct resource *alloc_resource(void);
 
-extern struct pci_iommu_arena *iommu_arena_new(struct pci_controler *,
+extern struct pci_iommu_arena *iommu_arena_new(struct pci_controller *,
 					       dma_addr_t, unsigned long,
 					       unsigned long);
 extern long iommu_arena_alloc(struct pci_iommu_arena *arena, long n);
@@ -159,3 +162,12 @@ extern long iommu_arena_alloc(struct pci_iommu_arena *arena, long n);
 extern const char *const pci_io_names[];
 extern const char *const pci_mem_names[];
 extern const char pci_hae0_name[];
+
+extern unsigned long size_for_memory(unsigned long max);
+
+extern int iommu_reserve(struct pci_iommu_arena *, long, long);
+extern int iommu_release(struct pci_iommu_arena *, long, long);
+extern int iommu_bind(struct pci_iommu_arena *, long, long, unsigned long *);
+extern int iommu_unbind(struct pci_iommu_arena *, long, long);
+
+

@@ -1,10 +1,10 @@
-/* $Id: isar.c,v 1.17 2000/11/24 17:05:37 kai Exp $
+/* $Id: isar.c,v 1.17.6.5 2001/09/23 11:51:33 keil Exp $
  *
  * isar.c   ISAR (Siemens PSB 7110) specific routines
  *
  * Author       Karsten Keil (keil@isdn4linux.de)
  *
- * This file is (c) under GNU PUBLIC LICENSE
+ * This file is (c) under GNU General Public License
  *
  */
 
@@ -17,8 +17,6 @@
 
 #define DBG_LOADFIRM	0
 #define DUMP_MBOXFRAME	2
-
-#define MIN(a,b) ((a<b)?a:b)
 
 #define DLE	0x10
 #define ETX	0x03
@@ -272,7 +270,10 @@ isar_load_firmware(struct IsdnCardState *cs, u_char *buf)
 			ret = 1;goto reterror;
 		}
 		while (left>0) {
-			noc = MIN(126, left);
+			if (left > 126)
+				noc = 126;
+			else
+				noc = left;
 			nom = 2*noc;
 			mp  = msg;
 			*mp++ = sadr / 256;
@@ -288,8 +289,8 @@ isar_load_firmware(struct IsdnCardState *cs, u_char *buf)
 			nom += 3;
 			sp = (u_short *)tmpmsg;
 #if DBG_LOADFIRM
-			printk(KERN_DEBUG"isar: load %3d words at %04x\n",
-				 noc, sadr);
+			printk(KERN_DEBUG"isar: load %3d words at %04x left %d\n",
+				 noc, sadr, left);
 #endif
 			sadr += noc;
 			while(noc) {
@@ -383,12 +384,12 @@ isar_load_firmware(struct IsdnCardState *cs, u_char *buf)
 	} else {
 		printk(KERN_DEBUG"isar selftest not OK %x/%x/%x\n",
 			ireg->cmsb, ireg->clsb, ireg->par[0]);
-		ret = 1;goto reterror;
+		ret = 1;goto reterrflg;
 	}
 	ireg->iis = 0;
 	if (!sendmsg(cs, ISAR_HIS_DIAG, ISAR_CTRL_SWVER, 0, NULL)) {
 		printk(KERN_ERR"isar RQST SVN failed\n");
-		ret = 1;goto reterror;
+		ret = 1;goto reterrflg;
 	}
 	cnt = 30000; /* max 300 ms */
 	while ((ireg->iis != ISAR_IIS_DIAG) && cnt) {
@@ -1650,8 +1651,8 @@ close_isarstate(struct BCState *bcs)
 			kfree(bcs->hw.isar.rcvbuf);
 			bcs->hw.isar.rcvbuf = NULL;
 		}
-		discard_queue(&bcs->rqueue);
-		discard_queue(&bcs->squeue);
+		skb_queue_purge(&bcs->rqueue);
+		skb_queue_purge(&bcs->squeue);
 		if (bcs->tx_skb) {
 			dev_kfree_skb_any(bcs->tx_skb);
 			bcs->tx_skb = NULL;

@@ -28,7 +28,7 @@
 #include <linux/version.h>
 #include <linux/config.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/capability.h>
 #include <linux/sched.h>
@@ -439,6 +439,7 @@ fore200e_shutdown(struct fore200e* fore200e)
 
     case FORE200E_STATE_BLANK:
 	/* nothing to do for that state */
+	break;
     }
 }
 
@@ -2020,9 +2021,13 @@ fore200e_get_esi(struct fore200e* fore200e)
     struct prom_data* prom = fore200e_kmalloc(sizeof(struct prom_data), GFP_KERNEL | GFP_DMA);
     int ok, i;
 
+    if (!prom)
+	return -ENOMEM;
     ok = fore200e->bus->prom_read(fore200e, prom);
-    if (ok < 0)
+    if (ok < 0) {
+	fore200e_kfree(prom);
 	return -EBUSY;
+    }
 	
     printk(FORE200E "device %s, rev. %c, S/N: %d, ESI: %02x:%02x:%02x:%02x:%02x:%02x\n", 
 	   fore200e->name, 
@@ -2995,3 +3000,5 @@ static const struct fore200e_bus fore200e_bus[] = {
 #endif
     {}
 };
+
+MODULE_LICENSE("GPL");

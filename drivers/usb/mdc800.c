@@ -29,6 +29,9 @@
  * mknod /dev/mustek c 180 32
  *
  * The driver supports only one camera.
+ * 
+ * (08/04/2001) gb
+ * Identify version on module load.
  *
  * version 0.7.5
  * Fixed potential SMP races with Spinlocks.
@@ -84,14 +87,18 @@
 #include <linux/random.h>
 #include <linux/poll.h>
 #include <linux/init.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/smp_lock.h>
 
 #include <linux/usb.h>
 
-#define VERSION 	"0.7.5"
-#define RELEASE_DATE 	"(30/10/2000)"
+/*
+ * Version Information
+ */
+#define DRIVER_VERSION "v0.7.5 (30/10/2000)"
+#define DRIVER_AUTHOR "Henning Zabel <henning@uni-paderborn.de>"
+#define DRIVER_DESC "USB Driver for Mustek MDC800 Digital Camera"
 
 /* Vendor and Product Information */
 #define MDC800_VENDOR_ID 	0x055f
@@ -603,16 +610,18 @@ static int mdc800_device_release (struct inode* inode, struct file *file)
 	spin_lock (&mdc800->io_lock);
 	if (mdc800->open && (mdc800->state != NOT_CONNECTED))
 	{
-		mdc800->open=0;
+		spin_unlock(&mdc800->io_lock);
 		usb_unlink_urb (mdc800->irq_urb);
 		usb_unlink_urb (mdc800->write_urb);
 		usb_unlink_urb (mdc800->download_urb);
+		mdc800->open=0;
 	}
 	else
 	{
+		spin_unlock (&mdc800->io_lock);
 		retval=-EIO;
 	}
-	spin_unlock (&mdc800->io_lock);
+
 
 	return retval;
 }
@@ -925,8 +934,7 @@ int __init usb_mdc800_init (void)
 	if (usb_register (&mdc800_usb_driver) < 0)
 		goto cleanup_on_fail;
 
-	info ("Mustek Digital Camera Driver " VERSION " (MDC800)");
-	info (RELEASE_DATE " Henning Zabel <henning@uni-paderborn.de>");
+	info (DRIVER_VERSION ":" DRIVER_DESC);
 
 	return 0;
 
@@ -969,9 +977,10 @@ void __exit usb_mdc800_cleanup (void)
 	mdc800=0;
 }
 
-
-MODULE_AUTHOR ("Henning Zabel <henning@uni-paderborn.de>");
-MODULE_DESCRIPTION ("USB Driver for Mustek MDC800 Digital Camera");
-
 module_init (usb_mdc800_init);
 module_exit (usb_mdc800_cleanup);
+
+MODULE_AUTHOR( DRIVER_AUTHOR );
+MODULE_DESCRIPTION( DRIVER_DESC );
+MODULE_LICENSE("GPL");
+

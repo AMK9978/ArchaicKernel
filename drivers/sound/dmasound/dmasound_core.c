@@ -107,7 +107,7 @@
 
 
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/sound.h>
 #include <linux/init.h>
 #include <linux/soundcard.h>
@@ -135,6 +135,7 @@ MODULE_PARM(numWriteBufs, "i");
 MODULE_PARM(writeBufSize, "i");
 MODULE_PARM(numReadBufs, "i");
 MODULE_PARM(readBufSize, "i");
+MODULE_LICENSE("GPL");
 
 #ifdef MODULE
 static int sq_unit = -1;
@@ -385,16 +386,6 @@ char dmasound_alaw2dma14l[] = {
 
 
     /*
-     *  Common stuff
-     */
-
-static long long sound_lseek(struct file *file, long long offset, int orig)
-{
-	return -ESPIPE;
-}
-
-
-    /*
      *  Mid level stuff
      */
 
@@ -536,7 +527,7 @@ static int mixer_ioctl(struct inode *inode, struct file *file, u_int cmd,
 static struct file_operations mixer_fops =
 {
 	owner:		THIS_MODULE,
-	llseek:		sound_lseek,
+	llseek:		no_llseek,
 	ioctl:		mixer_ioctl,
 	open:		mixer_open,
 	release:	mixer_release,
@@ -1036,7 +1027,7 @@ static int sq_ioctl(struct inode *inode, struct file *file, u_int cmd,
 static struct file_operations sq_fops =
 {
 	owner:		THIS_MODULE,
-	llseek:		sound_lseek,
+	llseek:		no_llseek,
 	write:		sq_write,
 	ioctl:		sq_ioctl,
 	open:		sq_open,
@@ -1174,7 +1165,7 @@ static ssize_t state_read(struct file *file, char *buf, size_t count,
 
 static struct file_operations state_fops = {
 	owner:		THIS_MODULE,
-	llseek:		sound_lseek,
+	llseek:		no_llseek,
 	read:		state_read,
 	open:		state_open,
 	release:	state_release,

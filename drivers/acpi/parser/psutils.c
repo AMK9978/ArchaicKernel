@@ -1,12 +1,12 @@
 /******************************************************************************
  *
  * Module Name: psutils - Parser miscellaneous utilities (Parser only)
- *              $Revision: 30 $
+ *              $Revision: 44 $
  *
  *****************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -28,14 +28,14 @@
 #include "acparser.h"
 #include "amlcode.h"
 
-#define _COMPONENT          PARSER
+#define _COMPONENT          ACPI_PARSER
 	 MODULE_NAME         ("psutils")
 
 
 #define PARSEOP_GENERIC     0x01
 #define PARSEOP_NAMED       0x02
-#define PARSEOP_DEFERRED    0x03
-#define PARSEOP_BYTELIST    0x04
+#define PARSEOP_DEFERRED    0x04
+#define PARSEOP_BYTELIST    0x08
 #define PARSEOP_IN_CACHE    0x80
 
 
@@ -55,10 +55,13 @@
 
 void
 acpi_ps_init_op (
-	ACPI_PARSE_OBJECT       *op,
+	acpi_parse_object       *op,
 	u16                     opcode)
 {
-	ACPI_OPCODE_INFO        *aml_op;
+	const acpi_opcode_info  *aml_op;
+
+
+	FUNCTION_ENTRY ();
 
 
 	op->data_type = ACPI_DESC_TYPE_PARSER;
@@ -85,102 +88,57 @@ acpi_ps_init_op (
  *
  ******************************************************************************/
 
-ACPI_PARSE_OBJECT*
+acpi_parse_object*
 acpi_ps_alloc_op (
 	u16                     opcode)
 {
-	ACPI_PARSE_OBJECT       *op = NULL;
+	acpi_parse_object       *op = NULL;
 	u32                     size;
 	u8                      flags;
+	const acpi_opcode_info  *op_info;
 
+
+	FUNCTION_ENTRY ();
+
+
+	op_info = acpi_ps_get_opcode_info (opcode);
 
 	/* Allocate the minimum required size object */
 
-	if (acpi_ps_is_deferred_op (opcode)) {
-		size = sizeof (ACPI_PARSE2_OBJECT);
+	if (op_info->flags & AML_DEFER) {
+		size = sizeof (acpi_parse2_object);
 		flags = PARSEOP_DEFERRED;
 	}
 
-	else if (acpi_ps_is_named_op (opcode)) {
-		size = sizeof (ACPI_PARSE2_OBJECT);
+	else if (op_info->flags & AML_NAMED) {
+		size = sizeof (acpi_parse2_object);
 		flags = PARSEOP_NAMED;
 	}
 
-	else if (acpi_ps_is_bytelist_op (opcode)) {
-		size = sizeof (ACPI_PARSE2_OBJECT);
+	else if (opcode == AML_INT_BYTELIST_OP) {
+		size = sizeof (acpi_parse2_object);
 		flags = PARSEOP_BYTELIST;
 	}
 
 	else {
-		size = sizeof (ACPI_PARSE_OBJECT);
+		size = sizeof (acpi_parse_object);
 		flags = PARSEOP_GENERIC;
 	}
 
 
-	if (size == sizeof (ACPI_PARSE_OBJECT)) {
+	if (size == sizeof (acpi_parse_object)) {
 		/*
-		 * The generic op is by far the most common (16 to 1), and therefore
-		 * the op cache is implemented with this type.
-		 *
-		 * Check if there is an Op already available in the cache
+		 * The generic op is by far the most common (16 to 1)
 		 */
-
-		acpi_cm_acquire_mutex (ACPI_MTX_CACHES);
-		acpi_gbl_parse_cache_requests++;
-		if (acpi_gbl_parse_cache) {
-			/* Extract an op from the front of the cache list */
-
-			acpi_gbl_parse_cache_depth--;
-			acpi_gbl_parse_cache_hits++;
-
-			op = acpi_gbl_parse_cache;
-			acpi_gbl_parse_cache = op->next;
-
-
-			/* Clear the previously used Op */
-
-			MEMSET (op, 0, sizeof (ACPI_PARSE_OBJECT));
-
-		}
-		acpi_cm_release_mutex (ACPI_MTX_CACHES);
+		op = acpi_ut_acquire_from_cache (ACPI_MEM_LIST_PSNODE);
 	}
 
 	else {
-		/*
-		 * The generic op is by far the most common (16 to 1), and therefore
-		 * the op cache is implemented with this type.
-		 *
-		 * Check if there is an Op already available in the cache
-		 */
-
-		acpi_cm_acquire_mutex (ACPI_MTX_CACHES);
-		acpi_gbl_ext_parse_cache_requests++;
-		if (acpi_gbl_ext_parse_cache) {
-			/* Extract an op from the front of the cache list */
-
-			acpi_gbl_ext_parse_cache_depth--;
-			acpi_gbl_ext_parse_cache_hits++;
-
-			op = (ACPI_PARSE_OBJECT *) acpi_gbl_ext_parse_cache;
-			acpi_gbl_ext_parse_cache = (ACPI_PARSE2_OBJECT *) op->next;
-
-
-			/* Clear the previously used Op */
-
-			MEMSET (op, 0, sizeof (ACPI_PARSE2_OBJECT));
-
-		}
-		acpi_cm_release_mutex (ACPI_MTX_CACHES);
-	}
-
-
-	/* Allocate a new Op if necessary */
-
-	if (!op) {
-		op = acpi_cm_callocate (size);
+		op = acpi_ut_acquire_from_cache (ACPI_MEM_LIST_PSNODE_EXT);
 	}
 
 	/* Initialize the Op */
+
 	if (op) {
 		acpi_ps_init_op (op, opcode);
 		op->flags = flags;
@@ -205,61 +163,22 @@ acpi_ps_alloc_op (
 
 void
 acpi_ps_free_op (
-	ACPI_PARSE_OBJECT       *op)
+	acpi_parse_object       *op)
 {
+	PROC_NAME ("Ps_free_op");
 
 
+	if (op->opcode == AML_INT_RETURN_VALUE_OP) {
+		ACPI_DEBUG_PRINT ((ACPI_DB_INFO, "Free retval op: %p\n", op));
+	}
 
 	if (op->flags == PARSEOP_GENERIC) {
-		/* Is the cache full? */
-
-		if (acpi_gbl_parse_cache_depth < MAX_PARSE_CACHE_DEPTH) {
-			/* Put a GENERIC_OP back into the cache */
-
-			/* Clear the previously used Op */
-
-			MEMSET (op, 0, sizeof (ACPI_PARSE_OBJECT));
-			op->flags = PARSEOP_IN_CACHE;
-
-			acpi_cm_acquire_mutex (ACPI_MTX_CACHES);
-			acpi_gbl_parse_cache_depth++;
-
-			op->next = acpi_gbl_parse_cache;
-			acpi_gbl_parse_cache = op;
-
-			acpi_cm_release_mutex (ACPI_MTX_CACHES);
-			return;
-		}
+		acpi_ut_release_to_cache (ACPI_MEM_LIST_PSNODE, op);
 	}
 
 	else {
-		/* Is the cache full? */
-
-		if (acpi_gbl_ext_parse_cache_depth < MAX_EXTPARSE_CACHE_DEPTH) {
-			/* Put a GENERIC_OP back into the cache */
-
-			/* Clear the previously used Op */
-
-			MEMSET (op, 0, sizeof (ACPI_PARSE2_OBJECT));
-			op->flags = PARSEOP_IN_CACHE;
-
-			acpi_cm_acquire_mutex (ACPI_MTX_CACHES);
-			acpi_gbl_ext_parse_cache_depth++;
-
-			op->next = (ACPI_PARSE_OBJECT *) acpi_gbl_ext_parse_cache;
-			acpi_gbl_ext_parse_cache = (ACPI_PARSE2_OBJECT *) op;
-
-			acpi_cm_release_mutex (ACPI_MTX_CACHES);
-			return;
-		}
+		acpi_ut_release_to_cache (ACPI_MEM_LIST_PSNODE_EXT, op);
 	}
-
-
-	/*
-	 * Not a GENERIC OP, or the cache is full, just free the Op
-	 */
-
-	acpi_cm_free (op);
 }
 
 
@@ -279,32 +198,12 @@ void
 acpi_ps_delete_parse_cache (
 	void)
 {
-	ACPI_PARSE_OBJECT       *next;
+	FUNCTION_TRACE ("Ps_delete_parse_cache");
 
 
-	/* Traverse the global cache list */
-
-	while (acpi_gbl_parse_cache) {
-		/* Delete one cached state object */
-
-		next = acpi_gbl_parse_cache->next;
-		acpi_cm_free (acpi_gbl_parse_cache);
-		acpi_gbl_parse_cache = next;
-		acpi_gbl_parse_cache_depth--;
-	}
-
-	/* Traverse the global cache list */
-
-	while (acpi_gbl_ext_parse_cache) {
-		/* Delete one cached state object */
-
-		next = acpi_gbl_ext_parse_cache->next;
-		acpi_cm_free (acpi_gbl_ext_parse_cache);
-		acpi_gbl_ext_parse_cache = (ACPI_PARSE2_OBJECT *) next;
-		acpi_gbl_ext_parse_cache_depth--;
-	}
-
-	return;
+	acpi_ut_delete_generic_cache (ACPI_MEM_LIST_PSNODE);
+	acpi_ut_delete_generic_cache (ACPI_MEM_LIST_PSNODE_EXT);
+	return_VOID;
 }
 
 
@@ -312,11 +211,7 @@ acpi_ps_delete_parse_cache (
  *
  * FUNCTION:    Utility functions
  *
- * DESCRIPTION: Low level functions
- *
- * TBD: [Restructure]
- * 1) Some of these functions should be macros
- * 2) Some can be simplified
+ * DESCRIPTION: Low level character and object functions
  *
  ******************************************************************************/
 
@@ -324,8 +219,6 @@ acpi_ps_delete_parse_cache (
 /*
  * Is "c" a namestring lead character?
  */
-
-
 u8
 acpi_ps_is_leading_char (
 	u32                     c)
@@ -345,197 +238,24 @@ acpi_ps_is_prefix_char (
 }
 
 
-u8
-acpi_ps_is_namespace_object_op (
-	u16                     opcode)
-{
-	return ((u8)
-		   (opcode == AML_SCOPE_OP          ||
-			opcode == AML_DEVICE_OP         ||
-			opcode == AML_THERMAL_ZONE_OP   ||
-			opcode == AML_METHOD_OP         ||
-			opcode == AML_POWER_RES_OP      ||
-			opcode == AML_PROCESSOR_OP      ||
-			opcode == AML_DEF_FIELD_OP      ||
-			opcode == AML_INDEX_FIELD_OP    ||
-			opcode == AML_BANK_FIELD_OP     ||
-			opcode == AML_NAMEDFIELD_OP     ||
-			opcode == AML_NAME_OP           ||
-			opcode == AML_ALIAS_OP          ||
-			opcode == AML_MUTEX_OP          ||
-			opcode == AML_EVENT_OP          ||
-			opcode == AML_REGION_OP         ||
-			opcode == AML_CREATE_FIELD_OP   ||
-			opcode == AML_BIT_FIELD_OP      ||
-			opcode == AML_BYTE_FIELD_OP     ||
-			opcode == AML_WORD_FIELD_OP     ||
-			opcode == AML_DWORD_FIELD_OP    ||
-			opcode == AML_METHODCALL_OP     ||
-			opcode == AML_NAMEPATH_OP));
-}
-
-u8
-acpi_ps_is_namespace_op (
-	u16                     opcode)
-{
-	return ((u8)
-		   (opcode == AML_SCOPE_OP          ||
-			opcode == AML_DEVICE_OP         ||
-			opcode == AML_THERMAL_ZONE_OP   ||
-			opcode == AML_METHOD_OP         ||
-			opcode == AML_POWER_RES_OP      ||
-			opcode == AML_PROCESSOR_OP      ||
-			opcode == AML_DEF_FIELD_OP      ||
-			opcode == AML_INDEX_FIELD_OP    ||
-			opcode == AML_BANK_FIELD_OP     ||
-			opcode == AML_NAME_OP           ||
-			opcode == AML_ALIAS_OP          ||
-			opcode == AML_MUTEX_OP          ||
-			opcode == AML_EVENT_OP          ||
-			opcode == AML_REGION_OP         ||
-			opcode == AML_NAMEDFIELD_OP));
-}
-
-
-/*
- * Is opcode for a named object Op?
- * (Includes all named object opcodes)
- *
- * TBD: [Restructure] Need a better way than this brute force approach!
- */
-u8
-acpi_ps_is_node_op (
-	u16                     opcode)
-{
-	return ((u8)
-		   (opcode == AML_SCOPE_OP          ||
-			opcode == AML_DEVICE_OP         ||
-			opcode == AML_THERMAL_ZONE_OP   ||
-			opcode == AML_METHOD_OP         ||
-			opcode == AML_POWER_RES_OP      ||
-			opcode == AML_PROCESSOR_OP      ||
-			opcode == AML_NAMEDFIELD_OP     ||
-			opcode == AML_NAME_OP           ||
-			opcode == AML_ALIAS_OP          ||
-			opcode == AML_MUTEX_OP          ||
-			opcode == AML_EVENT_OP          ||
-			opcode == AML_REGION_OP         ||
-
-
-			opcode == AML_CREATE_FIELD_OP   ||
-			opcode == AML_BIT_FIELD_OP      ||
-			opcode == AML_BYTE_FIELD_OP     ||
-			opcode == AML_WORD_FIELD_OP     ||
-			opcode == AML_DWORD_FIELD_OP    ||
-			opcode == AML_METHODCALL_OP     ||
-			opcode == AML_NAMEPATH_OP));
-}
-
-
-/*
- * Is opcode for a named Op?
- */
-u8
-acpi_ps_is_named_op (
-	u16                     opcode)
-{
-	return ((u8)
-		   (opcode == AML_SCOPE_OP          ||
-			opcode == AML_DEVICE_OP         ||
-			opcode == AML_THERMAL_ZONE_OP   ||
-			opcode == AML_METHOD_OP         ||
-			opcode == AML_POWER_RES_OP      ||
-			opcode == AML_PROCESSOR_OP      ||
-			opcode == AML_NAME_OP           ||
-			opcode == AML_ALIAS_OP          ||
-			opcode == AML_MUTEX_OP          ||
-			opcode == AML_EVENT_OP          ||
-			opcode == AML_REGION_OP         ||
-			opcode == AML_NAMEDFIELD_OP));
-}
-
-
-u8
-acpi_ps_is_deferred_op (
-	u16                     opcode)
-{
-	return ((u8)
-		   (opcode == AML_METHOD_OP         ||
-			opcode == AML_CREATE_FIELD_OP   ||
-			opcode == AML_BIT_FIELD_OP      ||
-			opcode == AML_BYTE_FIELD_OP     ||
-			opcode == AML_WORD_FIELD_OP     ||
-			opcode == AML_DWORD_FIELD_OP    ||
-			opcode == AML_REGION_OP));
-}
-
-
-/*
- * Is opcode for a bytelist?
- */
-u8
-acpi_ps_is_bytelist_op (
-	u16                     opcode)
-{
-	return ((u8) (opcode == AML_BYTELIST_OP));
-}
-
-
-/*
- * Is opcode for a Field, Index_field, or Bank_field
- */
-u8
-acpi_ps_is_field_op (
-	u16                     opcode)
-{
-	return ((u8)
-			  (opcode == AML_CREATE_FIELD_OP
-			|| opcode == AML_DEF_FIELD_OP
-			|| opcode == AML_INDEX_FIELD_OP
-			|| opcode == AML_BANK_FIELD_OP));
-}
-
-
-/*
- * Is field creation op
- */
-u8
-acpi_ps_is_create_field_op (
-	u16                     opcode)
-{
-	return ((u8)
-		   (opcode == AML_CREATE_FIELD_OP   ||
-			opcode == AML_BIT_FIELD_OP      ||
-			opcode == AML_BYTE_FIELD_OP     ||
-			opcode == AML_WORD_FIELD_OP     ||
-			opcode == AML_DWORD_FIELD_OP));
-}
-
-
-/*
- * Cast an acpi_op to an acpi_extended_op if possible
- */
-
-/* TBD: This is very inefficient, fix */
-ACPI_PARSE2_OBJECT *
-acpi_ps_to_extended_op (
-	ACPI_PARSE_OBJECT       *op)
-{
-	return ((acpi_ps_is_deferred_op (op->opcode) || acpi_ps_is_named_op (op->opcode) || acpi_ps_is_bytelist_op (op->opcode))
-			? ( (ACPI_PARSE2_OBJECT *) op) : NULL);
-}
-
-
 /*
  * Get op's name (4-byte name segment) or 0 if unnamed
  */
 u32
 acpi_ps_get_name (
-	ACPI_PARSE_OBJECT       *op)
+	acpi_parse_object       *op)
 {
-	ACPI_PARSE2_OBJECT      *named = acpi_ps_to_extended_op (op);
 
-	return (named ? named->name : 0);
+
+	/* The "generic" object has no name associated with it */
+
+	if (op->flags & PARSEOP_GENERIC) {
+		return (0);
+	}
+
+	/* Only the "Extended" parse objects have a name */
+
+	return (((acpi_parse2_object *) op)->name);
 }
 
 
@@ -544,13 +264,16 @@ acpi_ps_get_name (
  */
 void
 acpi_ps_set_name (
-	ACPI_PARSE_OBJECT       *op,
+	acpi_parse_object       *op,
 	u32                     name)
 {
-	ACPI_PARSE2_OBJECT      *named = acpi_ps_to_extended_op (op);
 
-	if (named) {
-		named->name = name;
+	/* The "generic" object has no name associated with it */
+
+	if (op->flags & PARSEOP_GENERIC) {
+		return;
 	}
+
+	((acpi_parse2_object *) op)->name = name;
 }
 

@@ -1,10 +1,12 @@
-/* $Id: lmgr.c,v 1.7 2000/06/26 08:59:14 keil Exp $
+/* $Id: lmgr.c,v 1.7.6.2 2001/09/23 22:24:50 kai Exp $
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
+ * Layermanagement module
  *
- *  Layermanagement module
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 

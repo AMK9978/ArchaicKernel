@@ -1,12 +1,12 @@
 /******************************************************************************
  *
  * Module Name: dswscope - Scope stack manipulation
- *              $Revision: 40 $
+ *              $Revision: 49 $
  *
  *****************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -29,7 +29,7 @@
 #include "acdispat.h"
 
 
-#define _COMPONENT          NAMESPACE
+#define _COMPONENT          ACPI_DISPATCHER
 	 MODULE_NAME         ("dswscope")
 
 
@@ -49,9 +49,11 @@
 
 void
 acpi_ds_scope_stack_clear (
-	ACPI_WALK_STATE         *walk_state)
+	acpi_walk_state         *walk_state)
 {
-	ACPI_GENERIC_STATE      *scope_info;
+	acpi_generic_state      *scope_info;
+
+	PROC_NAME ("Ds_scope_stack_clear");
 
 
 	while (walk_state->scope_info) {
@@ -60,7 +62,9 @@ acpi_ds_scope_stack_clear (
 		scope_info = walk_state->scope_info;
 		walk_state->scope_info = scope_info->scope.next;
 
-		acpi_cm_delete_generic_state (scope_info);
+		ACPI_DEBUG_PRINT ((ACPI_DB_EXEC,
+			"Popped object type %X\n", scope_info->common.value));
+		acpi_ut_delete_generic_state (scope_info);
 	}
 }
 
@@ -77,46 +81,50 @@ acpi_ds_scope_stack_clear (
  *
  ***************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_ds_scope_stack_push (
-	ACPI_NAMESPACE_NODE     *node,
-	OBJECT_TYPE_INTERNAL    type,
-	ACPI_WALK_STATE         *walk_state)
+	acpi_namespace_node     *node,
+	acpi_object_type8       type,
+	acpi_walk_state         *walk_state)
 {
-	ACPI_GENERIC_STATE      *scope_info;
+	acpi_generic_state      *scope_info;
+
+
+	FUNCTION_TRACE ("Ds_scope_stack_push");
 
 
 	if (!node) {
-		/*  invalid scope   */
+		/* Invalid scope   */
 
 		REPORT_ERROR (("Ds_scope_stack_push: null scope passed\n"));
-		return (AE_BAD_PARAMETER);
+		return_ACPI_STATUS (AE_BAD_PARAMETER);
 	}
 
 	/* Make sure object type is valid */
 
-	if (!acpi_aml_validate_object_type (type)) {
+	if (!acpi_ex_validate_object_type (type)) {
 		REPORT_WARNING (("Ds_scope_stack_push: type code out of range\n"));
 	}
 
 
 	/* Allocate a new scope object */
 
-	scope_info = acpi_cm_create_generic_state ();
+	scope_info = acpi_ut_create_generic_state ();
 	if (!scope_info) {
-		return (AE_NO_MEMORY);
+		return_ACPI_STATUS (AE_NO_MEMORY);
 	}
 
 	/* Init new scope object */
 
-	scope_info->scope.node = node;
-	scope_info->common.value = (u16) type;
+	scope_info->common.data_type = ACPI_DESC_TYPE_STATE_WSCOPE;
+	scope_info->scope.node      = node;
+	scope_info->common.value    = (u16) type;
 
 	/* Push new scope object onto stack */
 
-	acpi_cm_push_generic_state (&walk_state->scope_info, scope_info);
+	acpi_ut_push_generic_state (&walk_state->scope_info, scope_info);
 
-	return (AE_OK);
+	return_ACPI_STATUS (AE_OK);
 }
 
 
@@ -137,25 +145,30 @@ acpi_ds_scope_stack_push (
  *
  ***************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_ds_scope_stack_pop (
-	ACPI_WALK_STATE         *walk_state)
+	acpi_walk_state         *walk_state)
 {
-	ACPI_GENERIC_STATE      *scope_info;
+	acpi_generic_state      *scope_info;
+
+
+	FUNCTION_TRACE ("Ds_scope_stack_pop");
 
 
 	/*
 	 * Pop scope info object off the stack.
 	 */
-
-	scope_info = acpi_cm_pop_generic_state (&walk_state->scope_info);
+	scope_info = acpi_ut_pop_generic_state (&walk_state->scope_info);
 	if (!scope_info) {
-		return (AE_STACK_UNDERFLOW);
+		return_ACPI_STATUS (AE_STACK_UNDERFLOW);
 	}
 
-	acpi_cm_delete_generic_state (scope_info);
+	ACPI_DEBUG_PRINT ((ACPI_DB_EXEC,
+		"Popped object type %X\n", scope_info->common.value));
 
-	return (AE_OK);
+	acpi_ut_delete_generic_state (scope_info);
+
+	return_ACPI_STATUS (AE_OK);
 }
 
 

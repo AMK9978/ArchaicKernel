@@ -44,7 +44,7 @@
 #include <linux/major.h>
 #include <linux/errno.h>
 #include <linux/genhd.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/ide.h>
 
@@ -223,67 +223,53 @@ static ide_startstop_t write_intr (ide_drive_t *drive)
  * ide_multwrite() transfers a block of up to mcount sectors of data
  * to a drive as part of a disk multiple-sector write operation.
  *
- * Returns 0 if successful;  returns 1 if request had to be aborted due to corrupted buffer list.
+ * Returns 0 on success.
+ *
+ * Note that we may be called from two contexts - the do_rw_disk context
+ * and IRQ context. The IRQ can happen any time after we've output the
+ * full "mcount" number of sectors, so we must make sure we update the
+ * state _before_ we output the final part of the data!
  */
 int ide_multwrite (ide_drive_t *drive, unsigned int mcount)
 {
  	ide_hwgroup_t	*hwgroup= HWGROUP(drive);
-
-	/*
-	 *	This may look a bit odd, but remember wrq is a copy of the
-	 *	request not the original. The pointers are real however so the
-	 *	bh's are not copies. Remember that or bad stuff will happen
-	 *
-	 *	At the point we are called the drive has asked us for the
-	 *	data, and its our job to feed it, walking across bh boundaries
-	 *	if need be.
-	 */
-
  	struct request	*rq = &hwgroup->wrq;
-
+ 
   	do {
- 		unsigned long flags;
-  		unsigned int nsect = rq->current_nr_sectors;
+  		char *buffer;
+  		int nsect = rq->current_nr_sectors;
+ 
 		if (nsect > mcount)
 			nsect = mcount;
 		mcount -= nsect;
+		buffer = rq->buffer;
 
-		idedisk_output_data(drive, rq->buffer, nsect<<7);
-#ifdef DEBUG
-		printk("%s: multwrite: sector %ld, buffer=0x%08lx, count=%d, remaining=%ld\n",
-			drive->name, rq->sector, (unsigned long) rq->buffer,
-			nsect, rq->nr_sectors - nsect);
-#endif
-		spin_lock_irqsave(&io_request_lock, flags);	/* Is this really necessary? */
-#ifdef CONFIG_BLK_DEV_PDC4030
 		rq->sector += nsect;
-#endif
-		if (((long)(rq->nr_sectors -= nsect)) <= 0) {
-#ifdef DEBUG
-			printk("%s: multwrite: count=%d, current=%ld\n",
-				drive->name, nsect, rq->nr_sectors);
-#endif
-			spin_unlock_irqrestore(&io_request_lock, flags);
-			break;
-		}
-		if ((rq->current_nr_sectors -= nsect) == 0) {
-			if ((rq->bh = rq->bh->b_reqnext) != NULL) {
-				rq->current_nr_sectors = rq->bh->b_size>>9;
-				rq->buffer             = rq->bh->b_data;
+		rq->buffer += nsect << 9;
+		rq->nr_sectors -= nsect;
+		rq->current_nr_sectors -= nsect;
+
+		/* Do we move to the next bh after this? */
+		if (!rq->current_nr_sectors) {
+			struct buffer_head *bh = rq->bh->b_reqnext;
+
+			/* end early early we ran out of requests */
+			if (!bh) {
+				mcount = 0;
 			} else {
-				spin_unlock_irqrestore(&io_request_lock, flags);
-				printk("%s: buffer list corrupted (%ld, %ld, %d)\n",
-					drive->name, rq->current_nr_sectors,
-					rq->nr_sectors, nsect);
-				ide_end_request(0, hwgroup);
-				return 1;
+				rq->bh = bh;
+				rq->current_nr_sectors = bh->b_size >> 9;
+				rq->buffer             = bh->b_data;
 			}
-		} else {
-			/* Fix the pointer.. we ate data */
-			rq->buffer += nsect << 9;
 		}
-                spin_unlock_irqrestore(&io_request_lock, flags);
+
+		/*
+		 * Ok, we're all setup for the interrupt
+		 * re-entering us on the last transfer.
+		 */
+		idedisk_output_data(drive, buffer, nsect<<7);
 	} while (mcount);
+
         return 0;
 }
 
@@ -383,6 +369,7 @@ static ide_startstop_t do_rw_disk (ide_drive_t *drive, struct request *rq, unsig
 {
 	if (IDE_CONTROL_REG)
 		OUT_BYTE(drive->ctl,IDE_CONTROL_REG);
+	OUT_BYTE(0x00, IDE_FEATURE_REG);
 	OUT_BYTE(rq->nr_sectors,IDE_NSECTOR_REG);
 #ifdef CONFIG_BLK_DEV_PDC4030
 	if (drive->select.b.lba || IS_PDC4030_DRIVE) {
@@ -494,7 +481,7 @@ static int idedisk_open (struct inode *inode, struct file *filp, ide_drive_t *dr
 static void idedisk_release (struct inode *inode, struct file *filp, ide_drive_t *drive)
 {
 	if (drive->removable && !drive->usage) {
-		invalidate_buffers(inode->i_rdev);
+		invalidate_bdev(inode->i_bdev, 0);
 		if (drive->doorlocking && ide_wait_cmd(drive, WIN_DOORUNLOCK, 0, 0, 0, NULL))
 			drive->doorlocking = 0;
 	}
@@ -703,46 +690,11 @@ static void idedisk_add_settings(ide_drive_t *drive)
 	ide_add_setting(drive,	"multcount",		id ? SETTING_RW : SETTING_READ,			HDIO_GET_MULTCOUNT,	HDIO_SET_MULTCOUNT,	TYPE_BYTE,	0,	id ? id->max_multsect : 0,	1,	2,	&drive->mult_count,		set_multcount);
 	ide_add_setting(drive,	"nowerr",		SETTING_RW,					HDIO_GET_NOWERR,	HDIO_SET_NOWERR,	TYPE_BYTE,	0,	1,				1,	1,	&drive->nowerr,			set_nowerr);
 	ide_add_setting(drive,	"breada_readahead",	SETTING_RW,					BLKRAGET,		BLKRASET,		TYPE_INT,	0,	255,				1,	2,	&read_ahead[major],		NULL);
-	ide_add_setting(drive,	"file_readahead",	SETTING_RW,					BLKFRAGET,		BLKFRASET,		TYPE_INTA,	0,	INT_MAX,			1,	1024,	&max_readahead[major][minor],	NULL);
+	ide_add_setting(drive,	"file_readahead",	SETTING_RW,					BLKFRAGET,		BLKFRASET,		TYPE_INTA,	0,	4096,			PAGE_SIZE,	1024,	&max_readahead[major][minor],	NULL);
 	ide_add_setting(drive,	"max_kb_per_request",	SETTING_RW,					BLKSECTGET,		BLKSECTSET,		TYPE_INTA,	1,	255,				1,	2,	&max_sectors[major][minor],	NULL);
 	ide_add_setting(drive,	"lun",			SETTING_RW,					-1,			-1,			TYPE_INT,	0,	7,				1,	1,	&drive->lun,			NULL);
-}
-
-/*
- *	IDE subdriver functions, registered with ide.c
- */
-static ide_driver_t idedisk_driver = {
-	"ide-disk",		/* name */
-	IDEDISK_VERSION,	/* version */
-	ide_disk,		/* media */
-	0,			/* busy */
-	1,			/* supports_dma */
-	0,			/* supports_dsc_overlap */
-	NULL,			/* cleanup */
-	do_rw_disk,		/* do_request */
-	NULL,			/* end_request */
-	NULL,			/* ioctl */
-	idedisk_open,		/* open */
-	idedisk_release,	/* release */
-	idedisk_media_change,	/* media_change */
-	idedisk_revalidate,	/* revalidate */
-	idedisk_pre_reset,	/* pre_reset */
-	idedisk_capacity,	/* capacity */
-	idedisk_special,	/* special */
-	idedisk_proc		/* proc */
-};
-
-int idedisk_init (void);
-static ide_module_t idedisk_module = {
-	IDE_DRIVER_MODULE,
-	idedisk_init,
-	&idedisk_driver,
-	NULL
-};
-
-static int idedisk_cleanup (ide_drive_t *drive)
-{
-	return ide_unregister_subdriver(drive);
+	ide_add_setting(drive,	"failures",		SETTING_RW,					-1,			-1,			TYPE_INT,	0,	65535,				1,	1,	&drive->failures,		NULL);
+	ide_add_setting(drive,	"max_failures",		SETTING_RW,					-1,			-1,			TYPE_INT,	0,	65535,				1,	1,	&drive->max_failures,		NULL);
 }
 
 static void idedisk_setup (ide_drive_t *drive)
@@ -849,6 +801,69 @@ static void idedisk_setup (ide_drive_t *drive)
 	drive->no_io_32bit = id->dword_io ? 1 : 0;
 }
 
+static int idedisk_reinit (ide_drive_t *drive)
+{
+	return 0;
+}
+
+static int idedisk_cleanup (ide_drive_t *drive)
+{
+	return ide_unregister_subdriver(drive);
+}
+
+/*
+ *      IDE subdriver functions, registered with ide.c
+ */
+static ide_driver_t idedisk_driver = {
+	name:			"ide-disk",
+	version:		IDEDISK_VERSION,
+	media:			ide_disk,
+	busy:			0,
+	supports_dma:		1,
+	supports_dsc_overlap:	0,
+	cleanup:		idedisk_cleanup,
+	do_request:		do_rw_disk,
+	end_request:		NULL,
+	ioctl:			NULL,
+	open:			idedisk_open,
+	release:		idedisk_release,
+	media_change:		idedisk_media_change,
+	revalidate:		idedisk_revalidate,
+	pre_reset:		idedisk_pre_reset,
+	capacity:		idedisk_capacity,
+	special:		idedisk_special,
+	proc:			idedisk_proc,
+	driver_reinit:		idedisk_reinit,
+};
+
+int idedisk_init (void);
+static ide_module_t idedisk_module = {
+	IDE_DRIVER_MODULE,
+	idedisk_init,
+	&idedisk_driver,
+	NULL
+};
+
+MODULE_DESCRIPTION("ATA DISK Driver");
+
+static void __exit idedisk_exit (void)
+{
+	ide_drive_t *drive;
+	int failed = 0;
+
+	while ((drive = ide_scan_devices (ide_disk, idedisk_driver.name, &idedisk_driver, failed)) != NULL) {
+		if (idedisk_cleanup (drive)) {
+			printk (KERN_ERR "%s: cleanup_module() called while still busy\n", drive->name);
+			failed++;
+		}
+		/* We must remove proc entries defined in this module.
+		   Otherwise we oops while accessing these entries */
+		if (drive->proc)
+			ide_remove_proc_entries(drive->proc, idedisk_proc);
+	}
+	ide_unregister_module(&idedisk_module);
+}
+
 int idedisk_init (void)
 {
 	ide_drive_t *drive;
@@ -873,27 +888,6 @@ int idedisk_init (void)
 	return 0;
 }
 
-#ifdef MODULE
-int init_module (void)
-{
-	return idedisk_init();
-}
-
-void cleanup_module (void)
-{
-	ide_drive_t *drive;
-	int failed = 0;
-
-	while ((drive = ide_scan_devices (ide_disk, idedisk_driver.name, &idedisk_driver, failed)) != NULL) {
-		if (idedisk_cleanup (drive)) {
-			printk (KERN_ERR "%s: cleanup_module() called while still busy\n", drive->name);
-			failed++;
-		}
-		/* We must remove proc entries defined in this module.
-		   Otherwise we oops while accessing these entries */
-		if (drive->proc)
-			ide_remove_proc_entries(drive->proc, idedisk_proc);
-	}
-	ide_unregister_module(&idedisk_module);
-}
-#endif /* MODULE */
+module_init(idedisk_init);
+module_exit(idedisk_exit);
+MODULE_LICENSE("GPL");

@@ -1,12 +1,12 @@
 /******************************************************************************
  *
  * Module Name: tbconvrt - ACPI Table conversion utilities
- *              $Revision: 15 $
+ *              $Revision: 28 $
  *
  *****************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -30,29 +30,53 @@
 #include "actbl.h"
 
 
-#define _COMPONENT          TABLE_MANAGER
+#define _COMPONENT          ACPI_TABLES
 	 MODULE_NAME         ("tbconvrt")
 
 
-/*
- * Build a GAS structure from earlier ACPI table entries (V1.0 and 0.71 extensions)
+/*******************************************************************************
  *
- * 1) Address space
- * 2) Length in bytes -- convert to length in bits
- * 3) Bit offset is zero
- * 4) Reserved field is zero
- * 5) Expand address to 64 bits
- */
-#define ASL_BUILD_GAS_FROM_ENTRY(a,b,c,d)   {a.address_space_id = (u8) d;\
-			   a.register_bit_width = (u8) MUL_8 (b);\
-			   a.register_bit_offset = 0;\
-			   a.reserved = 0;\
-			   a.address = (UINT64) c;}
+ * FUNCTION:    Acpi_tb_get_table_count
+ *
+ * PARAMETERS:
+ *
+ * RETURN:
+ *
+ * DESCRIPTION: Calculate the number of tables
+ *
+ ******************************************************************************/
+
+u32
+acpi_tb_get_table_count (
+	RSDP_DESCRIPTOR         *RSDP,
+	acpi_table_header       *RSDT)
+{
+	u32                     pointer_size;
 
 
-/* ACPI V1.0 entries -- address space is always I/O */
+	FUNCTION_ENTRY ();
 
-#define ASL_BUILD_GAS_FROM_V1_ENTRY(a,b,c)  ASL_BUILD_GAS_FROM_ENTRY(a,b,c,ADDRESS_SPACE_SYSTEM_IO)
+
+#ifndef _IA64
+
+	if (RSDP->revision < 2) {
+		pointer_size = sizeof (u32);
+	}
+
+	else
+#endif
+	{
+		pointer_size = sizeof (u64);
+	}
+
+	/*
+	 * Determine the number of tables pointed to by the RSDT/XSDT.
+	 * This is defined by the ACPI Specification to be the number of
+	 * pointers contained within the RSDT/XSDT.  The size of the pointers
+	 * is architecture-dependent.
+	 */
+	return ((RSDT->length - sizeof (acpi_table_header)) / pointer_size);
+}
 
 
 /*******************************************************************************
@@ -63,59 +87,41 @@
  *
  * RETURN:
  *
- * DESCRIPTION:
+ * DESCRIPTION: Convert an RSDT to an XSDT (internal common format)
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_tb_convert_to_xsdt (
-	ACPI_TABLE_DESC         *table_info,
+	acpi_table_desc         *table_info,
 	u32                     *number_of_tables)
 {
 	u32                     table_size;
-	u32                     pointer_size;
 	u32                     i;
-	XSDT_DESCRIPTOR         *new_table;
+	xsdt_descriptor         *new_table;
 
 
-#ifndef _IA64
+	FUNCTION_ENTRY ();
 
-	if (acpi_gbl_RSDP->revision < 2) {
-		pointer_size = sizeof (u32);
-	}
 
-	else
-#endif
-	{
-		pointer_size = sizeof (UINT64);
-	}
+	*number_of_tables = acpi_tb_get_table_count (acpi_gbl_RSDP, table_info->pointer);
 
-	/*
-	 * Determine the number of tables pointed to by the RSDT/XSDT.
-	 * This is defined by the ACPI Specification to be the number of
-	 * pointers contained within the RSDT/XSDT.  The size of the pointers
-	 * is architecture-dependent.
-	 */
-
-	table_size = table_info->pointer->length;
-	*number_of_tables = (table_size -
-			   sizeof (ACPI_TABLE_HEADER)) / pointer_size;
 
 	/* Compute size of the converted XSDT */
 
-	table_size = (*number_of_tables * sizeof (UINT64)) + sizeof (ACPI_TABLE_HEADER);
+	table_size = (*number_of_tables * sizeof (u64)) + sizeof (acpi_table_header);
 
 
 	/* Allocate an XSDT */
 
-	new_table = acpi_cm_callocate (table_size);
+	new_table = ACPI_MEM_CALLOCATE (table_size);
 	if (!new_table) {
 		return (AE_NO_MEMORY);
 	}
 
 	/* Copy the header and set the length */
 
-	MEMCPY (new_table, table_info->pointer, sizeof (ACPI_TABLE_HEADER));
+	MEMCPY (new_table, table_info->pointer, sizeof (acpi_table_header));
 	new_table->header.length = table_size;
 
 	/* Copy the table pointers */
@@ -126,13 +132,13 @@ acpi_tb_convert_to_xsdt (
 			new_table->table_offset_entry[i] =
 				((RSDT_DESCRIPTOR_REV071 *) table_info->pointer)->table_offset_entry[i];
 #else
-			new_table->table_offset_entry[i] =
-				((RSDT_DESCRIPTOR_REV1 *) table_info->pointer)->table_offset_entry[i];
+			ACPI_STORE_ADDRESS (new_table->table_offset_entry[i],
+				((RSDT_DESCRIPTOR_REV1 *) table_info->pointer)->table_offset_entry[i]);
 #endif
 		}
 		else {
 			new_table->table_offset_entry[i] =
-				((XSDT_DESCRIPTOR *) table_info->pointer)->table_offset_entry[i];
+				((xsdt_descriptor *) table_info->pointer)->table_offset_entry[i];
 		}
 	}
 
@@ -144,8 +150,8 @@ acpi_tb_convert_to_xsdt (
 
 	/* Point the table descriptor to the new table */
 
-	table_info->pointer     = (ACPI_TABLE_HEADER *) new_table;
-	table_info->base_pointer = (ACPI_TABLE_HEADER *) new_table;
+	table_info->pointer     = (acpi_table_header *) new_table;
+	table_info->base_pointer = (acpi_table_header *) new_table;
 	table_info->length      = table_size;
 	table_info->allocation  = ACPI_MEM_ALLOCATED;
 
@@ -171,31 +177,34 @@ acpi_tb_convert_to_xsdt (
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_tb_convert_table_fadt (void)
 {
 
 #ifdef _IA64
-	FADT_DESCRIPTOR_REV071 *FADT71;
+	fadt_descriptor_rev071 *FADT71;
 	u8                      pm1_address_space;
 	u8                      pm2_address_space;
 	u8                      pm_timer_address_space;
 	u8                      gpe0address_space;
 	u8                      gpe1_address_space;
 #else
-	FADT_DESCRIPTOR_REV1   *FADT1;
+	fadt_descriptor_rev1   *FADT1;
 #endif
 
-	FADT_DESCRIPTOR_REV2   *FADT2;
-	ACPI_TABLE_DESC        *table_desc;
+	fadt_descriptor_rev2   *FADT2;
+	acpi_table_desc        *table_desc;
+
+
+	FUNCTION_TRACE ("Tb_convert_table_fadt");
 
 
 	/* Acpi_gbl_FADT is valid */
 	/* Allocate and zero the 2.0 buffer */
 
-	FADT2 = acpi_cm_callocate (sizeof (FADT_DESCRIPTOR_REV2));
+	FADT2 = ACPI_MEM_CALLOCATE (sizeof (fadt_descriptor_rev2));
 	if (FADT2 == NULL) {
-		return (AE_NO_MEMORY);
+		return_ACPI_STATUS (AE_NO_MEMORY);
 	}
 
 
@@ -205,7 +214,7 @@ acpi_tb_convert_table_fadt (void)
 	if (acpi_gbl_FADT->header.revision >= FADT2_REVISION_ID) {
 		/* We have an ACPI 2.0 FADT but we must copy it to our local buffer */
 
-		*FADT2 = *((FADT_DESCRIPTOR_REV2*) acpi_gbl_FADT);
+		*FADT2 = *((fadt_descriptor_rev2*) acpi_gbl_FADT);
 
 	}
 
@@ -219,7 +228,7 @@ acpi_tb_convert_table_fadt (void)
 
 		/* The BIOS stored FADT should agree with Revision 0.71 */
 
-		FADT71 = (FADT_DESCRIPTOR_REV071 *) acpi_gbl_FADT;
+		FADT71 = (fadt_descriptor_rev071 *) acpi_gbl_FADT;
 
 		/* Copy the table header*/
 
@@ -230,7 +239,7 @@ acpi_tb_convert_table_fadt (void)
 		FADT2->sci_int      = FADT71->sci_int;
 		FADT2->acpi_enable  = FADT71->acpi_enable;
 		FADT2->acpi_disable = FADT71->acpi_disable;
-		FADT2->S4_bios_req  = FADT71->S4_bios_req;
+		FADT2->S4bios_req   = FADT71->S4bios_req;
 		FADT2->plvl2_lat    = FADT71->plvl2_lat;
 		FADT2->plvl3_lat    = FADT71->plvl3_lat;
 		FADT2->day_alrm     = FADT71->day_alrm;
@@ -312,11 +321,11 @@ acpi_tb_convert_table_fadt (void)
 		/* No 0.71 equivalence. Leave pre-zeroed. */
 		/* FADT2->Flush_stride = 0; */
 
-		/* Processor’s duty cycle index in processor's P_CNT reg*/
+		/* Processor's duty cycle index in processor's P_CNT reg*/
 		/* No 0.71 equivalence. Leave pre-zeroed. */
 		/* FADT2->Duty_offset = 0; */
 
-		/* Processor’s duty cycle value bit width in P_CNT register.*/
+		/* Processor's duty cycle value bit width in P_CNT register.*/
 		/* No 0.71 equivalence. Leave pre-zeroed. */
 		/* FADT2->Duty_width = 0; */
 
@@ -370,7 +379,7 @@ acpi_tb_convert_table_fadt (void)
 
 		/* The BIOS stored FADT should agree with Revision 1.0 */
 
-		FADT1 = (FADT_DESCRIPTOR_REV1*) acpi_gbl_FADT;
+		FADT1 = (fadt_descriptor_rev1*) acpi_gbl_FADT;
 
 		/*
 		 * Copy the table header and the common part of the tables
@@ -378,14 +387,13 @@ acpi_tb_convert_table_fadt (void)
 		 * entire 1.0 table can be copied first, then expand some
 		 * fields to 64 bits.
 		 */
-
-		MEMCPY (FADT2, FADT1, sizeof (FADT_DESCRIPTOR_REV1));
+		MEMCPY (FADT2, FADT1, sizeof (fadt_descriptor_rev1));
 
 
 		/* Convert table pointers to 64-bit fields */
 
-		FADT2->Xfirmware_ctrl = (UINT64) FADT1->firmware_ctrl;
-		FADT2->Xdsdt         = (UINT64) FADT1->dsdt;
+		ACPI_STORE_ADDRESS (FADT2->Xfirmware_ctrl, FADT1->firmware_ctrl);
+		ACPI_STORE_ADDRESS (FADT2->Xdsdt, FADT1->dsdt);
 
 		/* System Interrupt Model isn't used in ACPI 2.0*/
 		/* FADT2->Reserved1 = 0; */
@@ -448,6 +456,7 @@ acpi_tb_convert_table_fadt (void)
 	 * Global FADT pointer will point to the common V2.0 FADT
 	 */
 	acpi_gbl_FADT = FADT2;
+	acpi_gbl_FADT->header.length = sizeof (FADT_DESCRIPTOR);
 
 
 	/* Free the original table */
@@ -458,18 +467,21 @@ acpi_tb_convert_table_fadt (void)
 
 	/* Install the new table */
 
-	table_desc->pointer = (ACPI_TABLE_HEADER *) acpi_gbl_FADT;
+	table_desc->pointer = (acpi_table_header *) acpi_gbl_FADT;
 	table_desc->base_pointer = acpi_gbl_FADT;
 	table_desc->allocation = ACPI_MEM_ALLOCATED;
-	table_desc->length = sizeof (FADT_DESCRIPTOR_REV2);
+	table_desc->length = sizeof (fadt_descriptor_rev2);
 
-
-	/* Dump the FADT Header */
 
 	/* Dump the entire FADT */
 
+	ACPI_DEBUG_PRINT ((ACPI_DB_TABLES,
+		"Hex dump of common internal FADT, size %d (%X)\n",
+		acpi_gbl_FADT->header.length, acpi_gbl_FADT->header.length));
+	DUMP_BUFFER ((u8 *) (acpi_gbl_FADT), acpi_gbl_FADT->header.length);
 
-	return (AE_OK);
+
+	return_ACPI_STATUS (AE_OK);
 }
 
 
@@ -485,26 +497,29 @@ acpi_tb_convert_table_fadt (void)
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_tb_build_common_facs (
-	ACPI_TABLE_DESC         *table_info)
+	acpi_table_desc         *table_info)
 {
-	ACPI_COMMON_FACS        *common_facs;
+	acpi_common_facs        *common_facs;
 
 #ifdef _IA64
-	FACS_DESCRIPTOR_REV071  *FACS71;
+	facs_descriptor_rev071  *FACS71;
 #else
-	FACS_DESCRIPTOR_REV1    *FACS1;
+	facs_descriptor_rev1    *FACS1;
 #endif
 
-	FACS_DESCRIPTOR_REV2    *FACS2;
+	facs_descriptor_rev2    *FACS2;
+
+
+	FUNCTION_TRACE ("Tb_build_common_facs");
 
 
 	/* Allocate a common FACS */
 
-	common_facs = acpi_cm_callocate (sizeof (ACPI_COMMON_FACS));
+	common_facs = ACPI_MEM_CALLOCATE (sizeof (acpi_common_facs));
 	if (!common_facs) {
-		return (AE_NO_MEMORY);
+		return_ACPI_STATUS (AE_NO_MEMORY);
 	}
 
 
@@ -514,7 +529,7 @@ acpi_tb_build_common_facs (
 #ifdef _IA64
 		/* 0.71 FACS */
 
-		FACS71 = (FACS_DESCRIPTOR_REV071 *) acpi_gbl_FACS;
+		FACS71 = (facs_descriptor_rev071 *) acpi_gbl_FACS;
 
 		common_facs->global_lock = (u32 *) &(FACS71->global_lock);
 		common_facs->firmware_waking_vector = &FACS71->firmware_waking_vector;
@@ -522,10 +537,10 @@ acpi_tb_build_common_facs (
 #else
 		/* ACPI 1.0 FACS */
 
-		FACS1 = (FACS_DESCRIPTOR_REV1 *) acpi_gbl_FACS;
+		FACS1 = (facs_descriptor_rev1 *) acpi_gbl_FACS;
 
 		common_facs->global_lock = &(FACS1->global_lock);
-		common_facs->firmware_waking_vector = (UINT64 *) &FACS1->firmware_waking_vector;
+		common_facs->firmware_waking_vector = (u64 *) &FACS1->firmware_waking_vector;
 		common_facs->vector_width = 32;
 
 #endif
@@ -534,7 +549,7 @@ acpi_tb_build_common_facs (
 	else {
 		/* ACPI 2.0 FACS */
 
-		FACS2 = (FACS_DESCRIPTOR_REV2 *) acpi_gbl_FACS;
+		FACS2 = (facs_descriptor_rev2 *) acpi_gbl_FACS;
 
 		common_facs->global_lock = &(FACS2->global_lock);
 		common_facs->firmware_waking_vector = &FACS2->Xfirmware_waking_vector;
@@ -547,7 +562,7 @@ acpi_tb_build_common_facs (
 
 	acpi_gbl_FACS = common_facs;
 
-	return  (AE_OK);
+	return_ACPI_STATUS  (AE_OK);
 }
 
 

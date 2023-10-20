@@ -5,7 +5,7 @@
  *
  *		Implementation of the Transmission Control Protocol(TCP).
  *
- * Version:	$Id: tcp_minisocks.c,v 1.5 2000/11/28 17:04:10 davem Exp $
+ * Version:	$Id: tcp_minisocks.c,v 1.14 2001/09/21 21:27:34 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -105,7 +105,7 @@ void tcp_timewait_kill(struct tcp_tw_bucket *tw)
  *   lifetime in the internet, which results in wrong conclusion, that
  *   it is set to catch "old duplicate segments" wandering out of their path.
  *   It is not quite correct. This timeout is calculated so that it exceeds
- *   maximal retransmision timeout enough to allow to lose one (or more)
+ *   maximal retransmission timeout enough to allow to lose one (or more)
  *   segments sent by peer and our ACKs. This time may be calculated from RTO.
  * * When TIME-WAIT socket receives RST, it means that another end
  *   finally closed and we are allowed to kill TIME-WAIT too.
@@ -155,7 +155,7 @@ tcp_timewait_state_process(struct tcp_tw_bucket *tw, struct sk_buff *skb,
 		if (th->rst)
 			goto kill;
 
-		if (th->syn && TCP_SKB_CB(skb)->seq != tw->syn_seq)
+		if (th->syn && !before(TCP_SKB_CB(skb)->seq, tw->rcv_nxt))
 			goto kill_with_rst;
 
 		/* Dup ACK? */
@@ -371,13 +371,12 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 		tw->family	= sk->family;
 		tw->reuse	= sk->reuse;
 		tw->rcv_wscale	= tp->rcv_wscale;
-		atomic_set(&tw->refcnt, 0);
+		atomic_set(&tw->refcnt, 1);
 
 		tw->hashent	= sk->hashent;
 		tw->rcv_nxt	= tp->rcv_nxt;
 		tw->snd_nxt	= tp->snd_nxt;
 		tw->rcv_wnd	= tcp_receive_window(tp);
-		tw->syn_seq	= tp->syn_seq;
 		tw->ts_recent	= tp->ts_recent;
 		tw->ts_recent_stamp= tp->ts_recent_stamp;
 		tw->pprev_death = NULL;
@@ -408,6 +407,7 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 		}
 
 		tcp_tw_schedule(tw, timeo);
+		tcp_tw_put(tw);
 	} else {
 		/* Sorry, if we're out of memory, just CLOSE this
 		 * socket up.  We've got bigger problems than
@@ -691,8 +691,6 @@ struct sock *tcp_create_openreq_child(struct sock *sk, struct open_request *req,
 		newtp->snd_una = req->snt_isn + 1;
 		newtp->snd_sml = req->snt_isn + 1;
 
-		tcp_delack_init(newtp);
-
 		tcp_prequeue_init(newtp);
 
 		tcp_init_wl(newtp, req->snt_isn, req->rcv_isn);
@@ -734,8 +732,6 @@ struct sock *tcp_create_openreq_child(struct sock *sk, struct open_request *req,
 
 		newtp->probes_out = 0;
 		newtp->num_sacks = 0;
-		newtp->syn_seq = req->rcv_isn;
-		newtp->fin_seq = req->rcv_isn;
 		newtp->urg_data = 0;
 		newtp->listen_opt = NULL;
 		newtp->accept_queue = newtp->accept_queue_tail = NULL;
@@ -770,7 +766,7 @@ struct sock *tcp_create_openreq_child(struct sock *sk, struct open_request *req,
 			newtp->rcv_wscale = req->rcv_wscale;
 		} else {
 			newtp->snd_wscale = newtp->rcv_wscale = 0;
-			newtp->window_clamp = min(newtp->window_clamp,65535);
+			newtp->window_clamp = min(newtp->window_clamp, 65535U);
 		}
 		newtp->snd_wnd = ntohs(skb->h.th->window) << newtp->snd_wscale;
 		newtp->max_window = newtp->snd_wnd;
@@ -822,7 +818,7 @@ struct sock *tcp_check_req(struct sock *sk,struct sk_buff *skb,
 		}
 	}
 
-	/* Check for pure retransmited SYN. */
+	/* Check for pure retransmitted SYN. */
 	if (TCP_SKB_CB(skb)->seq == req->rcv_isn &&
 	    flg == TCP_FLAG_SYN &&
 	    !paws_reject) {

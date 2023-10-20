@@ -33,7 +33,7 @@ endif
 # machines may also.  Since BFD is incredibly buggy with respect to
 # crossformat linking we rely on the elf2ecoff tool for format conversion.
 #
-CFLAGS		+= -I $(TOPDIR)/include/asm $(CFLAGS)
+CFLAGS		+= -I $(TOPDIR)/include/asm/gcc $(CFLAGS)
 CFLAGS		+= -mabi=64 -G 0 -mno-abicalls -fno-pic -Wa,--trap -pipe
 LINKFLAGS	+= -G 0 -static # -N
 MODFLAGS	+= -mlong-calls
@@ -64,6 +64,11 @@ ifdef CONFIG_CPU_R10000
 CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips4
 endif
 
+ifdef CONFIG_MIPS_FPU_EMULATOR
+CORE_FILES	+= arch/mips64/math-emu/fpu_emulator.o
+SUBDIRS		+= arch/mips64/math-emu
+endif
+
 #
 # Board-dependent options and extra files
 #
@@ -79,7 +84,8 @@ LOADADDR      += 0x88004000
 endif
 
 ifdef CONFIG_SGI_IP27
-LIBS          += arch/mips64/sgi-ip27/ip27.a arch/mips64/arc/arclib.a
+CORE_FILES    += arch/mips64/sgi-ip27/ip27.o
+LIBS          += arch/mips64/arc/arclib.a
 SUBDIRS       += arch/mips64/sgi-ip27 arch/mips64/arc
 #
 # Set LOADADDR to >= 0xc000000000300000 if you want to leave space for
@@ -92,6 +98,17 @@ LOADADDR      += 0xc001c000
 else
 LOADADDR      += 0x8001c000
 endif
+endif
+
+ifdef CONFIG_SGI_IP32
+LIBS		+= arch/mips64/sgi-ip32/ip32-kern.a arch/mips64/arc/arclib.a
+SUBDIRS		+= arch/mips64/sgi-ip32 arch/mips64/arc
+#
+# Set LOADADDR to >= 0x????????? if you want to leave space for symmon,
+# 0x80002000 for production kernels.  Note that the value must be
+# 16kb aligned or the handling of the current variable will break.
+#
+LOADADDR	+= 0x80002000
 endif
 
 #
@@ -153,7 +170,6 @@ zdisk: vmlinux
 
 archclean:
 	@$(MAKEBOOT) clean
-	$(MAKE) -C arch/$(ARCH)/kernel clean
 	$(MAKE) -C arch/$(ARCH)/tools clean
 	rm -f vmlinux.64 arch/$(ARCH)/ld.script.elf32
 

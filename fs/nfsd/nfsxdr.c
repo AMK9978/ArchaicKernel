@@ -26,7 +26,7 @@
  * Mapping of S_IF* types to NFS file types
  */
 static u32	nfs_ftypes[] = {
-	NFNON,  NFFIFO, NFCHR, NFBAD,
+	NFNON,  NFCHR,  NFCHR, NFBAD,
 	NFDIR,  NFBAD,  NFBLK, NFBAD,
 	NFREG,  NFBAD,  NFLNK, NFBAD,
 	NFSOCK, NFBAD,  NFLNK, NFBAD,
@@ -65,12 +65,11 @@ decode_filename(u32 *p, char **namp, int *lenp)
 	char		*name;
 	int		i;
 
-	if ((p = xdr_decode_string(p, namp, lenp, NFS_MAXNAMLEN)) != NULL) {
+	if ((p = xdr_decode_string_inplace(p, namp, lenp, NFS_MAXNAMLEN)) != NULL) {
 		for (i = 0, name = *namp; i < *lenp; i++, name++) {
 			if (*name == '\0' || *name == '/')
 				return NULL;
 		}
-		*name = '\0';
 	}
 
 	return p;
@@ -87,7 +86,6 @@ decode_pathname(u32 *p, char **namp, int *lenp)
 			if (*name == '\0')
 				return NULL;
 		}
-		*name = '\0';
 	}
 
 	return p;
@@ -136,20 +134,24 @@ decode_sattr(u32 *p, struct iattr *iap)
 static inline u32 *
 encode_fattr(struct svc_rqst *rqstp, u32 *p, struct inode *inode)
 {
-	if (!inode)
-		return 0;
-	*p++ = htonl(nfs_ftypes[(inode->i_mode & S_IFMT) >> 12]);
+	int type = (inode->i_mode & S_IFMT);
+
+	*p++ = htonl(nfs_ftypes[type >> 12]);
 	*p++ = htonl((u32) inode->i_mode);
 	*p++ = htonl((u32) inode->i_nlink);
 	*p++ = htonl((u32) nfsd_ruid(rqstp, inode->i_uid));
 	*p++ = htonl((u32) nfsd_rgid(rqstp, inode->i_gid));
-	if (S_ISLNK(inode->i_mode) && inode->i_size > NFS_MAXPATHLEN) {
+
+	if (S_ISLNK(type) && inode->i_size > NFS_MAXPATHLEN) {
 		*p++ = htonl(NFS_MAXPATHLEN);
 	} else {
 		*p++ = htonl((u32) inode->i_size);
 	}
 	*p++ = htonl((u32) inode->i_blksize);
-	*p++ = htonl((u32) inode->i_rdev);
+	if (S_ISCHR(type) || S_ISBLK(type))
+		*p++ = htonl((u32) inode->i_rdev);
+	else
+		*p++ = htonl(0xffffffff);
 	*p++ = htonl((u32) inode->i_blocks);
 	*p++ = htonl((u32) inode->i_dev);
 	*p++ = htonl((u32) inode->i_ino);
@@ -330,8 +332,7 @@ int
 nfssvc_encode_attrstat(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd_attrstat *resp)
 {
-	if (!(p = encode_fattr(rqstp, p, resp->fh.fh_dentry->d_inode)))
-		return 0;
+	p = encode_fattr(rqstp, p, resp->fh.fh_dentry->d_inode);
 	return xdr_ressize_check(rqstp, p);
 }
 
@@ -339,9 +340,8 @@ int
 nfssvc_encode_diropres(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd_diropres *resp)
 {
-	if (!(p = encode_fh(p, &resp->fh))
-	 || !(p = encode_fattr(rqstp, p, resp->fh.fh_dentry->d_inode)))
-		return 0;
+	p = encode_fh(p, &resp->fh);
+	p = encode_fattr(rqstp, p, resp->fh.fh_dentry->d_inode);
 	return xdr_ressize_check(rqstp, p);
 }
 
@@ -358,8 +358,7 @@ int
 nfssvc_encode_readres(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd_readres *resp)
 {
-	if (!(p = encode_fattr(rqstp, p, resp->fh.fh_dentry->d_inode)))
-		return 0;
+	p = encode_fattr(rqstp, p, resp->fh.fh_dentry->d_inode);
 	*p++ = htonl(resp->count);
 	p += XDR_QUADLEN(resp->count);
 
@@ -390,7 +389,7 @@ nfssvc_encode_statfsres(struct svc_rqst *rqstp, u32 *p,
 
 int
 nfssvc_encode_entry(struct readdir_cd *cd, const char *name,
-		    int namlen, off_t offset, ino_t ino, unsigned int d_type)
+		    int namlen, loff_t offset, ino_t ino, unsigned int d_type)
 {
 	u32	*p = cd->buffer;
 	int	buflen, slen;

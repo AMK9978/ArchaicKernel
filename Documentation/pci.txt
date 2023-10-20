@@ -1,6 +1,6 @@
 			 How To Write Linux PCI Drivers
 
-		  by Martin Mares <mj@suse.cz> on 07-Feb-2000
+		   by Martin Mares <mj@ucw.cz> on 07-Feb-2000
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The world of PCI is vast and it's full of (mostly unpleasant) surprises.
@@ -60,10 +60,15 @@ contains:
 	remove		Pointer to a function which gets called whenever a device
 			being handled by this driver is removed (either during
 			deregistration of the driver or when it's manually pulled
-			out of a hot-pluggable slot). This function can be called
-			from interrupt context.
-	suspend,	Power management hooks -- called when the device goes to
-	resume		sleep or is resumed.
+			out of a hot-pluggable slot). This function always gets
+			called from process context, so it can sleep.
+	save_state	Save a device's state before it's suspend.
+	suspend		Put device into low power state.
+	resume		Wake device from low power state.
+	enable_wake	Enable device to generate wake events from a low power state.
+
+			(Please see Documentation/power/pci.txt for descriptions
+			of PCI Power Management and the related functions)
 
 The ID table is an array of struct pci_device_id ending with a all-zero entry.
 Each entry consists of:
@@ -75,7 +80,7 @@ Each entry consists of:
 	class_mask	of the class are honored during the comparison.
 	driver_data	Data private to the driver.
 
-When the driver exits, it just calls pci_deregister_driver() and the PCI layer
+When the driver exits, it just calls pci_unregister_driver() and the PCI layer
 automatically calls the remove hook for all devices handled by the driver.
 
 Please mark the initialization and cleanup functions where appropriate

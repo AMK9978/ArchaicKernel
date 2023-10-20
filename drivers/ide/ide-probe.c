@@ -1,5 +1,5 @@
 /*
- *  linux/drivers/ide/ide-probe.c	Version 1.06	June 9, 2000
+ *  linux/drivers/ide/ide-probe.c	Version 1.07	March 18, 2001
  *
  *  Copyright (C) 1994-1998  Linus Torvalds & authors (see below)
  */
@@ -25,6 +25,8 @@
  *			allowed for secondary flash card to be detectable
  *			 with new flag : drive->ata_flash : 1;
  * Version 1.06		stream line request queue and prep for cascade project.
+ * Version 1.07		max_sect <= 255; slower disks would get behind and
+ * 			then fall over when they get to 256.	Paul G.
  */
 
 #undef REALLY_SLOW_IO		/* most systems can safely undef this */
@@ -40,7 +42,7 @@
 #include <linux/major.h>
 #include <linux/errno.h>
 #include <linux/genhd.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/ide.h>
 #include <linux/spinlock.h>
@@ -134,7 +136,7 @@ static inline void do_identify (ide_drive_t *drive, byte cmd)
 					break;
 				}
 #endif
-				printk ("CDROM");
+				printk ("CD/DVD-ROM");
 				break;
 			case ide_tape:
 				printk ("TAPE");
@@ -614,9 +616,14 @@ static int init_irq (ide_hwif_t *hwif)
 {
 	unsigned long flags;
 	unsigned int index;
-	ide_hwgroup_t *hwgroup;
+	ide_hwgroup_t *hwgroup, *new_hwgroup;
 	ide_hwif_t *match = NULL;
 
+	
+	/* Allocate the buffer and potentially sleep first */
+	
+	new_hwgroup = kmalloc(sizeof(ide_hwgroup_t),GFP_KERNEL);
+	
 	save_flags(flags);	/* all CPUs */
 	cli();			/* all CPUs */
 
@@ -650,8 +657,14 @@ static int init_irq (ide_hwif_t *hwif)
 	 */
 	if (match) {
 		hwgroup = match->hwgroup;
+		if(new_hwgroup)
+			kfree(new_hwgroup);
 	} else {
-		hwgroup = kmalloc(sizeof(ide_hwgroup_t), GFP_KERNEL);
+		hwgroup = new_hwgroup;
+		if (!hwgroup) {
+			restore_flags(flags);	/* all CPUs */
+			return 1;
+		}
 		memset(hwgroup, 0, sizeof(ide_hwgroup_t));
 		hwgroup->hwif     = hwif->next = hwif;
 		hwgroup->rq       = NULL;
@@ -668,9 +681,9 @@ static int init_irq (ide_hwif_t *hwif)
 	 */
 	if (!match || match->irq != hwif->irq) {
 #ifdef CONFIG_IDEPCI_SHARE_IRQ
-		int sa = (hwif->chipset == ide_pci) ? SA_SHIRQ : SA_INTERRUPT;
+		int sa = IDE_CHIPSET_IS_PCI(hwif->chipset) ? SA_SHIRQ : SA_INTERRUPT;
 #else /* !CONFIG_IDEPCI_SHARE_IRQ */
-		int sa = (hwif->chipset == ide_pci) ? SA_INTERRUPT|SA_SHIRQ : SA_INTERRUPT;
+		int sa = IDE_CHIPSET_IS_PCI(hwif->chipset) ? SA_INTERRUPT|SA_SHIRQ : SA_INTERRUPT;
 #endif /* CONFIG_IDEPCI_SHARE_IRQ */
 		if (ide_request_irq(hwif->irq, &ide_intr, sa, hwif->name, hwgroup)) {
 			if (!match)
@@ -734,7 +747,7 @@ static int init_irq (ide_hwif_t *hwif)
  */
 static void init_gendisk (ide_hwif_t *hwif)
 {
-	struct gendisk *gd, **gdp;
+	struct gendisk *gd;
 	unsigned int unit, units, minors;
 	int *bs, *max_sect, *max_ra;
 	extern devfs_handle_t ide_devfs_handle;
@@ -761,9 +774,10 @@ static void init_gendisk (ide_hwif_t *hwif)
 	for (unit = 0; unit < minors; ++unit) {
 		*bs++ = BLOCK_SIZE;
 #ifdef CONFIG_BLK_DEV_PDC4030
-		*max_sect++ = ((hwif->chipset == ide_pdc4030) ? 127 : MAX_SECTORS);
+		*max_sect++ = ((hwif->chipset == ide_pdc4030) ? 127 : 255);
 #else
-		*max_sect++ = MAX_SECTORS;
+		/* IDE can do up to 128K per request. */
+		*max_sect++ = 255;
 #endif
 		*max_ra++ = MAX_READAHEAD;
 	}
@@ -786,8 +800,8 @@ static void init_gendisk (ide_hwif_t *hwif)
 	if (gd->flags)
 		memset (gd->flags, 0, sizeof *gd->flags * units);
 
-	for (gdp = &gendisk_head; *gdp; gdp = &((*gdp)->next)) ;
-	hwif->gd = *gdp = gd;			/* link onto tail of list */
+	hwif->gd = gd;
+	add_gendisk(gd);
 
 	for (unit = 0; unit < units; ++unit) {
 		if (hwif->drives[unit].present) {
@@ -914,4 +928,5 @@ void cleanup_module (void)
 {
 	ide_probe = NULL;
 }
+MODULE_LICENSE("GPL");
 #endif /* MODULE */

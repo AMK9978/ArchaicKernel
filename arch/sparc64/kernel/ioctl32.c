@@ -1,4 +1,4 @@
-/* $Id: ioctl32.c,v 1.104 2001/01/03 09:28:19 anton Exp $
+/* $Id: ioctl32.c,v 1.132 2001/11/07 05:56:19 davem Exp $
  * ioctl32.c: Conversion between 32bit and 64bit native ioctls.
  *
  * Copyright (C) 1997-2000  Jakub Jelinek  (jakub@redhat.com)
@@ -16,7 +16,7 @@
 #include <linux/smp_lock.h>
 #include <linux/ioctl.h>
 #include <linux/if.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/hdreg.h>
 #include <linux/raid/md.h>
 #include <linux/kd.h>
@@ -48,10 +48,9 @@
 #include <linux/blkpg.h>
 #include <linux/blk.h>
 #include <linux/elevator.h>
+#include <linux/rtc.h>
+#include <linux/pci.h>
 #if defined(CONFIG_BLK_DEV_LVM) || defined(CONFIG_BLK_DEV_LVM_MODULE)
-/* Ugh. This header really is not clean */
-#define min min
-#define max max
 #include <linux/lvm.h>
 #endif /* LVM */
 
@@ -67,12 +66,14 @@
 #include <asm/fbio.h>
 #include <asm/kbio.h>
 #include <asm/vuid_event.h>
-#include <asm/rtc.h>
 #include <asm/openpromio.h>
 #include <asm/envctrl.h>
 #include <asm/audioio.h>
 #include <linux/ethtool.h>
+#include <linux/mii.h>
+#include <linux/if_bonding.h>
 #include <asm/display7seg.h>
+#include <asm/watchdog.h>
 #include <asm/module.h>
 #include <linux/soundcard.h>
 
@@ -87,6 +88,14 @@
 #include <linux/atm_tcp.h>
 #include <linux/sonet.h>
 #include <linux/atm_suni.h>
+#include <linux/mtd/mtd.h>
+
+#include <net/bluetooth/bluetooth.h>
+#include <net/bluetooth/hci.h>
+
+#include <linux/usb.h>
+#include <linux/usbdevice_fs.h>
+#include <linux/nbd.h>
 
 /* Use this to get at 32-bit user passed pointers. 
    See sys_sparc32.c for description about these. */
@@ -448,6 +457,7 @@ struct ifconf32 {
         __kernel_caddr_t32  ifcbuf;
 };
 
+#ifdef CONFIG_NET
 static int dev_ifname32(unsigned int fd, unsigned int cmd, unsigned long arg)
 {
 	struct net_device *dev;
@@ -466,6 +476,7 @@ static int dev_ifname32(unsigned int fd, unsigned int cmd, unsigned long arg)
 	err = copy_to_user((struct ifreq32 *)arg, &ifr32, sizeof(struct ifreq32));
 	return (err ? -EFAULT : 0);
 }
+#endif
 
 static inline int dev_ifconf(unsigned int fd, unsigned int cmd, unsigned long arg)
 {
@@ -513,16 +524,142 @@ static inline int dev_ifconf(unsigned int fd, unsigned int cmd, unsigned long ar
 			}
 		}
 		if (!err) {
-			if (i <= ifc32.ifc_len)
+			if (ifc32.ifcbuf == 0) {
+				/* Translate from 64-bit structure multiple to
+				 * a 32-bit one.
+				 */
+				i = ifc.ifc_len;
+				i = ((i / sizeof(struct ifreq)) * sizeof(struct ifreq32));
 				ifc32.ifc_len = i;
-			else
-				ifc32.ifc_len = i - sizeof (struct ifreq32);
+			} else {
+				if (i <= ifc32.ifc_len)
+					ifc32.ifc_len = i;
+				else
+					ifc32.ifc_len = i - sizeof (struct ifreq32);
+			}
 			if (copy_to_user((struct ifconf32 *)arg, &ifc32, sizeof(struct ifconf32)))
 				err = -EFAULT;
 		}
 	}
 	if(ifc.ifc_buf != NULL)
 		kfree (ifc.ifc_buf);
+	return err;
+}
+
+static int ethtool_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
+{
+	struct ifreq ifr;
+	mm_segment_t old_fs;
+	int err, len;
+	u32 data, ethcmd;
+	
+	if (copy_from_user(&ifr, (struct ifreq32 *)arg, sizeof(struct ifreq32)))
+		return -EFAULT;
+	ifr.ifr_data = (__kernel_caddr_t)get_free_page(GFP_KERNEL);
+	if (!ifr.ifr_data)
+		return -EAGAIN;
+
+	__get_user(data, &(((struct ifreq32 *)arg)->ifr_ifru.ifru_data));
+
+	if (get_user(ethcmd, (u32 *)A(data))) {
+		err = -EFAULT;
+		goto out;
+	}
+	switch (ethcmd) {
+	case ETHTOOL_GDRVINFO:	len = sizeof(struct ethtool_drvinfo); break;
+	case ETHTOOL_GMSGLVL:
+	case ETHTOOL_SMSGLVL:
+	case ETHTOOL_GLINK:
+	case ETHTOOL_NWAY_RST:	len = sizeof(struct ethtool_value); break;
+	case ETHTOOL_GREGS: {
+		struct ethtool_regs *regaddr = (struct ethtool_regs *)A(data);
+		/* darned variable size arguments */
+		if (get_user(len, (u32 *)&regaddr->len)) {
+			err = -EFAULT;
+			goto out;
+		}
+		len += sizeof(struct ethtool_regs);
+		break;
+	}
+	case ETHTOOL_GSET:
+	case ETHTOOL_SSET:	len = sizeof(struct ethtool_cmd); break;
+	default:
+		err = -EOPNOTSUPP;
+		goto out;
+	}
+
+	if (copy_from_user(ifr.ifr_data, (char *)A(data), len)) {
+		err = -EFAULT;
+		goto out;
+	}
+
+	old_fs = get_fs();
+	set_fs (KERNEL_DS);
+	err = sys_ioctl (fd, cmd, (unsigned long)&ifr);
+	set_fs (old_fs);
+	if (!err) {
+		u32 data;
+
+		__get_user(data, &(((struct ifreq32 *)arg)->ifr_ifru.ifru_data));
+		len = copy_to_user((char *)A(data), ifr.ifr_data, len);
+		if (len)
+			err = -EFAULT;
+	}
+
+out:
+	free_page((unsigned long)ifr.ifr_data);
+	return err;
+}
+
+static int bond_ioctl(unsigned long fd, unsigned int cmd, unsigned long arg)
+{
+	struct ifreq ifr;
+	mm_segment_t old_fs;
+	int err, len;
+	u32 data;
+	
+	if (copy_from_user(&ifr, (struct ifreq32 *)arg, sizeof(struct ifreq32)))
+		return -EFAULT;
+	ifr.ifr_data = (__kernel_caddr_t)get_free_page(GFP_KERNEL);
+	if (!ifr.ifr_data)
+		return -EAGAIN;
+
+	switch (cmd) {
+	case SIOCBONDENSLAVE:
+	case SIOCBONDRELEASE:
+	case SIOCBONDSETHWADDR:
+	case SIOCBONDCHANGEACTIVE:
+		len = IFNAMSIZ * sizeof(char);
+		break;
+	case SIOCBONDSLAVEINFOQUERY:
+		len = sizeof(struct ifslave);
+		break;
+	case SIOCBONDINFOQUERY:
+		len = sizeof(struct ifbond);
+		break;
+	default:
+		err = -EINVAL;
+		goto out;
+	};
+
+	__get_user(data, &(((struct ifreq32 *)arg)->ifr_ifru.ifru_data));
+	if (copy_from_user(ifr.ifr_data, (char *)A(data), len)) {
+		err = -EFAULT;
+		goto out;
+	}
+
+	old_fs = get_fs();
+	set_fs (KERNEL_DS);
+	err = sys_ioctl (fd, cmd, (unsigned long)&ifr);
+	set_fs (old_fs);
+	if (!err) {
+		len = copy_to_user((char *)A(data), ifr.ifr_data, len);
+		if (len)
+			err = -EFAULT;
+	}
+
+out:
+	free_page((unsigned long)ifr.ifr_data);
 	return err;
 }
 
@@ -547,23 +684,11 @@ static inline int dev_ifsioc(unsigned int fd, unsigned int cmd, unsigned long ar
 	case SIOCGPPPSTATS:
 	case SIOCGPPPCSTATS:
 	case SIOCGPPPVER:
-	case SIOCETHTOOL:
 		if (copy_from_user(&ifr, (struct ifreq32 *)arg, sizeof(struct ifreq32)))
 			return -EFAULT;
 		ifr.ifr_data = (__kernel_caddr_t)get_free_page(GFP_KERNEL);
 		if (!ifr.ifr_data)
 			return -EAGAIN;
-		if(cmd == SIOCETHTOOL) {
-			u32 data;
-
-			__get_user(data, &(((struct ifreq32 *)arg)->ifr_ifru.ifru_data));
-			if(copy_from_user(ifr.ifr_data,
-					  (char *)A(data),
-					  sizeof(struct ethtool_cmd))) {
-				free_page((unsigned long)ifr.ifr_data);
-				return -EFAULT;
-			}
-		}
 		break;
 	default:
 		if (copy_from_user(&ifr, (struct ifreq32 *)arg, sizeof(struct ifreq32)))
@@ -593,14 +718,11 @@ static inline int dev_ifsioc(unsigned int fd, unsigned int cmd, unsigned long ar
 		case SIOCGPPPSTATS:
 		case SIOCGPPPCSTATS:
 		case SIOCGPPPVER:
-		case SIOCETHTOOL:
 		{
 			u32 data;
 			int len;
 
 			__get_user(data, &(((struct ifreq32 *)arg)->ifr_ifru.ifru_data));
-			if(cmd == SIOCETHTOOL)
-				len = sizeof(struct ethtool_cmd);
 			if(cmd == SIOCGPPPVER)
 				len = strlen((char *)ifr.ifr_data) + 1;
 			else if(cmd == SIOCGPPPCSTATS)
@@ -624,6 +746,14 @@ static inline int dev_ifsioc(unsigned int fd, unsigned int cmd, unsigned long ar
 			err |= __put_user(ifr.ifr_map.port, &(((struct ifreq32 *)arg)->ifr_ifru.ifru_map.port));
 			if (err)
 				err = -EFAULT;
+			break;
+		}
+	} else {
+		switch (cmd) {
+		case SIOCGPPPSTATS:
+		case SIOCGPPPCSTATS:
+		case SIOCGPPPVER:
+			free_page((unsigned long)ifr.ifr_data);
 			break;
 		}
 	}
@@ -1304,6 +1434,229 @@ static int fd_ioctl_trans(unsigned int fd, unsigned int cmd, unsigned long arg)
 		err = -EFAULT;
 
 out:	if (karg) kfree(karg);
+	return err;
+}
+
+typedef struct sg_io_hdr32 {
+	s32 interface_id;	/* [i] 'S' for SCSI generic (required) */
+	s32 dxfer_direction;	/* [i] data transfer direction  */
+	u8  cmd_len;		/* [i] SCSI command length ( <= 16 bytes) */
+	u8  mx_sb_len;		/* [i] max length to write to sbp */
+	u16 iovec_count;	/* [i] 0 implies no scatter gather */
+	u32 dxfer_len;		/* [i] byte count of data transfer */
+	u32 dxferp;		/* [i], [*io] points to data transfer memory
+					      or scatter gather list */
+	u32 cmdp;		/* [i], [*i] points to command to perform */
+	u32 sbp;		/* [i], [*o] points to sense_buffer memory */
+	u32 timeout;		/* [i] MAX_UINT->no timeout (unit: millisec) */
+	u32 flags;		/* [i] 0 -> default, see SG_FLAG... */
+	s32 pack_id;		/* [i->o] unused internally (normally) */
+	u32 usr_ptr;		/* [i->o] unused internally */
+	u8  status;		/* [o] scsi status */
+	u8  masked_status;	/* [o] shifted, masked scsi status */
+	u8  msg_status;		/* [o] messaging level data (optional) */
+	u8  sb_len_wr;		/* [o] byte count actually written to sbp */
+	u16 host_status;	/* [o] errors from host adapter */
+	u16 driver_status;	/* [o] errors from software driver */
+	s32 resid;		/* [o] dxfer_len - actual_transferred */
+	u32 duration;		/* [o] time taken by cmd (unit: millisec) */
+	u32 info;		/* [o] auxiliary information */
+} sg_io_hdr32_t;  /* 64 bytes long (on sparc32) */
+
+typedef struct sg_iovec32 {
+	u32 iov_base;
+	u32 iov_len;
+} sg_iovec32_t;
+
+static int alloc_sg_iovec(sg_io_hdr_t *sgp, u32 uptr32)
+{
+	sg_iovec32_t *uiov = (sg_iovec32_t *) A(uptr32);
+	sg_iovec_t *kiov;
+	int i;
+
+	sgp->dxferp = kmalloc(sgp->iovec_count *
+			      sizeof(sg_iovec_t), GFP_KERNEL);
+	if (!sgp->dxferp)
+		return -ENOMEM;
+	memset(sgp->dxferp, 0,
+	       sgp->iovec_count * sizeof(sg_iovec_t));
+
+	kiov = (sg_iovec_t *) sgp->dxferp;
+	for (i = 0; i < sgp->iovec_count; i++) {
+		u32 iov_base32;
+		if (__get_user(iov_base32, &uiov->iov_base) ||
+		    __get_user(kiov->iov_len, &uiov->iov_len))
+			return -EFAULT;
+
+		kiov->iov_base = kmalloc(kiov->iov_len, GFP_KERNEL);
+		if (!kiov->iov_base)
+			return -ENOMEM;
+		if (copy_from_user(kiov->iov_base,
+				   (void *) A(iov_base32),
+				   kiov->iov_len))
+			return -EFAULT;
+
+		uiov++;
+		kiov++;
+	}
+
+	return 0;
+}
+
+static int copy_back_sg_iovec(sg_io_hdr_t *sgp, u32 uptr32)
+{
+	sg_iovec32_t *uiov = (sg_iovec32_t *) A(uptr32);
+	sg_iovec_t *kiov = (sg_iovec_t *) sgp->dxferp;
+	int i;
+
+	for (i = 0; i < sgp->iovec_count; i++) {
+		u32 iov_base32;
+
+		if (__get_user(iov_base32, &uiov->iov_base))
+			return -EFAULT;
+
+		if (copy_to_user((void *) A(iov_base32),
+				 kiov->iov_base,
+				 kiov->iov_len))
+			return -EFAULT;
+
+		uiov++;
+		kiov++;
+	}
+
+	return 0;
+}
+
+static void free_sg_iovec(sg_io_hdr_t *sgp)
+{
+	sg_iovec_t *kiov = (sg_iovec_t *) sgp->dxferp;
+	int i;
+
+	for (i = 0; i < sgp->iovec_count; i++) {
+		if (kiov->iov_base) {
+			kfree(kiov->iov_base);
+			kiov->iov_base = NULL;
+		}
+		kiov++;
+	}
+	kfree(sgp->dxferp);
+	sgp->dxferp = NULL;
+}
+
+static int sg_ioctl_trans(unsigned int fd, unsigned int cmd, unsigned long arg)
+{
+	sg_io_hdr32_t *sg_io32;
+	sg_io_hdr_t sg_io64;
+	u32 dxferp32, cmdp32, sbp32;
+	mm_segment_t old_fs;
+	int err = 0;
+
+	sg_io32 = (sg_io_hdr32_t *)arg;
+	err = __get_user(sg_io64.interface_id, &sg_io32->interface_id);
+	err |= __get_user(sg_io64.dxfer_direction, &sg_io32->dxfer_direction);
+	err |= __get_user(sg_io64.cmd_len, &sg_io32->cmd_len);
+	err |= __get_user(sg_io64.mx_sb_len, &sg_io32->mx_sb_len);
+	err |= __get_user(sg_io64.iovec_count, &sg_io32->iovec_count);
+	err |= __get_user(sg_io64.dxfer_len, &sg_io32->dxfer_len);
+	err |= __get_user(sg_io64.timeout, &sg_io32->timeout);
+	err |= __get_user(sg_io64.flags, &sg_io32->flags);
+	err |= __get_user(sg_io64.pack_id, &sg_io32->pack_id);
+
+	sg_io64.dxferp = NULL;
+	sg_io64.cmdp = NULL;
+	sg_io64.sbp = NULL;
+
+	err |= __get_user(cmdp32, &sg_io32->cmdp);
+	sg_io64.cmdp = kmalloc(sg_io64.cmd_len, GFP_KERNEL);
+	if (!sg_io64.cmdp) {
+		err = -ENOMEM;
+		goto out;
+	}
+	if (copy_from_user(sg_io64.cmdp,
+			   (void *) A(cmdp32),
+			   sg_io64.cmd_len)) {
+		err = -EFAULT;
+		goto out;
+	}
+
+	err |= __get_user(sbp32, &sg_io32->sbp);
+	sg_io64.sbp = kmalloc(64, GFP_KERNEL);
+	if (!sg_io64.sbp) {
+		err = -ENOMEM;
+		goto out;
+	}
+	memset(sg_io64.sbp, 0, 64);
+
+	err |= __get_user(dxferp32, &sg_io32->dxferp);
+	if (sg_io64.iovec_count) {
+		int ret;
+
+		if ((ret = alloc_sg_iovec(&sg_io64, dxferp32))) {
+			err = ret;
+			goto out;
+		}
+	} else {
+		sg_io64.dxferp = kmalloc(sg_io64.dxfer_len, GFP_KERNEL);
+		if (!sg_io64.dxferp) {
+			err = -ENOMEM;
+			goto out;
+		}
+		if (copy_from_user(sg_io64.dxferp,
+				   (void *) A(dxferp32),
+				   sg_io64.dxfer_len)) {
+			err = -EFAULT;
+			goto out;
+		}
+	}
+
+	/* Unused internally, do not even bother to copy it over. */
+	sg_io64.usr_ptr = NULL;
+
+	if (err)
+		return -EFAULT;
+
+	old_fs = get_fs();
+	set_fs (KERNEL_DS);
+	err = sys_ioctl (fd, cmd, (unsigned long) &sg_io64);
+	set_fs (old_fs);
+
+	if (err < 0)
+		goto out;
+
+	err = __put_user(sg_io64.pack_id, &sg_io32->pack_id);
+	err |= __put_user(sg_io64.status, &sg_io32->status);
+	err |= __put_user(sg_io64.masked_status, &sg_io32->masked_status);
+	err |= __put_user(sg_io64.msg_status, &sg_io32->msg_status);
+	err |= __put_user(sg_io64.sb_len_wr, &sg_io32->sb_len_wr);
+	err |= __put_user(sg_io64.host_status, &sg_io32->host_status);
+	err |= __put_user(sg_io64.driver_status, &sg_io32->driver_status);
+	err |= __put_user(sg_io64.resid, &sg_io32->resid);
+	err |= __put_user(sg_io64.duration, &sg_io32->duration);
+	err |= __put_user(sg_io64.info, &sg_io32->info);
+	err |= copy_to_user((void *)A(sbp32), sg_io64.sbp, 64);
+	if (sg_io64.dxferp) {
+		if (sg_io64.iovec_count)
+			err |= copy_back_sg_iovec(&sg_io64, dxferp32);
+		else
+			err |= copy_to_user((void *)A(dxferp32),
+					    sg_io64.dxferp,
+					    sg_io64.dxfer_len);
+	}
+	if (err)
+		err = -EFAULT;
+
+out:
+	if (sg_io64.cmdp)
+		kfree(sg_io64.cmdp);
+	if (sg_io64.sbp)
+		kfree(sg_io64.sbp);
+	if (sg_io64.dxferp) {
+		if (sg_io64.iovec_count) {
+			free_sg_iovec(&sg_io64);
+		} else {
+			kfree(sg_io64.dxferp);
+		}
+	}
 	return err;
 }
 
@@ -2067,6 +2420,7 @@ typedef struct {
 	u32 proc;
 	u32 pv[ABS_MAX_PV + 1];
 	u32 lv[ABS_MAX_LV + 1];
+    	uint8_t vg_uuid[UUID_LEN+1];	/* volume group UUID */
 } vg32_t;
 
 typedef struct {
@@ -2092,6 +2446,7 @@ typedef struct {
 	uint32_t pe_stale;
 	u32 pe;
 	u32 inode;
+	uint8_t pv_uuid[UUID_LEN+1];
 } pv32_t;
 
 typedef struct {
@@ -2102,7 +2457,14 @@ typedef struct {
 typedef struct {
 	u32 lv_index;
 	u32 lv;
+	/* Transfer size because user space and kernel space differ */
+	uint16_t size;
 } lv_status_byindex_req32_t;
+
+typedef struct {
+	dev_t dev;
+	u32   lv;
+} lv_status_bydev_req32_t;
 
 typedef struct {
 	uint8_t lv_name[NAME_LEN];
@@ -2203,11 +2565,12 @@ static lv_t *get_lv_t(u32 p, int *errp)
 		if (l->lv_block_exception) {
 			lbe32 = (lv_block_exception32_t *)A(ptr2);
 			memset(lbe, 0, size);
-			for (i = 0; i < l->lv_remap_end; i++, lbe++, lbe32++) {
-				err |= get_user(lbe->rsector_org, &lbe32->rsector_org);
-				err |= __get_user(lbe->rdev_org, &lbe32->rdev_org);
-				err |= __get_user(lbe->rsector_new, &lbe32->rsector_new);
-				err |= __get_user(lbe->rdev_new, &lbe32->rdev_new);
+                       for (i = 0; i < l->lv_remap_end; i++, lbe++, lbe32++) {
+                               err |= get_user(lbe->rsector_org, &lbe32->rsector_org);
+                               err |= __get_user(lbe->rdev_org, &lbe32->rdev_org);
+                               err |= __get_user(lbe->rsector_new, &lbe32->rsector_new);
+                               err |= __get_user(lbe->rdev_new, &lbe32->rdev_new);
+
 			}
 		}
 	}
@@ -2238,8 +2601,9 @@ static int copy_lv_t(u32 ptr, lv_t *l)
 	err |= __copy_to_user(&ul->lv_remap_ptr, &l->lv_remap_ptr,
 				((long)&ul->dummy[0]) - ((long)&ul->lv_remap_ptr));
 	size = l->lv_allocated_le * sizeof(pe_t);
-	err |= __copy_to_user((void *)A(ptr1), l->lv_current_pe, size);
-	return -EFAULT;
+	if (ptr1)
+		err |= __copy_to_user((void *)A(ptr1), l->lv_current_pe, size);
+	return err ? -EFAULT : 0;
 }
 
 static int do_lvm_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
@@ -2249,7 +2613,8 @@ static int do_lvm_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 		lv_req_t lv_req;
 		le_remap_req_t le_remap;
 		lv_status_byindex_req_t lv_byindex;
-		pv_status_req32_t pv_status;
+	        lv_status_bydev_req_t lv_bydev;
+		pv_status_req_t pv_status;
 	} u;
 	pv_t p;
 	int err;
@@ -2272,6 +2637,11 @@ static int do_lvm_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 			kfree(v);
 			return -EFAULT;
 		}
+		if (copy_from_user(v->vg_uuid, ((vg32_t *)arg)->vg_uuid, UUID_LEN+1)) {
+			kfree(v);
+			return -EFAULT;
+		}
+		    
 		karg = v;
 		memset(v->pv, 0, sizeof(v->pv) + sizeof(v->lv));
 		if (v->pv_max > ABS_MAX_PV || v->lv_max > ABS_MAX_LV)
@@ -2285,11 +2655,18 @@ static int do_lvm_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 					err = -ENOMEM;
 					break;
 				}
-				err = copy_from_user(v->pv[i], (void *)A(ptr), sizeof(pv32_t) - 8);
+				err = copy_from_user(v->pv[i], (void *)A(ptr), sizeof(pv32_t) - 8 - UUID_LEN+1);
 				if (err) {
 					err = -EFAULT;
 					break;
 				}
+				err = copy_from_user(v->pv[i]->pv_uuid, ((pv32_t *)A(ptr))->pv_uuid, UUID_LEN+1);
+				if (err) {
+				        err = -EFAULT;
+					break;
+				}
+
+				
 				v->pv[i]->pe = NULL; v->pv[i]->inode = NULL;
 			}
 		}
@@ -2308,8 +2685,9 @@ static int do_lvm_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 	case LV_EXTEND:
 	case LV_REDUCE:
 	case LV_REMOVE:
+	case LV_RENAME:
 	case LV_STATUS_BYNAME:
-		err = copy_from_user(&u.pv_status, arg, sizeof(u.pv_status.pv_name));
+	        err = copy_from_user(&u.pv_status, arg, sizeof(u.pv_status.pv_name));
 		if (err) return -EFAULT;
 		if (cmd != LV_REMOVE) {
 			err = __get_user(ptr, &((lv_req32_t *)arg)->lv);
@@ -2318,23 +2696,28 @@ static int do_lvm_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 		} else
 			u.lv_req.lv = NULL;
 		break;
+
+
 	case LV_STATUS_BYINDEX:
 		err = get_user(u.lv_byindex.lv_index, &((lv_status_byindex_req32_t *)arg)->lv_index);
 		err |= __get_user(ptr, &((lv_status_byindex_req32_t *)arg)->lv);
 		if (err) return err;
 		u.lv_byindex.lv = get_lv_t(ptr, &err);
 		break;
+	case LV_STATUS_BYDEV:
+	        err = get_user(u.lv_bydev.dev, &((lv_status_bydev_req32_t *)arg)->dev);
+		u.lv_bydev.lv = get_lv_t(ptr, &err);
+		if (err) return err;
+		u.lv_bydev.lv = &p;
+		p.pe = NULL; p.inode = NULL;		
+		break;		
 	case VG_EXTEND:
-		err = copy_from_user(&p, (void *)arg, sizeof(pv32_t) - 8);
+		err = copy_from_user(&p, (void *)arg, sizeof(pv32_t) - 8 - UUID_LEN+1);
+		if (err) return -EFAULT;
+		err = copy_from_user(p.pv_uuid, ((pv32_t *)arg)->pv_uuid, UUID_LEN+1);
 		if (err) return -EFAULT;
 		p.pe = NULL; p.inode = NULL;
 		karg = &p;
-		break;
-	case LE_REMAP:
-		err = copy_from_user(&u.le_remap, (void *)arg, sizeof(le_remap_req32_t));
-		if (err) return -EFAULT;
-		u.le_remap.new_pe = ((le_remap_req32_t *)&u.le_remap)->new_pe;
-		u.le_remap.old_pe = ((le_remap_req32_t *)&u.le_remap)->old_pe;
 		break;
 	case PV_CHANGE:
 	case PV_STATUS:
@@ -2344,7 +2727,7 @@ static int do_lvm_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 		if (err) return err;
 		u.pv_status.pv = &p;
 		if (cmd == PV_CHANGE) {
-			err = copy_from_user(&p, (void *)A(ptr), sizeof(pv32_t) - 8);
+			err = copy_from_user(&p, (void *)A(ptr), sizeof(pv32_t) - 8 - UUID_LEN+1);
 			if (err) return -EFAULT;
 			p.pe = NULL; p.inode = NULL;
 		}
@@ -2359,6 +2742,9 @@ static int do_lvm_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 			if (copy_to_user((void *)arg, v, (long)&((vg32_t *)0)->proc) ||
 			    clear_user(&((vg32_t *)arg)->proc, sizeof(vg32_t) - (long)&((vg32_t *)0)->proc))
 				err = -EFAULT;
+		}
+		if (copy_to_user(((vg32_t *)arg)->vg_uuid, v->vg_uuid, UUID_LEN+1)) {
+		        err = -EFAULT;
 		}
 		kfree(v);
 		break;
@@ -2382,12 +2768,21 @@ static int do_lvm_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 			if (!err) err = copy_lv_t(ptr, u.lv_byindex.lv);
 			put_lv_t(u.lv_byindex.lv);
 		}
+		break;
 	case PV_STATUS:
 		if (!err) {
-			err = copy_to_user((void *)A(ptr), &p, sizeof(pv32_t) - 8);
-			if (err) return -EFAULT;		
+			err = copy_to_user((void *)A(ptr), &p, sizeof(pv32_t) - 8 - UUID_LEN+1);
+			if (err) return -EFAULT;
+			err = copy_to_user(((pv_t *)A(ptr))->pv_uuid, p.pv_uuid, UUID_LEN + 1);
+			if (err) return -EFAULT;
 		}
 		break;
+	case LV_STATUS_BYDEV:
+	        if (!err) {
+			if (!err) err = copy_lv_t(ptr, u.lv_bydev.lv);
+			put_lv_t(u.lv_byindex.lv);
+	        }
+	        break;
 	}
 	return err;
 }
@@ -2983,6 +3378,453 @@ static int ioc_settimeout(unsigned int fd, unsigned int cmd, unsigned long arg)
 	return rw_long(fd, AUTOFS_IOC_SETTIMEOUT, arg);
 }
 
+struct usbdevfs_ctrltransfer32 {
+	__u8 requesttype;
+	__u8 request;
+	__u16 value;
+	__u16 index;
+	__u16 length;
+	__u32 timeout;  /* in milliseconds */
+	__u32 data;
+};
+
+#define USBDEVFS_CONTROL32           _IOWR('U', 0, struct usbdevfs_ctrltransfer32)
+
+static int do_usbdevfs_control(unsigned int fd, unsigned int cmd, unsigned long arg)
+{
+	struct usbdevfs_ctrltransfer kctrl;
+	struct usbdevfs_ctrltransfer32 *uctrl;
+	mm_segment_t old_fs;
+	__u32 udata;
+	void *uptr, *kptr;
+	int err;
+
+	uctrl = (struct usbdevfs_ctrltransfer32 *) arg;
+
+	if (copy_from_user(&kctrl, uctrl,
+			   (sizeof(struct usbdevfs_ctrltransfer) -
+			    sizeof(void *))))
+		return -EFAULT;
+
+	if (get_user(udata, &uctrl->data))
+		return -EFAULT;
+	uptr = (void *) A(udata);
+
+	/* In usbdevice_fs, it limits the control buffer to a page,
+	 * for simplicity so do we.
+	 */
+	if (!uptr || kctrl.length > PAGE_SIZE)
+		return -EINVAL;
+
+	kptr = (void *)__get_free_page(GFP_KERNEL);
+
+	if ((kctrl.requesttype & 0x80) == 0) {
+		err = -EFAULT;
+		if (copy_from_user(kptr, uptr, kctrl.length))
+			goto out;
+	}
+
+	kctrl.data = kptr;
+
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	err = sys_ioctl(fd, USBDEVFS_CONTROL, (unsigned long)&kctrl);
+	set_fs(old_fs);
+
+	if (err >= 0 &&
+	    ((kctrl.requesttype & 0x80) != 0)) {
+		if (copy_to_user(uptr, kptr, kctrl.length))
+			err = -EFAULT;
+	}
+
+out:
+	free_page((unsigned long) kptr);
+	return err;
+}
+
+struct usbdevfs_bulktransfer32 {
+	unsigned int ep;
+	unsigned int len;
+	unsigned int timeout; /* in milliseconds */
+	__u32 data;
+};
+
+#define USBDEVFS_BULK32              _IOWR('U', 2, struct usbdevfs_bulktransfer32)
+
+static int do_usbdevfs_bulk(unsigned int fd, unsigned int cmd, unsigned long arg)
+{
+	struct usbdevfs_bulktransfer kbulk;
+	struct usbdevfs_bulktransfer32 *ubulk;
+	mm_segment_t old_fs;
+	__u32 udata;
+	void *uptr, *kptr;
+	int err;
+
+	ubulk = (struct usbdevfs_bulktransfer32 *) arg;
+
+	if (get_user(kbulk.ep, &ubulk->ep) ||
+	    get_user(kbulk.len, &ubulk->len) ||
+	    get_user(kbulk.timeout, &ubulk->timeout) ||
+	    get_user(udata, &ubulk->data))
+		return -EFAULT;
+
+	uptr = (void *) A(udata);
+
+	/* In usbdevice_fs, it limits the control buffer to a page,
+	 * for simplicity so do we.
+	 */
+	if (!uptr || kbulk.len > PAGE_SIZE)
+		return -EINVAL;
+
+	kptr = (void *) __get_free_page(GFP_KERNEL);
+
+	if ((kbulk.ep & 0x80) == 0) {
+		err = -EFAULT;
+		if (copy_from_user(kptr, uptr, kbulk.len))
+			goto out;
+	}
+
+	kbulk.data = kptr;
+
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	err = sys_ioctl(fd, USBDEVFS_BULK, (unsigned long) &kbulk);
+	set_fs(old_fs);
+
+	if (err >= 0 &&
+	    ((kbulk.ep & 0x80) != 0)) {
+		if (copy_to_user(uptr, kptr, kbulk.len))
+			err = -EFAULT;
+	}
+
+out:
+	free_page((unsigned long) kptr);
+	return err;
+}
+
+/* This needs more work before we can enable it.  Unfortunately
+ * because of the fancy asynchronous way URB status/error is written
+ * back to userspace, we'll need to fiddle with USB devio internals
+ * and/or reimplement entirely the frontend of it ourselves. -DaveM
+ *
+ * The issue is:
+ *
+ *	When an URB is submitted via usbdevicefs it is put onto an
+ *	asynchronous queue.  When the URB completes, it may be reaped
+ *	via another ioctl.  During this reaping the status is written
+ *	back to userspace along with the length of the transfer.
+ *
+ *	We must translate into 64-bit kernel types so we pass in a kernel
+ *	space copy of the usbdevfs_urb structure.  This would mean that we
+ *	must do something to deal with the async entry reaping.  First we
+ *	have to deal somehow with this transitory memory we've allocated.
+ *	This is problematic since there are many call sites from which the
+ *	async entries can be destroyed (and thus when we'd need to free up
+ *	this kernel memory).  One of which is the close() op of usbdevicefs.
+ *	To handle that we'd need to make our own file_operations struct which
+ *	overrides usbdevicefs's release op with our own which runs usbdevicefs's
+ *	real release op then frees up the kernel memory.
+ *
+ *	But how to keep track of these kernel buffers?  We'd need to either
+ *	keep track of them in some table _or_ know about usbdevicefs internals
+ *	(ie. the exact layout of it's file private, which is actually defined
+ *	in linux/usbdevice_fs.h, the layout of the async queues are private to
+ *	devio.c)
+ *
+ * There is one possible other solution I considered, also involving knowledge
+ * of usbdevicefs internals:
+ *
+ *	After an URB is submitted, we "fix up" the address back to the user
+ *	space one.  This would work if the status/length fields written back
+ *	by the async URB completion lines up perfectly in the 32-bit type with
+ *	the 64-bit kernel type.  Unfortunately, it does not because the iso
+ *	frame descriptors, at the end of the struct, can be written back.
+ *
+ * I think we'll just need to simply duplicate the devio URB engine here.
+ */
+#if 0
+struct usbdevfs_urb32 {
+	__u8 type;
+	__u8 endpoint;
+	__s32 status;
+	__u32 flags;
+	__u32 buffer;
+	__s32 buffer_length;
+	__s32 actual_length;
+	__s32 start_frame;
+	__s32 number_of_packets;
+	__s32 error_count;
+	__u32 signr;
+	__u32 usercontext; /* unused */
+	struct usbdevfs_iso_packet_desc iso_frame_desc[0];
+};
+
+#define USBDEVFS_SUBMITURB32       _IOR('U', 10, struct usbdevfs_urb32)
+
+static int get_urb32(struct usbdevfs_urb *kurb,
+		     struct usbdevfs_urb32 *uurb)
+{
+	if (get_user(kurb->type, &uurb->type) ||
+	    __get_user(kurb->endpoint, &uurb->endpoint) ||
+	    __get_user(kurb->status, &uurb->status) ||
+	    __get_user(kurb->flags, &uurb->flags) ||
+	    __get_user(kurb->buffer_length, &uurb->buffer_length) ||
+	    __get_user(kurb->actual_length, &uurb->actual_length) ||
+	    __get_user(kurb->start_frame, &uurb->start_frame) ||
+	    __get_user(kurb->number_of_packets, &uurb->number_of_packets) ||
+	    __get_user(kurb->error_count, &uurb->error_count) ||
+	    __get_user(kurb->signr, &uurb->signr))
+		return -EFAULT;
+
+	kurb->usercontext = 0; /* unused currently */
+
+	return 0;
+}
+
+/* Just put back the values which usbdevfs actually changes. */
+static int put_urb32(struct usbdevfs_urb *kurb,
+		     struct usbdevfs_urb32 *uurb)
+{
+	if (put_user(kurb->status, &uurb->status) ||
+	    __put_user(kurb->actual_length, &uurb->actual_length) ||
+	    __put_user(kurb->error_count, &uurb->error_count))
+		return -EFAULT;
+
+	if (kurb->number_of_packets != 0) {
+		int i;
+
+		for (i = 0; i < kurb->number_of_packets; i++) {
+			if (__put_user(kurb->iso_frame_desc[i].actual_length,
+				       &uurb->iso_frame_desc[i].actual_length) ||
+			    __put_user(kurb->iso_frame_desc[i].status,
+				       &uurb->iso_frame_desc[i].status))
+				return -EFAULT;
+		}
+	}
+
+	return 0;
+}
+
+static int get_urb32_isoframes(struct usbdevfs_urb *kurb,
+			       struct usbdevfs_urb32 *uurb)
+{
+	unsigned int totlen;
+	int i;
+
+	if (kurb->type != USBDEVFS_URB_TYPE_ISO) {
+		kurb->number_of_packets = 0;
+		return 0;
+	}
+
+	if (kurb->number_of_packets < 1 ||
+	    kurb->number_of_packets > 128)
+		return -EINVAL;
+
+	if (copy_from_user(&kurb->iso_frame_desc[0],
+			   &uurb->iso_frame_desc[0],
+			   sizeof(struct usbdevfs_iso_packet_desc) *
+			   kurb->number_of_packets))
+		return -EFAULT;
+
+	totlen = 0;
+	for (i = 0; i < kurb->number_of_packets; i++) {
+		unsigned int this_len;
+
+		this_len = kurb->iso_frame_desc[i].length;
+		if (this_len > 1023)
+			return -EINVAL;
+
+		totlen += this_len;
+	}
+
+	if (totlen > 32768)
+		return -EINVAL;
+
+	kurb->buffer_length = totlen;
+
+	return 0;
+}
+
+static int do_usbdevfs_urb(unsigned int fd, unsigned int cmd, unsigned long arg)
+{
+	struct usbdevfs_urb *kurb;
+	struct usbdevfs_urb32 *uurb;
+	mm_segment_t old_fs;
+	__u32 udata;
+	void *uptr, *kptr;
+	unsigned int buflen;
+	int err;
+
+	uurb = (struct usbdevfs_urb32 *) arg;
+
+	err = -ENOMEM;
+	kurb = kmalloc(sizeof(struct usbdevfs_urb) +
+		       (sizeof(struct usbdevfs_iso_packet_desc) * 128),
+		       GFP_KERNEL);
+	if (!kurb)
+		goto out;
+
+	err = -EFAULT;
+	if (get_urb32(kurb, uurb))
+		goto out;
+
+	err = get_urb32_isoframes(kurb, uurb);
+	if (err)
+		goto out;
+
+	err = -EFAULT;
+	if (__get_user(udata, &uurb->buffer))
+		goto out;
+	uptr = (void *) A(udata);
+
+	err = -ENOMEM;
+	buflen = kurb->buffer_length;
+	kptr = kmalloc(buflen, GFP_KERNEL);
+	if (!kptr)
+		goto out;
+
+	kurb->buffer = kptr;
+
+	err = -EFAULT;
+	if (copy_from_user(kptr, uptr, buflen))
+		goto out_kptr;
+
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	err = sys_ioctl(fd, USBDEVFS_SUBMITURB, (unsigned long) kurb);
+	set_fs(old_fs);
+
+	if (err >= 0) {
+		/* XXX Shit, this doesn't work for async URBs :-( XXX */
+		if (put_urb32(kurb, uurb)) {
+			err = -EFAULT;
+		} else if ((kurb->endpoint & USB_DIR_IN) != 0) {
+			if (copy_to_user(uptr, kptr, buflen))
+				err = -EFAULT;
+		}
+	}
+
+out_kptr:
+	kfree(kptr);
+
+out:
+	kfree(kurb);
+	return err;
+}
+#endif
+
+#define USBDEVFS_REAPURB32         _IOW('U', 12, u32)
+#define USBDEVFS_REAPURBNDELAY32   _IOW('U', 13, u32)
+
+static int do_usbdevfs_reapurb(unsigned int fd, unsigned int cmd, unsigned long arg)
+{
+	mm_segment_t old_fs;
+	void *kptr;
+	int err;
+
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	err = sys_ioctl(fd,
+			(cmd == USBDEVFS_REAPURB32 ?
+			 USBDEVFS_REAPURB :
+			 USBDEVFS_REAPURBNDELAY),
+			(unsigned long) &kptr);
+	set_fs(old_fs);
+
+	if (err >= 0 &&
+	    put_user(((u32)(long)kptr), (u32 *) A(arg)))
+		err = -EFAULT;
+
+	return err;
+}
+
+struct usbdevfs_disconnectsignal32 {
+	unsigned int signr;
+	u32 context;
+};
+
+#define USBDEVFS_DISCSIGNAL32      _IOR('U', 14, struct usbdevfs_disconnectsignal32)
+
+static int do_usbdevfs_discsignal(unsigned int fd, unsigned int cmd, unsigned long arg)
+{
+	struct usbdevfs_disconnectsignal kdis;
+	struct usbdevfs_disconnectsignal32 *udis;
+	mm_segment_t old_fs;
+	u32 uctx;
+	int err;
+
+	udis = (struct usbdevfs_disconnectsignal32 *) arg;
+
+	if (get_user(kdis.signr, &udis->signr) ||
+	    __get_user(uctx, &udis->context))
+		return -EFAULT;
+
+	kdis.context = (void *) (long)uctx;
+
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	err = sys_ioctl(fd, USBDEVFS_DISCSIGNAL, (unsigned long) &kdis);
+	set_fs(old_fs);
+
+	return err;
+}
+
+struct mtd_oob_buf32 {
+	u32 start;
+	u32 length;
+	u32 ptr;	/* unsigned char* */
+};
+
+#define MEMWRITEOOB32 	_IOWR('M',3,struct mtd_oob_buf32)
+#define MEMREADOOB32 	_IOWR('M',4,struct mtd_oob_buf32)
+
+static inline int 
+mtd_rw_oob(unsigned int fd, unsigned int cmd, unsigned long arg)
+{
+	mm_segment_t 			old_fs 	= get_fs();
+	struct mtd_oob_buf32	*uarg 	= (struct mtd_oob_buf32 *)arg;
+	struct mtd_oob_buf		karg;
+	u32 tmp;
+	char *ptr;
+	int ret;
+
+	if (get_user(karg.start, &uarg->start) 		||
+	    get_user(karg.length, &uarg->length)	||
+	    get_user(tmp, &uarg->ptr))
+		return -EFAULT;
+
+	ptr = (char *)A(tmp);
+	if (0 >= karg.length) 
+		return -EINVAL;
+
+	karg.ptr = kmalloc(karg.length, GFP_KERNEL);
+	if (NULL == karg.ptr)
+		return -ENOMEM;
+
+	if (copy_from_user(karg.ptr, ptr, karg.length)) {
+		kfree(karg.ptr);
+		return -EFAULT;
+	}
+
+	set_fs(KERNEL_DS);
+	if (MEMREADOOB32 == cmd) 
+		ret = sys_ioctl(fd, MEMREADOOB, (unsigned long)&karg);
+	else if (MEMWRITEOOB32 == cmd)
+		ret = sys_ioctl(fd, MEMWRITEOOB, (unsigned long)&karg);
+	else
+		ret = -EINVAL;
+	set_fs(old_fs);
+
+	if (0 == ret && cmd == MEMREADOOB32) {
+		ret = copy_to_user(ptr, karg.ptr, karg.length);
+		ret |= put_user(karg.start, &uarg->start);
+		ret |= put_user(karg.length, &uarg->length);
+	}
+
+	kfree(karg.ptr);
+	return ((0 == ret) ? 0 : -EFAULT);
+}	
+
 struct ioctl_trans {
 	unsigned int cmd;
 	unsigned int handler;
@@ -3106,6 +3948,9 @@ COMPATIBLE_IOCTL(BLKRASET)
 COMPATIBLE_IOCTL(BLKFRASET)
 COMPATIBLE_IOCTL(BLKSECTSET)
 COMPATIBLE_IOCTL(BLKSSZGET)
+COMPATIBLE_IOCTL(BLKBSZGET)
+COMPATIBLE_IOCTL(BLKBSZSET)
+COMPATIBLE_IOCTL(BLKGETSIZE64)
 
 /* RAID */
 COMPATIBLE_IOCTL(RAID_VERSION)
@@ -3148,6 +3993,7 @@ COMPATIBLE_IOCTL(KDSKBENT)
 COMPATIBLE_IOCTL(KDGKBSENT)
 COMPATIBLE_IOCTL(KDSKBSENT)
 COMPATIBLE_IOCTL(KDGKBDIACR)
+COMPATIBLE_IOCTL(KDKBDREP)
 COMPATIBLE_IOCTL(KDSKBDIACR)
 COMPATIBLE_IOCTL(KDGKBLED)
 COMPATIBLE_IOCTL(KDSKBLED)
@@ -3221,8 +4067,22 @@ COMPATIBLE_IOCTL(_IOR('v' , BASE_VIDIOCPRIVATE+5, int))
 COMPATIBLE_IOCTL(_IOR('v' , BASE_VIDIOCPRIVATE+6, int))
 COMPATIBLE_IOCTL(_IOR('v' , BASE_VIDIOCPRIVATE+7, int))
 /* Little p (/dev/rtc, /dev/envctrl, etc.) */
-COMPATIBLE_IOCTL(RTCGET)
-COMPATIBLE_IOCTL(RTCSET)
+COMPATIBLE_IOCTL(_IOR('p', 20, int[7])) /* RTCGET */
+COMPATIBLE_IOCTL(_IOW('p', 21, int[7])) /* RTCSET */
+COMPATIBLE_IOCTL(RTC_AIE_ON)
+COMPATIBLE_IOCTL(RTC_AIE_OFF)
+COMPATIBLE_IOCTL(RTC_UIE_ON)
+COMPATIBLE_IOCTL(RTC_UIE_OFF)
+COMPATIBLE_IOCTL(RTC_PIE_ON)
+COMPATIBLE_IOCTL(RTC_PIE_OFF)
+COMPATIBLE_IOCTL(RTC_WIE_ON)
+COMPATIBLE_IOCTL(RTC_WIE_OFF)
+COMPATIBLE_IOCTL(RTC_ALM_SET)
+COMPATIBLE_IOCTL(RTC_ALM_READ)
+COMPATIBLE_IOCTL(RTC_RD_TIME)
+COMPATIBLE_IOCTL(RTC_SET_TIME)
+COMPATIBLE_IOCTL(RTC_WKALM_SET)
+COMPATIBLE_IOCTL(RTC_WKALM_RD)
 COMPATIBLE_IOCTL(ENVCTRL_RD_WARNING_TEMPERATURE)
 COMPATIBLE_IOCTL(ENVCTRL_RD_SHUTDOWN_TEMPERATURE)
 COMPATIBLE_IOCTL(ENVCTRL_RD_CPU_TEMPERATURE)
@@ -3270,16 +4130,14 @@ COMPATIBLE_IOCTL(SIOCGIFBR)
 COMPATIBLE_IOCTL(SIOCSARP)
 COMPATIBLE_IOCTL(SIOCGARP)
 COMPATIBLE_IOCTL(SIOCDARP)
-#if 0 /* XXX No longer exist in new routing code. XXX */
-COMPATIBLE_IOCTL(OLD_SIOCSARP)
-COMPATIBLE_IOCTL(OLD_SIOCGARP)
-COMPATIBLE_IOCTL(OLD_SIOCDARP)
-#endif
 COMPATIBLE_IOCTL(SIOCSRARP)
 COMPATIBLE_IOCTL(SIOCGRARP)
 COMPATIBLE_IOCTL(SIOCDRARP)
 COMPATIBLE_IOCTL(SIOCADDDLCI)
 COMPATIBLE_IOCTL(SIOCDELDLCI)
+COMPATIBLE_IOCTL(SIOCGMIIPHY)
+COMPATIBLE_IOCTL(SIOCGMIIREG)
+COMPATIBLE_IOCTL(SIOCSMIIREG)
 /* SG stuff */
 COMPATIBLE_IOCTL(SG_SET_TIMEOUT)
 COMPATIBLE_IOCTL(SG_GET_TIMEOUT)
@@ -3301,7 +4159,6 @@ COMPATIBLE_IOCTL(SG_SET_COMMAND_Q)
 COMPATIBLE_IOCTL(SG_GET_VERSION_NUM)
 COMPATIBLE_IOCTL(SG_NEXT_CMD_LEN)
 COMPATIBLE_IOCTL(SG_SCSI_RESET)
-COMPATIBLE_IOCTL(SG_IO)
 COMPATIBLE_IOCTL(SG_GET_REQUEST_TABLE)
 COMPATIBLE_IOCTL(SG_SET_KEEP_ORPHAN)
 COMPATIBLE_IOCTL(SG_GET_KEEP_ORPHAN)
@@ -3330,6 +4187,7 @@ COMPATIBLE_IOCTL(PPPIOCSMRRU)
 COMPATIBLE_IOCTL(PPPIOCCONNECT)
 COMPATIBLE_IOCTL(PPPIOCDISCONN)
 COMPATIBLE_IOCTL(PPPIOCATTCHAN)
+COMPATIBLE_IOCTL(PPPIOCGCHAN)
 /* PPPOX */
 COMPATIBLE_IOCTL(PPPOEIOCSFWD);
 COMPATIBLE_IOCTL(PPPOEIOCDFWD);
@@ -3364,6 +4222,10 @@ COMPATIBLE_IOCTL(CDROM_CHANGER_NSLOTS)
 COMPATIBLE_IOCTL(CDROM_LOCKDOOR)
 COMPATIBLE_IOCTL(CDROM_DEBUG)
 COMPATIBLE_IOCTL(CDROM_GET_CAPABILITY)
+/* DVD ioctls */
+COMPATIBLE_IOCTL(DVD_READ_STRUCT)
+COMPATIBLE_IOCTL(DVD_WRITE_STRUCT)
+COMPATIBLE_IOCTL(DVD_AUTH)
 /* Big L */
 COMPATIBLE_IOCTL(LOOP_SET_FD)
 COMPATIBLE_IOCTL(LOOP_CLR_FD)
@@ -3564,6 +4426,7 @@ COMPATIBLE_IOCTL(VG_SET_EXTENDABLE)
 COMPATIBLE_IOCTL(VG_STATUS_GET_COUNT)
 COMPATIBLE_IOCTL(VG_STATUS_GET_NAMELIST)
 COMPATIBLE_IOCTL(VG_REMOVE)
+COMPATIBLE_IOCTL(VG_RENAME)
 COMPATIBLE_IOCTL(VG_REDUCE)
 COMPATIBLE_IOCTL(PE_LOCK_UNLOCK)
 COMPATIBLE_IOCTL(PV_FLUSH)
@@ -3575,6 +4438,9 @@ COMPATIBLE_IOCTL(LVM_RESET)
 COMPATIBLE_IOCTL(LV_SET_ACCESS)
 COMPATIBLE_IOCTL(LV_SET_STATUS)
 COMPATIBLE_IOCTL(LV_SET_ALLOCATION)
+COMPATIBLE_IOCTL(LE_REMAP)
+COMPATIBLE_IOCTL(LV_BMAP)
+COMPATIBLE_IOCTL(LV_SNAPSHOT_USE_RATE)
 #endif /* LVM */
 #if defined(CONFIG_DRM) || defined(CONFIG_DRM_MODULE)
 COMPATIBLE_IOCTL(DRM_IOCTL_GET_MAGIC)
@@ -3600,8 +4466,69 @@ COMPATIBLE_IOCTL(DRM_IOCTL_FINISH)
 /* elevator */
 COMPATIBLE_IOCTL(BLKELVGET)
 COMPATIBLE_IOCTL(BLKELVSET)
+/* Big W */
+/* WIOC_GETSUPPORT not yet implemented -E */
+COMPATIBLE_IOCTL(WDIOC_GETSTATUS)
+COMPATIBLE_IOCTL(WDIOC_GETBOOTSTATUS)
+COMPATIBLE_IOCTL(WDIOC_GETTEMP)
+COMPATIBLE_IOCTL(WDIOC_SETOPTIONS)
+COMPATIBLE_IOCTL(WDIOC_KEEPALIVE)
+COMPATIBLE_IOCTL(WIOCSTART)
+COMPATIBLE_IOCTL(WIOCSTOP)
+COMPATIBLE_IOCTL(WIOCGSTAT)
+/* Bluetooth ioctls */
+COMPATIBLE_IOCTL(HCIDEVUP)
+COMPATIBLE_IOCTL(HCIDEVDOWN)
+COMPATIBLE_IOCTL(HCIDEVRESET)
+COMPATIBLE_IOCTL(HCIRESETSTAT)
+COMPATIBLE_IOCTL(HCIGETINFO)
+COMPATIBLE_IOCTL(HCIGETDEVLIST)
+COMPATIBLE_IOCTL(HCISETRAW)
+COMPATIBLE_IOCTL(HCISETSCAN)
+COMPATIBLE_IOCTL(HCISETAUTH)
+COMPATIBLE_IOCTL(HCIINQUIRY)
+/* Misc. */
+COMPATIBLE_IOCTL(0x41545900)		/* ATYIO_CLKR */
+COMPATIBLE_IOCTL(0x41545901)		/* ATYIO_CLKW */
+COMPATIBLE_IOCTL(PCIIOC_CONTROLLER)
+COMPATIBLE_IOCTL(PCIIOC_MMAP_IS_IO)
+COMPATIBLE_IOCTL(PCIIOC_MMAP_IS_MEM)
+COMPATIBLE_IOCTL(PCIIOC_WRITE_COMBINE)
+/* USB */
+COMPATIBLE_IOCTL(USBDEVFS_RESETEP)
+COMPATIBLE_IOCTL(USBDEVFS_SETINTERFACE)
+COMPATIBLE_IOCTL(USBDEVFS_SETCONFIGURATION)
+COMPATIBLE_IOCTL(USBDEVFS_GETDRIVER)
+COMPATIBLE_IOCTL(USBDEVFS_DISCARDURB)
+COMPATIBLE_IOCTL(USBDEVFS_CLAIMINTERFACE)
+COMPATIBLE_IOCTL(USBDEVFS_RELEASEINTERFACE)
+COMPATIBLE_IOCTL(USBDEVFS_CONNECTINFO)
+COMPATIBLE_IOCTL(USBDEVFS_HUB_PORTINFO)
+COMPATIBLE_IOCTL(USBDEVFS_RESET)
+COMPATIBLE_IOCTL(USBDEVFS_CLEAR_HALT)
+/* MTD */
+COMPATIBLE_IOCTL(MEMGETINFO)
+COMPATIBLE_IOCTL(MEMERASE)
+COMPATIBLE_IOCTL(MEMLOCK)
+COMPATIBLE_IOCTL(MEMUNLOCK)
+COMPATIBLE_IOCTL(MEMGETREGIONCOUNT)
+COMPATIBLE_IOCTL(MEMGETREGIONINFO)
+/* NBD */
+COMPATIBLE_IOCTL(NBD_SET_SOCK)
+COMPATIBLE_IOCTL(NBD_SET_BLKSIZE)
+COMPATIBLE_IOCTL(NBD_SET_SIZE)
+COMPATIBLE_IOCTL(NBD_DO_IT)
+COMPATIBLE_IOCTL(NBD_CLEAR_SOCK)
+COMPATIBLE_IOCTL(NBD_CLEAR_QUE)
+COMPATIBLE_IOCTL(NBD_PRINT_DEBUG)
+COMPATIBLE_IOCTL(NBD_SET_SIZE_BLOCKS)
+COMPATIBLE_IOCTL(NBD_DISCONNECT)
 /* And these ioctls need translation */
+HANDLE_IOCTL(MEMREADOOB32, mtd_rw_oob)
+HANDLE_IOCTL(MEMWRITEOOB32, mtd_rw_oob)
+#ifdef CONFIG_NET
 HANDLE_IOCTL(SIOCGIFNAME, dev_ifname32)
+#endif
 HANDLE_IOCTL(SIOCGIFCONF, dev_ifconf)
 HANDLE_IOCTL(SIOCGIFFLAGS, dev_ifsioc)
 HANDLE_IOCTL(SIOCSIFFLAGS, dev_ifsioc)
@@ -3633,7 +4560,13 @@ HANDLE_IOCTL(SIOCGPPPCSTATS, dev_ifsioc)
 HANDLE_IOCTL(SIOCGPPPVER, dev_ifsioc)
 HANDLE_IOCTL(SIOCGIFTXQLEN, dev_ifsioc)
 HANDLE_IOCTL(SIOCSIFTXQLEN, dev_ifsioc)
-HANDLE_IOCTL(SIOCETHTOOL, dev_ifsioc)
+HANDLE_IOCTL(SIOCETHTOOL, ethtool_ioctl)
+HANDLE_IOCTL(SIOCBONDENSLAVE, bond_ioctl)
+HANDLE_IOCTL(SIOCBONDRELEASE, bond_ioctl)
+HANDLE_IOCTL(SIOCBONDSETHWADDR, bond_ioctl)
+HANDLE_IOCTL(SIOCBONDSLAVEINFOQUERY, bond_ioctl)
+HANDLE_IOCTL(SIOCBONDINFOQUERY, bond_ioctl)
+HANDLE_IOCTL(SIOCBONDCHANGEACTIVE, bond_ioctl)
 HANDLE_IOCTL(SIOCADDRT, routing_ioctl)
 HANDLE_IOCTL(SIOCDELRT, routing_ioctl)
 /* Note SIOCRTMSG is no longer, so this is safe and * the user would have seen just an -EINVAL anyways. */
@@ -3668,6 +4601,7 @@ HANDLE_IOCTL(FDGETDRVSTAT32, fd_ioctl_trans)
 HANDLE_IOCTL(FDPOLLDRVSTAT32, fd_ioctl_trans)
 HANDLE_IOCTL(FDGETFDCSTAT32, fd_ioctl_trans)
 HANDLE_IOCTL(FDWERRORGET32, fd_ioctl_trans)
+HANDLE_IOCTL(SG_IO,sg_ioctl_trans)
 HANDLE_IOCTL(PPPIOCGIDLE32, ppp_ioctl_trans)
 HANDLE_IOCTL(PPPIOCSCOMPRESS32, ppp_ioctl_trans)
 HANDLE_IOCTL(MTIOCGET32, mt_ioctl_trans)
@@ -3738,9 +4672,9 @@ HANDLE_IOCTL(LV_CREATE, do_lvm_ioctl)
 HANDLE_IOCTL(LV_REMOVE, do_lvm_ioctl)
 HANDLE_IOCTL(LV_EXTEND, do_lvm_ioctl)
 HANDLE_IOCTL(LV_REDUCE, do_lvm_ioctl)
+HANDLE_IOCTL(LV_RENAME, do_lvm_ioctl)
 HANDLE_IOCTL(LV_STATUS_BYNAME, do_lvm_ioctl)
 HANDLE_IOCTL(LV_STATUS_BYINDEX, do_lvm_ioctl)
-HANDLE_IOCTL(LE_REMAP, do_lvm_ioctl)
 HANDLE_IOCTL(PV_CHANGE, do_lvm_ioctl)
 HANDLE_IOCTL(PV_STATUS, do_lvm_ioctl)
 #endif /* LVM */
@@ -3755,11 +4689,23 @@ HANDLE_IOCTL(DRM32_IOCTL_MAP_BUFS, drm32_map_bufs);
 HANDLE_IOCTL(DRM32_IOCTL_DMA, drm32_dma);
 HANDLE_IOCTL(DRM32_IOCTL_RES_CTX, drm32_res_ctx);
 #endif /* DRM */
+#if 0
+HANDLE_IOCTL(RTC32_IRQP_READ, do_rtc_ioctl)
+HANDLE_IOCTL(RTC32_IRQP_SET, do_rtc_ioctl)
+HANDLE_IOCTL(RTC32_EPOCH_READ, do_rtc_ioctl)
+HANDLE_IOCTL(RTC32_EPOCH_SET, do_rtc_ioctl)
+#endif
+HANDLE_IOCTL(USBDEVFS_CONTROL32, do_usbdevfs_control)
+HANDLE_IOCTL(USBDEVFS_BULK32, do_usbdevfs_bulk)
+/*HANDLE_IOCTL(USBDEVFS_SUBMITURB32, do_usbdevfs_urb)*/
+HANDLE_IOCTL(USBDEVFS_REAPURB32, do_usbdevfs_reapurb)
+HANDLE_IOCTL(USBDEVFS_REAPURBNDELAY32, do_usbdevfs_reapurb)
+HANDLE_IOCTL(USBDEVFS_DISCSIGNAL32, do_usbdevfs_discsignal)
 IOCTL_TABLE_END
 
 unsigned int ioctl32_hash_table[1024];
 
-extern inline unsigned long ioctl32_hash(unsigned long cmd)
+static inline unsigned long ioctl32_hash(unsigned long cmd)
 {
 	return ((cmd >> 6) ^ (cmd >> 4) ^ cmd) & 0x3ff;
 }
@@ -3871,8 +4817,9 @@ asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 	} else {
 		static int count = 0;
 		if (++count <= 20)
-			printk("sys32_ioctl: Unknown cmd fd(%d) "
+			printk("sys32_ioctl(%s:%d): Unknown cmd fd(%d) "
 			       "cmd(%08x) arg(%08x)\n",
+			       current->comm, current->pid,
 			       (int)fd, (unsigned int)cmd, (unsigned int)arg);
 		error = -EINVAL;
 	}

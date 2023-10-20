@@ -14,16 +14,11 @@ typedef struct elevator_s elevator_t;
 
 /*
  * Ok, this is an expanded form so that we can use the same
- * request for paging requests when that is implemented. In
- * paging, 'bh' is NULL, and the semaphore is used to wait
- * for read/write completion.
+ * request for paging requests.
  */
 struct request {
 	struct list_head queue;
 	int elevator_sequence;
-	struct list_head table;
-
-	struct list_head *free_list;
 
 	volatile int rq_status;	/* should split this into a few status bits */
 #define RQ_INACTIVE		(-1)
@@ -43,11 +38,10 @@ struct request {
 	unsigned long current_nr_sectors;
 	void * special;
 	char * buffer;
-	struct semaphore * sem;
+	struct completion * waiting;
 	struct buffer_head * bh;
 	struct buffer_head * bhtail;
 	request_queue_t *q;
-	elevator_t *e;
 };
 
 #include <linux/elevator.h>
@@ -67,16 +61,22 @@ typedef void (plug_device_fn) (request_queue_t *q, kdev_t device);
 typedef void (unplug_device_fn) (void *q);
 
 /*
- * Default nr free requests per queue
+ * Default nr free requests per queue, ll_rw_blk will scale it down
+ * according to available RAM at init time
  */
-#define QUEUE_NR_REQUESTS	256
+#define QUEUE_NR_REQUESTS	8192
+
+struct request_list {
+	unsigned int count;
+	struct list_head free;
+};
 
 struct request_queue
 {
 	/*
 	 * the queue request freelist, one for reads and one for writes
 	 */
-	struct list_head	request_freelist[2];
+	struct request_list	rq[2];
 
 	/*
 	 * Together with queue_head for cacheline sharing
@@ -116,7 +116,7 @@ struct request_queue
 	 * Is meant to protect the queue in the future instead of
 	 * io_request_lock
 	 */
-	spinlock_t		request_lock;
+	spinlock_t		queue_lock;
 
 	/*
 	 * Tasks wait here for free request
@@ -151,7 +151,7 @@ extern struct blk_dev_struct blk_dev[MAX_BLKDEV];
 extern void grok_partitions(struct gendisk *dev, int drive, unsigned minors, long size);
 extern void register_disk(struct gendisk *dev, kdev_t first, unsigned minors, struct block_device_operations *ops, long size);
 extern void generic_make_request(int rw, struct buffer_head * bh);
-extern request_queue_t *blk_get_queue(kdev_t dev);
+extern inline request_queue_t *blk_get_queue(kdev_t dev);
 extern void blkdev_release_request(struct request *);
 
 /*
@@ -160,8 +160,8 @@ extern void blkdev_release_request(struct request *);
 extern void blk_init_queue(request_queue_t *, request_fn_proc *);
 extern void blk_cleanup_queue(request_queue_t *);
 extern void blk_queue_headactive(request_queue_t *, int);
-extern void blk_queue_pluggable(request_queue_t *, plug_device_fn *);
 extern void blk_queue_make_request(request_queue_t *, make_request_fn *);
+extern void generic_unplug_device(void *);
 
 extern int * blk_size[MAX_BLKDEV];
 
@@ -175,9 +175,8 @@ extern int * max_sectors[MAX_BLKDEV];
 
 extern int * max_segments[MAX_BLKDEV];
 
-#define MAX_SECTORS 254
-
-#define MAX_SEGMENTS MAX_SECTORS
+#define MAX_SEGMENTS 128
+#define MAX_SECTORS 255
 
 #define PageAlignSize(size) (((size) + PAGE_SIZE -1) & PAGE_MASK)
 
@@ -196,12 +195,41 @@ extern void drive_stat_acct (kdev_t dev, int rw,
 
 static inline int get_hardsect_size(kdev_t dev)
 {
-	extern int *hardsect_size[];
-	if (hardsect_size[MAJOR(dev)] != NULL)
-		return hardsect_size[MAJOR(dev)][MINOR(dev)];
-	else
-		return 512;
+	int retval = 512;
+	int major = MAJOR(dev);
+
+	if (hardsect_size[major]) {
+		int minor = MINOR(dev);
+		if (hardsect_size[major][minor])
+			retval = hardsect_size[major][minor];
+	}
+	return retval;
 }
 
+#define blk_finished_io(nsects)	do { } while (0)
+#define blk_started_io(nsects)	do { } while (0)
+
+static inline unsigned int blksize_bits(unsigned int size)
+{
+	unsigned int bits = 8;
+	do {
+		bits++;
+		size >>= 1;
+	} while (size > 256);
+	return bits;
+}
+
+static inline unsigned int block_size(kdev_t dev)
+{
+	int retval = BLOCK_SIZE;
+	int major = MAJOR(dev);
+
+	if (blksize_size[major]) {
+		int minor = MINOR(dev);
+		if (blksize_size[major][minor])
+			retval = blksize_size[major][minor];
+	}
+	return retval;
+}
 
 #endif

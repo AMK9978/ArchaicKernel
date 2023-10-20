@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.ppc8xx_pic.c 1.10 05/17/01 18:14:21 cort
+ */
 #include <linux/config.h>
 #include <linux/stddef.h>
 #include <linux/init.h>
@@ -67,8 +70,7 @@ struct hw_interrupt_type ppc8xx_pic = {
 #if 0
 void
 m8xx_do_IRQ(struct pt_regs *regs,
-	   int            cpu,
-           int            isfake)
+	   int            cpu)
 {
 	int irq;
         unsigned long bits = 0;
@@ -153,6 +155,22 @@ int request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *)
 	irq += i8259_pic.irq_offset;
 	return (request_8xxirq(irq, handler, irqflags, devname, dev_id));
 #else
-	panic("request_irq");
+	/*
+	 * Handle other "well-known" interrupts, but panic on unknown ones.
+	 */
+	switch (irq) {
+#ifdef	IDE0_INTERRUPT
+		case IDE0_INTERRUPT:	/* IDE0 */
+			return (request_8xxirq(irq, handler, irqflags, devname,
+						dev_id));
+#endif
+#ifdef	IDE1_INTERRUPT
+		case IDE1_INTERRUPT:	/* IDE1 */
+			return (request_8xxirq(irq, handler, irqflags, devname,
+						dev_id));
+#endif
+	default:			/* unknown IRQ -> panic */
+		panic("request_irq");
+	}
 #endif
 }

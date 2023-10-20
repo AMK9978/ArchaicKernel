@@ -1,8 +1,8 @@
 /*
  * Utility to generate asm-ia64/offsets.h.
  *
- * Copyright (C) 1999-2000 Hewlett-Packard Co
- * Copyright (C) 1999-2000 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1999-2001 Hewlett-Packard Co
+ * Copyright (C) 1999-2001 David Mosberger-Tang <davidm@hpl.hp.com>
  *
  * Note that this file has dual use: when building the kernel
  * natively, the file is translated into a binary and executed.  When
@@ -20,6 +20,8 @@
 #include <asm-ia64/ptrace.h>
 #include <asm-ia64/siginfo.h>
 #include <asm-ia64/sigcontext.h>
+
+#include "../kernel/sigframe.h"
 
 #ifdef offsetof
 # undef offsetof
@@ -45,9 +47,9 @@ tab[] =
     { "IA64_PT_REGS_SIZE",		sizeof (struct pt_regs) },
     { "IA64_SWITCH_STACK_SIZE",		sizeof (struct switch_stack) },
     { "IA64_SIGINFO_SIZE",		sizeof (struct siginfo) },
-#ifdef CONFIG_IA64_NEW_UNWIND
+    { "IA64_CPU_SIZE",			sizeof (struct cpuinfo_ia64) },
+    { "SIGFRAME_SIZE",			sizeof (struct sigframe) },
     { "UNW_FRAME_INFO_SIZE",		sizeof (struct unw_frame_info) },
-#endif
     { "", 0 },			/* spacer */
     { "IA64_TASK_PTRACE_OFFSET",	offsetof (struct task_struct, ptrace) },
     { "IA64_TASK_SIGPENDING_OFFSET",	offsetof (struct task_struct, sigpending) },
@@ -55,8 +57,8 @@ tab[] =
     { "IA64_TASK_PROCESSOR_OFFSET",	offsetof (struct task_struct, processor) },
     { "IA64_TASK_THREAD_OFFSET",	offsetof (struct task_struct, thread) },
     { "IA64_TASK_THREAD_KSP_OFFSET",	offsetof (struct task_struct, thread.ksp) },
-#ifdef CONFIG_IA32_SUPPORT
-    { "IA64_TASK_THREAD_SIGMASK_OFFSET",offsetof (struct task_struct, thread.un.sigmask) },
+#ifdef CONFIG_PERFMON
+    { "IA64_TASK_PFM_MUST_BLOCK_OFFSET",offsetof(struct task_struct, thread.pfm_must_block) },
 #endif
     { "IA64_TASK_PID_OFFSET",		offsetof (struct task_struct, pid) },
     { "IA64_TASK_MM_OFFSET",		offsetof (struct task_struct, mm) },
@@ -151,12 +153,27 @@ tab[] =
     { "IA64_SWITCH_STACK_AR_BSPSTORE_OFFSET",	offsetof (struct switch_stack, ar_bspstore) },
     { "IA64_SWITCH_STACK_PR_OFFSET",	offsetof (struct switch_stack, pr) },
     { "IA64_SIGCONTEXT_AR_BSP_OFFSET",	offsetof (struct sigcontext, sc_ar_bsp) },
+    { "IA64_SIGCONTEXT_AR_FPSR_OFFSET", offsetof (struct sigcontext, sc_ar_fpsr) },
     { "IA64_SIGCONTEXT_AR_RNAT_OFFSET",	offsetof (struct sigcontext, sc_ar_rnat) },
-    { "IA64_SIGCONTEXT_FLAGS_OFFSET",	offsetof (struct sigcontext, sc_flags) },
+    { "IA64_SIGCONTEXT_AR_UNAT_OFFSET", offsetof (struct sigcontext, sc_ar_unat) },
+    { "IA64_SIGCONTEXT_B0_OFFSET",	offsetof (struct sigcontext, sc_br[0]) },
     { "IA64_SIGCONTEXT_CFM_OFFSET",	offsetof (struct sigcontext, sc_cfm) },
+    { "IA64_SIGCONTEXT_FLAGS_OFFSET",	offsetof (struct sigcontext, sc_flags) },
     { "IA64_SIGCONTEXT_FR6_OFFSET",	offsetof (struct sigcontext, sc_fr[6]) },
+    { "IA64_SIGCONTEXT_PR_OFFSET",	offsetof (struct sigcontext, sc_pr) },
+    { "IA64_SIGCONTEXT_R12_OFFSET",	offsetof (struct sigcontext, sc_gr[12]) },
+    { "IA64_SIGCONTEXT_RBS_BASE_OFFSET",offsetof (struct sigcontext, sc_rbs_base) },
+    { "IA64_SIGCONTEXT_LOADRS_OFFSET",	offsetof (struct sigcontext, sc_loadrs) },
+    { "IA64_SIGFRAME_ARG0_OFFSET",		offsetof (struct sigframe, arg0) },
+    { "IA64_SIGFRAME_ARG1_OFFSET",		offsetof (struct sigframe, arg1) },
+    { "IA64_SIGFRAME_ARG2_OFFSET",		offsetof (struct sigframe, arg2) },
+    { "IA64_SIGFRAME_HANDLER_OFFSET",		offsetof (struct sigframe, handler) },
+    { "IA64_SIGFRAME_SIGCONTEXT_OFFSET",	offsetof (struct sigframe, sc) },
     { "IA64_CLONE_VFORK",		CLONE_VFORK },
     { "IA64_CLONE_VM",			CLONE_VM },
+    { "IA64_CPU_IRQ_COUNT_OFFSET",	offsetof (struct cpuinfo_ia64, irq_stat.f.irq_count) },
+    { "IA64_CPU_BH_COUNT_OFFSET",	offsetof (struct cpuinfo_ia64, irq_stat.f.bh_count) },
+    { "IA64_CPU_PHYS_STACKED_SIZE_P8_OFFSET",offsetof (struct cpuinfo_ia64, phys_stacked_size_p8)},
 };
 
 static const char *tabs = "\t\t\t\t\t\t\t\t\t\t";

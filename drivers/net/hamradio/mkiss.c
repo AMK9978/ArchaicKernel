@@ -54,7 +54,7 @@
 #include <linux/tcp.h>
 #endif
 
-static const char banner[] __initdata = KERN_INFO "mkiss: AX.25 Multikiss, Hans Albas PE1AYX\n";
+static char banner[] __initdata = KERN_INFO "mkiss: AX.25 Multikiss, Hans Albas PE1AYX\n";
 
 #define NR_MKISS 4
 #define MKISS_SERIAL_TYPE_NORMAL 1
@@ -153,7 +153,7 @@ static int check_crc_flex(unsigned char *cp, int size)
 /* Find a free channel, and link in this `tty' line. */
 static inline struct ax_disp *ax_alloc(void)
 {
-	ax25_ctrl_t *axp;
+	ax25_ctrl_t *axp=NULL;
 	int i;
 
 	for (i = 0; i < ax25_maxdev; i++) {
@@ -934,8 +934,6 @@ static int ax25_init(struct net_device *dev)
 
 	memcpy(dev->broadcast, ax25_bcast, AX25_ADDR_LEN);
 	memcpy(dev->dev_addr,  ax25_test,  AX25_ADDR_LEN);
-
-	dev_init_buffers(dev);
 
 	/* New-style flags. */
 	dev->flags      = 0;

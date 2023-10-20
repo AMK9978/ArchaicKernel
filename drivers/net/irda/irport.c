@@ -41,7 +41,7 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/skbuff.h>
 #include <linux/serial_reg.h>
@@ -293,9 +293,9 @@ void irport_start(struct irport_cb *self)
 
 	iobase = self->io.sir_base;
 
-	spin_lock_irqsave(&self->lock, flags);
-
 	irport_stop(self);
+	
+	spin_lock_irqsave(&self->lock, flags);
 
 	/* Initialize UART */
 	outb(UART_LCR_WLEN8, iobase+UART_LCR);  /* Reset DLAB */
@@ -353,7 +353,7 @@ void irport_change_speed(void *priv, __u32 speed)
 	int lcr;    /* Line control reg */
 	int divisor;
 
-	IRDA_DEBUG(2, __FUNCTION__ "(), Setting speed to: %d\n", speed);
+	IRDA_DEBUG(0, __FUNCTION__ "(), Setting speed to: %d\n", speed);
 
 	ASSERT(self != NULL, return;);
 
@@ -609,14 +609,16 @@ static void irport_timeout(struct net_device *dev)
  *
  *    Transmits the current frame until FIFO is full, then
  *    waits until the next transmitt interrupt, and continues until the
- *    frame is transmited.
+ *    frame is transmitted.
  */
 int irport_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct irport_cb *self;
 	unsigned long flags;
 	int iobase;
-	__u32 speed;
+	s32 speed;
+
+	IRDA_DEBUG(0, __FUNCTION__ "()\n");
 
 	ASSERT(dev != NULL, return 0;);
 	
@@ -628,12 +630,14 @@ int irport_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 	netif_stop_queue(dev);
 	
 	/* Check if we need to change the speed */
-	if ((speed = irda_get_speed(skb)) != self->io.speed) {
+	speed = irda_get_next_speed(skb);
+	if ((speed != self->io.speed) && (speed != -1)) {
 		/* Check for empty frame */
 		if (!skb->len) {
 			irda_task_execute(self, __irport_change_speed, 
 					  irport_change_speed_complete, 
 					  NULL, (void *) speed);
+			dev_kfree_skb(skb);
 			return 0;
 		} else
 			self->new_speed = speed;
@@ -770,24 +774,33 @@ int irport_net_open(struct net_device *dev)
 {
 	struct irport_cb *self;
 	int iobase;
+	char hwname[16];
 
+	IRDA_DEBUG(0, __FUNCTION__ "()\n");
+	
 	ASSERT(dev != NULL, return -1;);
 	self = (struct irport_cb *) dev->priv;
 
 	iobase = self->io.sir_base;
 
 	if (request_irq(self->io.irq, self->interrupt, 0, dev->name, 
-			(void *) dev))
+			(void *) dev)) {
+		IRDA_DEBUG(0, __FUNCTION__ "(), unable to allocate irq=%d\n",
+			   self->io.irq);
 		return -EAGAIN;
+	}
 
 	irport_start(self);
 
+
+	/* Give self a hardware name */
+	sprintf(hwname, "SIR @ 0x%03x", self->io.sir_base);
 
 	/* 
 	 * Open new IrLAP layer instance, now that everything should be
 	 * initialized properly 
 	 */
-	self->irlap = irlap_open(dev, &self->qos);
+	self->irlap = irlap_open(dev, &self->qos, hwname);
 
 	/* FIXME: change speed of dongle */
 	/* Ready to play! */
@@ -949,13 +962,17 @@ static int irport_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	switch (cmd) {
 	case SIOCSBANDWIDTH: /* Set bandwidth */
 		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
-		irda_task_execute(self, __irport_change_speed, NULL, NULL, 
-				  (void *) irq->ifr_baudrate);
+			ret = -EPERM;
+                else
+			irda_task_execute(self, __irport_change_speed, NULL, 
+					  NULL, (void *) irq->ifr_baudrate);
 		break;
 	case SIOCSDONGLE: /* Set dongle */
-		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
+		if (!capable(CAP_NET_ADMIN)) {
+			ret = -EPERM;
+			break;
+		}
+
 		/* Initialize dongle */
 		dongle = irda_device_dongle_init(dev, irq->ifr_dongle);
 		if (!dongle)
@@ -976,16 +993,22 @@ static int irport_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 				  NULL);	
 		break;
 	case SIOCSMEDIABUSY: /* Set media busy */
-		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
+		if (!capable(CAP_NET_ADMIN)) {
+			ret = -EPERM;
+			break;
+		}
+
 		irda_device_set_media_busy(self->netdev, TRUE);
 		break;
 	case SIOCGRECEIVING: /* Check if we are receiving right now */
 		irq->ifr_receiving = irport_is_receiving(self);
 		break;
 	case SIOCSDTRRTS:
-		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
+		if (!capable(CAP_NET_ADMIN)) {
+			ret = -EPERM;
+			break;
+		}
+
 		irport_set_dtr_rts(dev, irq->ifr_dtr, irq->ifr_rts);
 		break;
 	default:
@@ -1006,12 +1029,14 @@ static struct net_device_stats *irport_net_get_stats(struct net_device *dev)
 
 #ifdef MODULE
 MODULE_PARM(io, "1-4i");
-MODULE_PARM_DESC(io, "Base I/O adresses");
+MODULE_PARM_DESC(io, "Base I/O addresses");
 MODULE_PARM(irq, "1-4i");
 MODULE_PARM_DESC(irq, "IRQ lines");
 
 MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");
 MODULE_DESCRIPTION("Half duplex serial driver for IrDA SIR mode");
+MODULE_LICENSE("GPL");
+
 
 void cleanup_module(void)
 {

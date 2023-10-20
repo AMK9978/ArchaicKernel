@@ -347,7 +347,7 @@ function choice () {
 
 	echo -e "
 	function $firstchoice () \
-		{ l_choice '$title' \"$choices\" $current ;}" >>MCradiolists
+		{ l_choice '$title' \"$choices\" \"$current\" ;}" >>MCradiolists
 }
 
 } # END load_functions()
@@ -376,6 +376,7 @@ ${var}:\\
                         /^#/b
                         /^[^ 	]/q
                         s/^  //
+			/<file:\\([^>]*\\)>/s//\\1/g
                         p
                     }" Documentation/Configure.help)
 
@@ -1334,7 +1335,7 @@ set_geometry () {
 	then
 		echo -e "\n\007Your display is too small to run Menuconfig!"
 		echo "It must be at least 19 lines by 80 columns."
-		exit 0
+		exit 1
 	fi 
 
 	ROWS=$((ROWS-4))  COLS=$((COLS-5))

@@ -53,7 +53,7 @@
 #include <linux/kernel.h>
 #include <linux/wait.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
 #include <linux/miscdevice.h>
@@ -247,7 +247,7 @@ static int pcwd_ioctl(struct inode *inode, struct file *file,
 
 	switch(cmd) {
 	default:
-		return -ENOIOCTLCMD;
+		return -ENOTTY;
 
 	case WDIOC_GETSUPPORT:
 		i = copy_to_user((void*)arg, &ident, sizeof(ident));
@@ -462,8 +462,8 @@ static int pcwd_close(struct inode *ino, struct file *filep)
 			outb_p(0xA5, current_readport + 3);
 			spin_unlock(&io_lock);
 		}
-		unlock_kernel();
 #endif
+		unlock_kernel();
 	}
 	return 0;
 }
@@ -506,6 +506,8 @@ static inline char *get_firmware(void)
 	char *ret;
 
 	ret = kmalloc(6, GFP_KERNEL);
+	if(ret == NULL)
+		return NULL;
 
 	while((count < 3) && (!found)) {
 		outb_p(0x80, current_readport + 2);
@@ -527,10 +529,8 @@ static inline char *get_firmware(void)
 		ten = send_command(0x82);
 		hund = send_command(0x83);
 		minor = send_command(0x84);
-	}
-
-	if (found)
 		sprintf(ret, "%c.%c%c%c", one, ten, hund, minor);
+	}
 	else
 		sprintf(ret, "ERROR");
 
@@ -642,12 +642,12 @@ static int __init pcwatchdog_init(void)
 
 static void __exit pcwatchdog_exit(void)
 {
+	misc_deregister(&pcwd_miscdev);
 	/*  Disable the board  */
 	if (revision == PCWD_REVISION_C) {
 		outb_p(0xA5, current_readport + 3);
 		outb_p(0xA5, current_readport + 3);
 	}
-	misc_deregister(&pcwd_miscdev);
 	if (supports_temp)
 		misc_deregister(&temp_miscdev);
 
@@ -656,3 +656,7 @@ static void __exit pcwatchdog_exit(void)
 
 module_init(pcwatchdog_init);
 module_exit(pcwatchdog_exit);
+
+MODULE_LICENSE("GPL");
+
+EXPORT_NO_SYMBOLS;

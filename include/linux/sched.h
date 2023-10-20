@@ -7,12 +7,12 @@ extern unsigned long event;
 
 #include <linux/config.h>
 #include <linux/binfmts.h>
-#include <linux/personality.h>
 #include <linux/threads.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/times.h>
 #include <linux/timex.h>
+#include <linux/rbtree.h>
 
 #include <asm/system.h>
 #include <asm/semaphore.h>
@@ -26,6 +26,8 @@ extern unsigned long event;
 #include <linux/signal.h>
 #include <linux/securebits.h>
 #include <linux/fs_struct.h>
+
+struct exec_domain;
 
 /*
  * cloning flags:
@@ -124,6 +126,8 @@ struct sched_param {
 	int sched_priority;
 };
 
+struct completion;
+
 #ifdef __KERNEL__
 
 #include <linux/spinlock.h>
@@ -167,7 +171,7 @@ extern int current_is_keventd(void);
  */
 struct files_struct {
 	atomic_t count;
-	rwlock_t file_lock;
+	rwlock_t file_lock;	/* Protects all the below members.  Nests inside tsk->alloc_lock */
 	int max_fds;
 	int max_fdset;
 	int next_fd;
@@ -197,21 +201,21 @@ struct files_struct {
 /* Maximum number of active map areas.. This is a random (large) number */
 #define MAX_MAP_COUNT	(65536)
 
-/* Number of map areas at which the AVL tree is activated. This is arbitrary. */
-#define AVL_MIN_MAP_COUNT	32
-
 struct mm_struct {
 	struct vm_area_struct * mmap;		/* list of VMAs */
-	struct vm_area_struct * mmap_avl;	/* tree of VMAs */
+	rb_root_t mm_rb;
 	struct vm_area_struct * mmap_cache;	/* last find_vma result */
 	pgd_t * pgd;
 	atomic_t mm_users;			/* How many users with user space? */
 	atomic_t mm_count;			/* How many references to "struct mm_struct" (users count as 1) */
 	int map_count;				/* number of VMAs */
-	struct semaphore mmap_sem;
-	spinlock_t page_table_lock;
+	struct rw_semaphore mmap_sem;
+	spinlock_t page_table_lock;		/* Protects task page tables and mm->rss */
 
-	struct list_head mmlist;		/* List of all active mm's */
+	struct list_head mmlist;		/* List of all active mm's.  These are globally strung
+						 * together off init_mm.mmlist, and are protected
+						 * by mmlist_lock
+						 */
 
 	unsigned long start_code, end_code, start_data, end_data;
 	unsigned long start_brk, brk, start_stack;
@@ -219,23 +223,23 @@ struct mm_struct {
 	unsigned long rss, total_vm, locked_vm;
 	unsigned long def_flags;
 	unsigned long cpu_vm_mask;
-	unsigned long swap_cnt;	/* number of pages to swap on next pass */
 	unsigned long swap_address;
+
+	unsigned dumpable:1;
 
 	/* Architecture-specific MM context */
 	mm_context_t context;
 };
 
+extern int mmlist_nr;
+
 #define INIT_MM(name) \
 {			 				\
-	mmap:		&init_mmap, 			\
-	mmap_avl:	NULL, 				\
-	mmap_cache:	NULL, 				\
+	mm_rb:		RB_ROOT,			\
 	pgd:		swapper_pg_dir, 		\
 	mm_users:	ATOMIC_INIT(2), 		\
 	mm_count:	ATOMIC_INIT(1), 		\
-	map_count:	1, 				\
-	mmap_sem:	__MUTEX_INITIALIZER(name.mmap_sem), \
+	mmap_sem:	__RWSEM_INITIALIZER(name.mmap_sem), \
 	page_table_lock: SPIN_LOCK_UNLOCKED, 		\
 	mmlist:		LIST_HEAD_INIT(name.mmlist),	\
 }
@@ -300,8 +304,16 @@ struct task_struct {
 	long nice;
 	unsigned long policy;
 	struct mm_struct *mm;
-	int has_cpu, processor;
-	unsigned long cpus_allowed;
+	int processor;
+	/*
+	 * cpus_runnable is ~0 if the process is not running on any
+	 * CPU. It's (1 << cpu) if it's running on a CPU. This mask
+	 * is updated under the runqueue lock.
+	 *
+	 * To determine whether a process might run on a CPU, this
+	 * mask is AND-ed with cpus_allowed.
+	 */
+	unsigned long cpus_runnable, cpus_allowed;
 	/*
 	 * (only the 'next' pointer fits into the cacheline, but
 	 * that's just fine.)
@@ -311,6 +323,8 @@ struct task_struct {
 
 	struct task_struct *next_task, *prev_task;
 	struct mm_struct *active_mm;
+	struct list_head local_pages;
+	unsigned int allocation_order, nr_local_pages;
 
 /* task state */
 	struct linux_binfmt *binfmt;
@@ -318,7 +332,6 @@ struct task_struct {
 	int pdeath_signal;  /*  The signal sent when the parent dies  */
 	/* ??? */
 	unsigned long personality;
-	int dumpable:1;
 	int did_exec:1;
 	pid_t pid;
 	pid_t pgrp;
@@ -340,7 +353,7 @@ struct task_struct {
 	struct task_struct **pidhash_pprev;
 
 	wait_queue_head_t wait_chldexit;	/* for wait4() */
-	struct semaphore *vfork_sem;		/* for vfork() */
+	struct completion *vfork_done;		/* for vfork() */
 	unsigned long rt_priority;
 	unsigned long it_real_value, it_prof_value, it_virt_value;
 	unsigned long it_real_incr, it_prof_incr, it_virt_incr;
@@ -364,7 +377,7 @@ struct task_struct {
 	unsigned short used_math;
 	char comm[16];
 /* file system info */
-	int link_count;
+	int link_count, total_link_count;
 	struct tty_struct *tty; /* NULL if no tty */
 	unsigned int locks; /* How many file locks are being held */
 /* ipc stuff */
@@ -394,6 +407,9 @@ struct task_struct {
    	u32 self_exec_id;
 /* Protection of (de-)allocation: mm, files, fs, tty */
 	spinlock_t alloc_lock;
+
+/* journalling filesystem info */
+	void *journal_info;
 };
 
 /*
@@ -408,7 +424,8 @@ struct task_struct {
 #define PF_DUMPCORE	0x00000200	/* dumped core */
 #define PF_SIGNALED	0x00000400	/* killed by a signal */
 #define PF_MEMALLOC	0x00000800	/* Allocating memory */
-#define PF_VFORK	0x00001000	/* Wake up parent in mm_release */
+#define PF_MEMDIE	0x00001000	/* Killed for out-of-memory */
+#define PF_FREE_PAGES	0x00002000	/* per process page freeing */
 
 #define PF_USEDFPU	0x00100000	/* task used FPU this quantum (SMP) */
 
@@ -420,6 +437,7 @@ struct task_struct {
 #define PT_TRACESYS	0x00000002
 #define PT_DTRACE	0x00000004	/* delayed trace (used on m68k, i386) */
 #define PT_TRACESYSGOOD	0x00000008
+#define PT_PTRACE_CAP	0x00000010	/* ptracer can follow suid-exec */
 
 /*
  * Limit the stack by to some sane default: root can always
@@ -430,6 +448,12 @@ struct task_struct {
 #define DEF_COUNTER	(10*HZ/100)	/* 100 ms time slice */
 #define MAX_COUNTER	(20*HZ/100)
 #define DEF_NICE	(0)
+
+
+/*
+ * The default (Linux) execution domain.
+ */
+extern struct exec_domain	default_exec_domain;
 
 /*
  *  INIT_TASK is used to set up the first task table, touch at
@@ -448,6 +472,7 @@ struct task_struct {
     policy:		SCHED_OTHER,					\
     mm:			NULL,						\
     active_mm:		&init_mm,					\
+    cpus_runnable:	-1,						\
     cpus_allowed:	-1,						\
     run_list:		LIST_HEAD_INIT(tsk.run_list),			\
     next_task:		&tsk,						\
@@ -473,7 +498,8 @@ struct task_struct {
     sig:		&init_signals,					\
     pending:		{ NULL, &tsk.pending.head, {{0}}},		\
     blocked:		{{0}},						\
-    alloc_lock:		SPIN_LOCK_UNLOCKED				\
+    alloc_lock:		SPIN_LOCK_UNLOCKED,				\
+    journal_info:	NULL,						\
 }
 
 
@@ -524,6 +550,19 @@ static inline struct task_struct *find_task_by_pid(int pid)
 	return p;
 }
 
+#define task_has_cpu(tsk) ((tsk)->cpus_runnable != ~0UL)
+
+static inline void task_set_cpu(struct task_struct *tsk, unsigned int cpu)
+{
+	tsk->processor = cpu;
+	tsk->cpus_runnable = 1UL << cpu;
+}
+
+static inline void task_release_cpu(struct task_struct *tsk)
+{
+	tsk->cpus_runnable = ~0UL;
+}
+
 /* per-UID process charging. */
 extern struct user_struct * alloc_uid(uid_t);
 extern void free_uid(struct user_struct *);
@@ -542,22 +581,27 @@ extern unsigned long prof_shift;
 
 #define CURRENT_TIME (xtime.tv_sec)
 
-extern void FASTCALL(__wake_up(wait_queue_head_t *q, unsigned int mode, unsigned int wq_mode));
-extern void FASTCALL(__wake_up_sync(wait_queue_head_t *q, unsigned int mode, unsigned int wq_mode));
+extern void FASTCALL(__wake_up(wait_queue_head_t *q, unsigned int mode, int nr));
+extern void FASTCALL(__wake_up_sync(wait_queue_head_t *q, unsigned int mode, int nr));
 extern void FASTCALL(sleep_on(wait_queue_head_t *q));
 extern long FASTCALL(sleep_on_timeout(wait_queue_head_t *q,
 				      signed long timeout));
 extern void FASTCALL(interruptible_sleep_on(wait_queue_head_t *q));
 extern long FASTCALL(interruptible_sleep_on_timeout(wait_queue_head_t *q,
 						    signed long timeout));
-extern void FASTCALL(wake_up_process(struct task_struct * tsk));
+extern int FASTCALL(wake_up_process(struct task_struct * tsk));
 
-#define wake_up(x)			__wake_up((x),TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE,WQ_FLAG_EXCLUSIVE)
-#define wake_up_all(x)			__wake_up((x),TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE,0)
-#define wake_up_sync(x)			__wake_up_sync((x),TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE,WQ_FLAG_EXCLUSIVE)
-#define wake_up_interruptible(x)	__wake_up((x),TASK_INTERRUPTIBLE,WQ_FLAG_EXCLUSIVE)
-#define wake_up_interruptible_all(x)	__wake_up((x),TASK_INTERRUPTIBLE,0)
-#define wake_up_interruptible_sync(x)	__wake_up_sync((x),TASK_INTERRUPTIBLE,WQ_FLAG_EXCLUSIVE)
+#define wake_up(x)			__wake_up((x),TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE, 1)
+#define wake_up_nr(x, nr)		__wake_up((x),TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE, nr)
+#define wake_up_all(x)			__wake_up((x),TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE, 0)
+#define wake_up_sync(x)			__wake_up_sync((x),TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE, 1)
+#define wake_up_sync_nr(x, nr)		__wake_up_sync((x),TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE, nr)
+#define wake_up_interruptible(x)	__wake_up((x),TASK_INTERRUPTIBLE, 1)
+#define wake_up_interruptible_nr(x, nr)	__wake_up((x),TASK_INTERRUPTIBLE, nr)
+#define wake_up_interruptible_all(x)	__wake_up((x),TASK_INTERRUPTIBLE, 0)
+#define wake_up_interruptible_sync(x)	__wake_up_sync((x),TASK_INTERRUPTIBLE, 1)
+#define wake_up_interruptible_sync_nr(x) __wake_up_sync((x),TASK_INTERRUPTIBLE,  nr)
+asmlinkage long sys_wait4(pid_t pid,unsigned int * stat_addr, int options, struct rusage * ru);
 
 extern int in_group_p(gid_t);
 extern int in_egroup_p(gid_t);
@@ -738,6 +782,7 @@ extern void exit_mm(struct task_struct *);
 extern void exit_files(struct task_struct *);
 extern void exit_sighand(struct task_struct *);
 
+extern void reparent_to_init(void);
 extern void daemonize(void);
 
 extern int do_execve(char *, char **, char **, struct pt_regs *);
@@ -851,6 +896,7 @@ static inline void unhash_process(struct task_struct *p)
 	write_unlock_irq(&tasklist_lock);
 }
 
+/* Protects ->fs, ->files, ->mm, and synchronises with wait4().  Nests inside tasklist_lock */
 static inline void task_lock(struct task_struct *p)
 {
 	spin_lock(&p->alloc_lock);

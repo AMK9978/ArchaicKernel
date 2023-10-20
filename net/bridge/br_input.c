@@ -5,7 +5,7 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: br_input.c,v 1.7 2000/12/13 16:44:14 davem Exp $
+ *	$Id: br_input.c,v 1.9 2001/08/14 22:05:57 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -17,20 +17,33 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/if_bridge.h>
+#include <linux/netfilter_bridge.h>
 #include "br_private.h"
 
 unsigned char bridge_ula[6] = { 0x01, 0x80, 0xc2, 0x00, 0x00, 0x00 };
 
+static int br_pass_frame_up_finish(struct sk_buff *skb)
+{
+	netif_rx(skb);
+
+	return 0;
+}
+
 static void br_pass_frame_up(struct net_bridge *br, struct sk_buff *skb)
 {
+	struct net_device *indev;
+
 	br->statistics.rx_packets++;
 	br->statistics.rx_bytes += skb->len;
 
+	indev = skb->dev;
 	skb->dev = &br->dev;
 	skb->pkt_type = PACKET_HOST;
-	skb_pull(skb, skb->mac.raw - skb->data);
+	skb_push(skb, ETH_HLEN);
 	skb->protocol = eth_type_trans(skb, &br->dev);
-	netif_rx(skb);
+
+	NF_HOOK(PF_BRIDGE, NF_BR_LOCAL_IN, skb, indev, NULL,
+			br_pass_frame_up_finish);
 }
 
 static void __br_handle_frame(struct sk_buff *skb)
@@ -50,8 +63,6 @@ static void __br_handle_frame(struct sk_buff *skb)
 	if (!(br->dev.flags & IFF_UP) ||
 	    p->state == BR_STATE_DISABLED)
 		goto freeandout;
-
-	skb_push(skb, skb->data - skb->mac.raw);
 
 	if (br->dev.flags & IFF_PROMISC) {
 		struct sk_buff *skb2;
@@ -91,7 +102,7 @@ static void __br_handle_frame(struct sk_buff *skb)
 		goto freeandout;
 
 	if (dest[0] & 1) {
-		br_flood(br, skb, 1);
+		br_flood_forward(br, skb, 1);
 		if (!passedup)
 			br_pass_frame_up(br, skb);
 		else
@@ -116,7 +127,7 @@ static void __br_handle_frame(struct sk_buff *skb)
 		return;
 	}
 
-	br_flood(br, skb, 0);
+	br_flood_forward(br, skb, 0);
 	return;
 
  handle_special_frame:
@@ -129,7 +140,7 @@ static void __br_handle_frame(struct sk_buff *skb)
 	kfree_skb(skb);
 }
 
-void br_handle_frame(struct sk_buff *skb)
+static int br_handle_frame_finish(struct sk_buff *skb)
 {
 	struct net_bridge *br;
 
@@ -137,4 +148,12 @@ void br_handle_frame(struct sk_buff *skb)
 	read_lock(&br->lock);
 	__br_handle_frame(skb);
 	read_unlock(&br->lock);
+
+	return 0;
+}
+
+void br_handle_frame(struct sk_buff *skb)
+{
+	NF_HOOK(PF_BRIDGE, NF_BR_PRE_ROUTING, skb, skb->dev, NULL,
+			br_handle_frame_finish);
 }

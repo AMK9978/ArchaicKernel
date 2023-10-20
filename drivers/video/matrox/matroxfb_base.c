@@ -2,9 +2,9 @@
  *
  * Hardware accelerated Matrox Millennium I, II, Mystique, G100, G200 and G400
  *
- * (c) 1998,1999,2000 Petr Vandrovec <vandrove@vc.cvut.cz>
+ * (c) 1998-2001 Petr Vandrovec <vandrove@vc.cvut.cz>
  *
- * Version: 1.50 2000/08/10
+ * Version: 1.54 2001/09/09
  *
  * MTRR stuff: 1998 Tom Rini <trini@kernel.crashing.org>
  *
@@ -71,6 +71,9 @@
  *
  *               "Ken Aaker" <kdaaker@rchland.vnet.ibm.com>
  *                     memtype extension (needed for GXT130P RS/6000 adapter)
+ *
+ *               "Uns Lider" <unslider@miranda.org>
+ *                     G100 PLNWT fixes
  *
  * (following author is not in any relation with this code, but his code
  *  is included in this driver)
@@ -985,8 +988,6 @@ static int matroxfb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 #undef minfo
 }
 
-static int matroxfb_switch(int con, struct fb_info *info);
-
 static int matroxfb_get_vblank(CPMINFO struct fb_vblank *vblank)
 {
 	unsigned int sts1;
@@ -1180,7 +1181,7 @@ static struct fb_ops matroxfb_ops = {
 	fb_ioctl:	matroxfb_ioctl,
 };
 
-static int matroxfb_switch(int con, struct fb_info *info)
+int matroxfb_switch(int con, struct fb_info *info)
 {
 #define minfo ((struct matrox_fb_info*)info)
 	struct fb_cmap* cmap;
@@ -1323,6 +1324,7 @@ static unsigned int fv;			/* "matrox:fv:xxxxx" */
 static unsigned int fh;			/* "matrox:fh:xxxxxk" */
 static unsigned int maxclk;		/* "matrox:maxclk:xxxxM" */
 static int dfp;				/* "matrox:dfp */
+static int dfp_type = -1;		/* "matrox:dfp:xxx */
 static int memtype = -1;		/* "matrox:memtype:xxx" */
 static char fontname[64];		/* "matrox:font:xxxxx" */
 
@@ -1409,12 +1411,12 @@ static struct video_board vbG400		= {0x2000000, 0x1000000, FB_ACCEL_MATROX_MGAG4
 
 #define DEVF_VIDEO64BIT		0x0001
 #define	DEVF_SWAPS		0x0002
-#define DEVF_MILLENNIUM		0x0004
-#define	DEVF_MILLENNIUM2	0x0008
+#define DEVF_SRCORG		0x0004
+#define DEVF_BOTHDACS		0x0008	/* put CRTC1 on both outputs by default */
 #define DEVF_CROSS4MB		0x0010
 #define DEVF_TEXT4B		0x0020
 #define DEVF_DDC_8_2		0x0040
-#define DEVF_DMA		0x0080
+#define DEVF_G550DAC		0x0080
 #define DEVF_SUPPORT32MB	0x0100
 #define DEVF_ANY_VXRES		0x0200
 #define DEVF_TEXT16B		0x0400
@@ -1424,12 +1426,13 @@ static struct video_board vbG400		= {0x2000000, 0x1000000, FB_ACCEL_MATROX_MGAG4
 #define DEVF_G450DAC		0x4000
 
 #define DEVF_GCORE	(DEVF_VIDEO64BIT | DEVF_SWAPS | DEVF_CROSS4MB | DEVF_DDC_8_2)
-#define DEVF_G2CORE	(DEVF_GCORE | DEVF_ANY_VXRES | DEVF_MAVEN_CAPABLE | DEVF_PANELLINK_CAPABLE)
+#define DEVF_G2CORE	(DEVF_GCORE | DEVF_ANY_VXRES | DEVF_MAVEN_CAPABLE | DEVF_PANELLINK_CAPABLE | DEVF_SRCORG)
 #define DEVF_G100	(DEVF_GCORE) /* no doc, no vxres... */
 #define DEVF_G200	(DEVF_G2CORE)
 #define DEVF_G400	(DEVF_G2CORE | DEVF_SUPPORT32MB | DEVF_TEXT16B | DEVF_CRTC2)
 /* if you'll find how to drive DFP... */
-#define DEVF_G450	(DEVF_GCORE | DEVF_ANY_VXRES | DEVF_SUPPORT32MB | DEVF_TEXT16B | DEVF_CRTC2 | DEVF_G450DAC)
+#define DEVF_G450	(DEVF_GCORE | DEVF_ANY_VXRES | DEVF_SUPPORT32MB | DEVF_TEXT16B | DEVF_CRTC2 | DEVF_G450DAC | DEVF_SRCORG)
+#define DEVF_G550	(DEVF_G450 | DEVF_G550DAC | DEVF_BOTHDACS)
 
 static struct board {
 	unsigned short vendor, device, rev, svid, sid;
@@ -1441,19 +1444,19 @@ static struct board {
 #ifdef CONFIG_FB_MATROX_MILLENIUM
 	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MIL,	0xFF,
 		0,			0,
-		DEVF_MILLENNIUM | DEVF_TEXT4B,
+		DEVF_TEXT4B,
 		230000,
 		&vbMillennium,
 		"Millennium (PCI)"},
 	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MIL_2,	0xFF,
 		0,			0,
-		DEVF_MILLENNIUM | DEVF_MILLENNIUM2 | DEVF_SWAPS,
+		DEVF_SWAPS,
 		220000,
 		&vbMillennium2,
 		"Millennium II (PCI)"},
 	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MIL_2_AGP,	0xFF,
 		0,			0,
-		DEVF_MILLENNIUM | DEVF_MILLENNIUM2 | DEVF_SWAPS,
+		DEVF_SWAPS,
 		250000,
 		&vbMillennium2A,
 		"Millennium II (AGP)"},
@@ -1461,25 +1464,25 @@ static struct board {
 #ifdef CONFIG_FB_MATROX_MYSTIQUE
 	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MYS,	0x02,
 		0,			0,
-		DEVF_VIDEO64BIT,
+		DEVF_VIDEO64BIT | DEVF_CROSS4MB,
 		180000,
 		&vbMystique,
 		"Mystique (PCI)"},
 	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MYS,	0xFF,
 		0,			0,
-		DEVF_VIDEO64BIT | DEVF_SWAPS,
+		DEVF_VIDEO64BIT | DEVF_SWAPS | DEVF_CROSS4MB,
 		220000,
 		&vbMystique,
 		"Mystique 220 (PCI)"},
 #endif
 #ifdef CONFIG_FB_MATROX_G100
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G100,	0xFF,
+	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G100_MM,	0xFF,
 		PCI_SS_VENDOR_ID_MATROX,	PCI_SS_ID_MATROX_MGA_G100_PCI,
 		DEVF_G100,
 		230000,
 		&vbG100,
 		"MGA-G100 (PCI)"},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G100,	0xFF,
+	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G100_MM,	0xFF,
 		0,			0,
 		DEVF_G100,
 		230000,
@@ -1556,25 +1559,31 @@ static struct board {
 		DEVF_G200,
 		230000,
 		&vbG200,
-		"unknown G200 (AGP)"},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G400_AGP,	0x80,
+		"G200 (AGP)"},
+	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G400,	0x80,
 		PCI_SS_VENDOR_ID_MATROX,	PCI_SS_ID_MATROX_MILLENNIUM_G400_MAX_AGP,
 		DEVF_G400,
 		360000,
 		&vbG400,
 		"Millennium G400 MAX (AGP)"},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G400_AGP,	0x80,
+	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G400,	0x80,
 		0,			0,
 		DEVF_G400,
 		300000,
 		&vbG400,
-		"unknown G400 (AGP)"},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G400_AGP,	0xFF,
+		"G400 (AGP)"},
+	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G400,	0xFF,
 		0,			0,
 		DEVF_G450,
 		500000,		/* ??? vco goes up to 900MHz... */
 		&vbG400,
-		"unknown G450 (AGP)"},
+		"G450"},
+	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G550,	0xFF,
+		0,			0,
+		DEVF_G550,
+		500000,
+		&vbG400,
+		"G550"},
 #endif
 	{0,			0,				0xFF,
 		0,			0,
@@ -1611,6 +1620,7 @@ static int initMatrox2(WPMINFO struct display* d, struct board* b){
 
 	printk(KERN_INFO "matroxfb: Matrox %s detected\n", b->name);
 	ACCESS_FBINFO(capable.plnwt) = 1;
+	ACCESS_FBINFO(capable.srcorg) = b->flags & DEVF_SRCORG;
 	ACCESS_FBINFO(devflags.video64bits) = b->flags & DEVF_VIDEO64BIT;
 	if (b->flags & DEVF_TEXT4B) {
 		ACCESS_FBINFO(devflags.vgastep) = 4;
@@ -1636,7 +1646,18 @@ static int initMatrox2(WPMINFO struct display* d, struct board* b){
 		if (dfp)
 			ACCESS_FBINFO(output.ph) |= MATROXFB_OUTPUT_CONN_DFP;
 	}
+	if (b->flags & DEVF_BOTHDACS) {
+#ifdef CONFIG_FB_MATROX_G450	
+		ACCESS_FBINFO(output.all) |= MATROXFB_OUTPUT_CONN_SECONDARY;
+		ACCESS_FBINFO(output.ph) |= MATROXFB_OUTPUT_CONN_SECONDARY;
+#else
+		printk(KERN_INFO "Only digital output of G550 is now working (in analog mode). Enable G450 support in\n");
+		printk(KERN_INFO "kernel configuration if you have analog monitor connected to G550 analog output.\n");
+#endif
+	}
+	ACCESS_FBINFO(devflags.dfp_type) = dfp_type;
 	ACCESS_FBINFO(devflags.g450dac) = b->flags & DEVF_G450DAC;
+	ACCESS_FBINFO(devflags.g550dac) = b->flags & DEVF_G550DAC;
 	ACCESS_FBINFO(devflags.textstep) = ACCESS_FBINFO(devflags.vgastep) * ACCESS_FBINFO(devflags.textmode);
 	ACCESS_FBINFO(devflags.textvram) = 65536 / ACCESS_FBINFO(devflags.textmode);
 
@@ -1842,33 +1863,33 @@ static int initMatrox2(WPMINFO struct display* d, struct board* b){
 	}
 
 	/* FIXME: Where to move this?! */
-#if defined(CONFIG_PPC)
+#if defined(CONFIG_ALL_PPC)
 #if defined(CONFIG_FB_COMPAT_XPMAC)
 	strcpy(ACCESS_FBINFO(matrox_name), "MTRX,");	/* OpenFirmware naming convension */
 	strncat(ACCESS_FBINFO(matrox_name), b->name, 26);
 	if (!console_fb_info)
 		console_fb_info = &ACCESS_FBINFO(fbcon);
 #endif
-	if ((xres <= 640) && (yres <= 480)) {
+#ifndef MODULE
+	if (_machine == _MACH_Pmac) {
 		struct fb_var_screeninfo var;
-		if (default_vmode == VMODE_NVRAM) {
-			default_vmode = nvram_read_byte(NV_VMODE);
-			if (default_vmode <= 0 || default_vmode > VMODE_MAX)
-				default_vmode = VMODE_CHOOSE;
-		}
 		if (default_vmode <= 0 || default_vmode > VMODE_MAX)
 			default_vmode = VMODE_640_480_60;
+#ifdef CONFIG_NVRAM
 		if (default_cmode == CMODE_NVRAM)
 			default_cmode = nvram_read_byte(NV_CMODE);
+#endif
 		if (default_cmode < CMODE_8 || default_cmode > CMODE_32)
 			default_cmode = CMODE_8;
 		if (!mac_vmode_to_var(default_vmode, default_cmode, &var)) {
 			var.accel_flags = vesafb_defined.accel_flags;
 			var.xoffset = var.yoffset = 0;
-			vesafb_defined = var; /* Note: mac_vmode_to_var() doesnot set all parameters */
+			/* Note: mac_vmode_to_var() does not set all parameters */
+			vesafb_defined = var;
 		}
 	}
-#endif /* CONFIG_PPC */
+#endif /* !MODULE */
+#endif /* CONFIG_ALL_PPC */
 	vesafb_defined.xres_virtual = vesafb_defined.xres;
 	if (nopan) {
 		vesafb_defined.yres_virtual = vesafb_defined.yres;
@@ -2005,6 +2026,7 @@ static int matroxfb_probe(struct pci_dev* pdev, const struct pci_device_id* dumm
 	u_int32_t cmd;
 #ifndef CONFIG_FB_MATROX_MULTIHEAD
 	static int registered = 0;
+	static struct display global_disp;
 #endif
 	DBG("matroxfb_probe")
 
@@ -2053,7 +2075,7 @@ static int matroxfb_probe(struct pci_dev* pdev, const struct pci_device_id* dumm
 	ACCESS_FBINFO(pcidev) = pdev;
 	ACCESS_FBINFO(dead) = 0;
 	ACCESS_FBINFO(usecount) = 0;
-	pdev->driver_data = MINFO;
+	pci_set_drvdata(pdev, MINFO);
 	/* CMDLINE */
 	memcpy(ACCESS_FBINFO(fbcon.fontname), fontname, sizeof(ACCESS_FBINFO(fbcon.fontname)));
 	/* DEVFLAGS */
@@ -2115,7 +2137,7 @@ static int matroxfb_probe(struct pci_dev* pdev, const struct pci_device_id* dumm
 static void pci_remove_matrox(struct pci_dev* pdev) {
 	struct matrox_fb_info* minfo;
 
-	minfo = pdev->driver_data;
+	minfo = pci_get_drvdata(pdev);
 	matroxfb_remove(PMINFO 1);
 }
 
@@ -2133,7 +2155,7 @@ static struct pci_device_id matroxfb_devices[] __devinitdata = {
 		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
 #endif
 #ifdef CONFIG_FB_MATROX_G100
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G100,
+	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G100_MM,
 		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
 	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G100_AGP,
 		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
@@ -2141,7 +2163,9 @@ static struct pci_device_id matroxfb_devices[] __devinitdata = {
 		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
 	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G200_AGP,
 		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G400_AGP,
+	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G400,
+		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
+	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G550,
 		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
 #endif
 	{0,			0,
@@ -2149,6 +2173,7 @@ static struct pci_device_id matroxfb_devices[] __devinitdata = {
 };
 
 MODULE_DEVICE_TABLE(pci, matroxfb_devices);
+
 
 static struct pci_driver matroxfb_driver = {
 	name:		"matroxfb",
@@ -2347,7 +2372,7 @@ int __init matroxfb_setup(char *options) {
 	if (!options || !*options)
 		return 0;
 
-	for(this_opt=strtok(options,","); this_opt; this_opt=strtok(NULL,",")) {
+	while ((this_opt = strsep(&options, ",")) != NULL) {
 		if (!*this_opt) continue;
 
 		dprintk("matroxfb_setup: option %s\n", this_opt);
@@ -2400,6 +2425,10 @@ int __init matroxfb_setup(char *options) {
 			mem = simple_strtoul(this_opt+4, NULL, 0);
 		else if (!strncmp(this_opt, "mode:", 5))
 			strncpy(videomode, this_opt+5, sizeof(videomode)-1);
+		else if (!strncmp(this_opt, "dfp:", 4)) {
+			dfp_type = simple_strtoul(this_opt+4, NULL, 0);
+			dfp = 1;
+		}	
 #ifdef CONFIG_PPC
 		else if (!strncmp(this_opt, "vmode:", 6)) {
 			unsigned int vmode = simple_strtoul(this_opt+6, NULL, 0);
@@ -2482,7 +2511,7 @@ int __init matroxfb_setup(char *options) {
 	return 0;
 }
 
-static int __init initialized = 0;
+static int __initdata initialized = 0;
 
 int __init matroxfb_init(void)
 {
@@ -2494,6 +2523,7 @@ int __init matroxfb_init(void)
 		initialized = 1;
 		matrox_init();
 	}
+	hotplug = 1;
 	/* never return failure, user can hotplug matrox later... */
 	return 0;
 }
@@ -2502,8 +2532,10 @@ int __init matroxfb_init(void)
 
 /* *************************** init module code **************************** */
 
-MODULE_AUTHOR("(c) 1998,1999 Petr Vandrovec <vandrove@vc.cvut.cz>");
-MODULE_DESCRIPTION("Accelerated FBDev driver for Matrox Millennium/Mystique/G100/G200/G400");
+MODULE_AUTHOR("(c) 1998-2001 Petr Vandrovec <vandrove@vc.cvut.cz>");
+MODULE_DESCRIPTION("Accelerated FBDev driver for Matrox Millennium/Mystique/G100/G200/G400/G450");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(mem, "i");
 MODULE_PARM_DESC(mem, "Size of available memory in MB, KB or B (2,4,8,12,16MB, default=autodetect)");
 MODULE_PARM(disabled, "i");
@@ -2525,7 +2557,7 @@ MODULE_PARM_DESC(memtype, "Memory type for G200/G400 (see Documentation/fb/matro
 MODULE_PARM(mtrr, "i");
 MODULE_PARM_DESC(mtrr, "This speeds up video memory accesses (0=disabled or 1) (default=1)");
 MODULE_PARM(sgram, "i");
-MODULE_PARM_DESC(sgram, "Indicates that G200/G400 has SGRAM memory (0=SDRAM, 1=SGRAM) (default=0)");
+MODULE_PARM_DESC(sgram, "Indicates that G100/G200/G400 has SGRAM memory (0=SDRAM, 1=SGRAM) (default=0)");
 MODULE_PARM(inv24, "i");
 MODULE_PARM_DESC(inv24, "Inverts clock polarity for 24bpp and loop frequency > 100MHz (default=do not invert polarity)");
 MODULE_PARM(inverse, "i");
@@ -2580,6 +2612,8 @@ MODULE_PARM(cross4MB, "i");
 MODULE_PARM_DESC(cross4MB, "Specifies that 4MB boundary can be in middle of line. (default=autodetected)");
 MODULE_PARM(dfp, "i");
 MODULE_PARM_DESC(dfp, "Specifies whether to use digital flat panel interface of G200/G400 (0 or 1) (default=0)");
+MODULE_PARM(dfp_type, "i");
+MODULE_PARM_DESC(dfp_type, "Specifies DFP interface type (0 to 255) (default=read from hardware)");
 #ifdef CONFIG_PPC
 MODULE_PARM(vmode, "i");
 MODULE_PARM_DESC(vmode, "Specify the vmode mode number that should be used (640x480 default)");
@@ -2621,6 +2655,7 @@ int __init init_module(void){
 module_exit(matrox_done);
 EXPORT_SYMBOL(matroxfb_register_driver);
 EXPORT_SYMBOL(matroxfb_unregister_driver);
+EXPORT_SYMBOL(matroxfb_switch);
 
 /*
  * Overrides for Emacs so that we follow Linus's tabbing style.

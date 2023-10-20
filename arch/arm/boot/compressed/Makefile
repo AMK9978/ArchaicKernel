@@ -9,7 +9,7 @@
 
 HEAD		 = head.o
 OBJS		 = misc.o
-CFLAGS		 = $(CPPFLAGS) -O2 -DSTDC_HEADERS $(CFLAGS_PROC)
+CFLAGS		 = $(CPPFLAGS) -O2 -DSTDC_HEADERS $(CFLAGS_PROC) -msoft-float
 FONTC		 = $(TOPDIR)/drivers/video/font_acorn_8x8.c
 ZLDFLAGS	 = -p -X -T vmlinux.lds
 
@@ -25,16 +25,24 @@ ifeq ($(CONFIG_ARCH_NETWINDER),y)
 OBJS		+= head-netwinder.o
 endif
 
-ifeq ($(CONFIG_ARCH_INTEGRATOR),y)
-OBJS		+= head-netwinder.o
+ifeq ($(CONFIG_ARCH_SHARK),y)
+OBJS		+= head-shark.o ofw-shark.o
 endif
 
-ifeq ($(CONFIG_ARCH_NEXUSPCI),y)
-HEAD		 = head-nexuspci.o
+ifeq ($(CONFIG_ARCH_INTEGRATOR),y)
+OBJS		+= head-integrator.o
+endif
+
+ifeq ($(CONFIG_ARCH_FTVPCI),y)
+OBJS		+= head-ftvpci.o
 endif
 
 ifeq ($(CONFIG_ARCH_L7200),y)
 OBJS		+= head-l7200.o
+endif
+
+ifeq ($(CONFIG_ARCH_CLPS7500),y)
+HEAD		= head-clps7500.o
 endif
 
 ifeq ($(CONFIG_ARCH_P720T),y)
@@ -43,7 +51,7 @@ OBJS		+= head-sa1100.o
 endif
 
 ifeq ($(CONFIG_ARCH_SA1100),y)
-OBJS		+= head-sa1100.o setup-sa1100.o
+OBJS		+= head-sa1100.o
 ifeq ($(CONFIG_SA1100_NANOENGINE),y)
   OBJS += hw-bse.o
 endif
@@ -57,6 +65,8 @@ else
 SEDFLAGS	+= s/BSS_START/ALIGN(4)/
 endif
 
+LIBGCC		:= $(shell $(CC) $(CFLAGS) --print-libgcc-file-name)
+
 all:		vmlinux
 
 vmlinux:	$(HEAD) $(OBJS) piggy.o vmlinux.lds
@@ -66,7 +76,7 @@ $(HEAD): 	$(HEAD:.o=.S)
 		$(CC) $(AFLAGS) -traditional -c $(HEAD:.o=.S)
 
 piggy.o:	$(SYSTEM)
-		$(OBJCOPY) $(SYSTEM) piggy
+		$(OBJCOPY) -O binary -R .note -R .comment -S $(SYSTEM) piggy
 		gzip $(GZFLAGS) < piggy > piggy.gz
 		$(LD) -r -o $@ -b binary piggy.gz
 		rm -f piggy piggy.gz

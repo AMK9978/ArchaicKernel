@@ -12,44 +12,54 @@
  * Free memory management - zoned buddy allocator.
  */
 
+#ifndef CONFIG_FORCE_MAX_ZONEORDER
 #define MAX_ORDER 10
+#else
+#define MAX_ORDER CONFIG_FORCE_MAX_ZONEORDER
+#endif
 
 typedef struct free_area_struct {
 	struct list_head	free_list;
-	unsigned int		*map;
+	unsigned long		*map;
 } free_area_t;
 
 struct pglist_data;
 
+/*
+ * On machines where it is needed (eg PCs) we divide physical memory
+ * into multiple physical zones. On a PC we have 3 zones:
+ *
+ * ZONE_DMA	  < 16 MB	ISA DMA capable memory
+ * ZONE_NORMAL	16-896 MB	direct mapped by the kernel
+ * ZONE_HIGHMEM	 > 896 MB	only page cache and user processes
+ */
 typedef struct zone_struct {
 	/*
 	 * Commonly accessed fields:
 	 */
 	spinlock_t		lock;
-	unsigned long		offset;
 	unsigned long		free_pages;
-	unsigned long		inactive_clean_pages;
-	unsigned long		inactive_dirty_pages;
 	unsigned long		pages_min, pages_low, pages_high;
+	int			need_balance;
 
 	/*
 	 * free areas of different sizes
 	 */
-	struct list_head	inactive_clean_list;
 	free_area_t		free_area[MAX_ORDER];
+
+	/*
+	 * Discontig memory support fields.
+	 */
+	struct pglist_data	*zone_pgdat;
+	struct page		*zone_mem_map;
+	unsigned long		zone_start_paddr;
+	unsigned long		zone_start_mapnr;
 
 	/*
 	 * rarely used fields:
 	 */
 	char			*name;
 	unsigned long		size;
-	/*
-	 * Discontig memory support fields.
-	 */
-	struct pglist_data	*zone_pgdat;
-	unsigned long		zone_start_paddr;
-	unsigned long		zone_start_mapnr;
-	struct page		*zone_mem_map;
 } zone_t;
 
 #define ZONE_DMA		0
@@ -70,15 +80,26 @@ typedef struct zone_struct {
  */
 typedef struct zonelist_struct {
 	zone_t * zones [MAX_NR_ZONES+1]; // NULL delimited
-	int gfp_mask;
 } zonelist_t;
 
-#define NR_GFPINDEX		0x100
+#define GFP_ZONEMASK	0x0f
 
+/*
+ * The pg_data_t structure is used in machines with CONFIG_DISCONTIGMEM
+ * (mostly NUMA machines?) to denote a higher-level memory zone than the
+ * zone_struct denotes.
+ *
+ * On NUMA machines, each NUMA node would have a pg_data_t to describe
+ * it's memory layout.
+ *
+ * XXX: we need to move the global memory statistics (active_list, ...)
+ *      into the pg_data_t to properly support NUMA.
+ */
 struct bootmem_data;
 typedef struct pglist_data {
 	zone_t node_zones[MAX_NR_ZONES];
-	zonelist_t node_zonelists[NR_GFPINDEX];
+	zonelist_t node_zonelists[GFP_ZONEMASK+1];
+	int nr_zones;
 	struct page *node_mem_map;
 	unsigned long *valid_addr_bitmap;
 	struct bootmem_data *bdata;
@@ -92,9 +113,8 @@ typedef struct pglist_data {
 extern int numnodes;
 extern pg_data_t *pgdat_list;
 
-#define memclass(pgzone, tzone)	(((pgzone)->zone_pgdat == (tzone)->zone_pgdat) \
-			&& (((pgzone) - (pgzone)->zone_pgdat->node_zones) <= \
-			((tzone) - (pgzone)->zone_pgdat->node_zones)))
+#define memclass(pgzone, classzone)	(((pgzone)->zone_pgdat == (classzone)->zone_pgdat) \
+			&& ((pgzone) <= (classzone)))
 
 /*
  * The following two are not meant for general usage. They are here as

@@ -1,81 +1,12 @@
 /*
  *
- * Hardware accelerated Matrox Millennium I, II, Mystique, G100, G200 and G400
+ * Hardware accelerated Matrox Millennium I, II, Mystique, G100, G200, G400 and G450.
  *
- * (c) 1998,1999,2000 Petr Vandrovec <vandrove@vc.cvut.cz>
+ * (c) 1998-2001 Petr Vandrovec <vandrove@vc.cvut.cz>
  *
- * Version: 1.50 2000/08/10
+ * Version: 1.54 2001/09/09
  *
- * MTRR stuff: 1998 Tom Rini <trini@kernel.crashing.org>
- *
- * Contributors: "menion?" <menion@mindless.com>
- *                     Betatesting, fixes, ideas
- *
- *               "Kurt Garloff" <garloff@suse.de>
- *                     Betatesting, fixes, ideas, videomodes, videomodes timmings
- *
- *               "Tom Rini" <trini@kernel.crashing.org>
- *                     MTRR stuff, PPC cleanups, betatesting, fixes, ideas
- *
- *               "Bibek Sahu" <scorpio@dodds.net>
- *                     Access device through readb|w|l and write b|w|l
- *                     Extensive debugging stuff
- *
- *               "Daniel Haun" <haund@usa.net>
- *                     Testing, hardware cursor fixes
- *
- *               "Scott Wood" <sawst46+@pitt.edu>
- *                     Fixes
- *
- *               "Gerd Knorr" <kraxel@goldbach.isdn.cs.tu-berlin.de>
- *                     Betatesting
- *
- *               "Kelly French" <targon@hazmat.com>
- *               "Fernando Herrera" <fherrera@eurielec.etsit.upm.es>
- *                     Betatesting, bug reporting
- *
- *               "Pablo Bianucci" <pbian@pccp.com.ar>
- *                     Fixes, ideas, betatesting
- *
- *               "Inaky Perez Gonzalez" <inaky@peloncho.fis.ucm.es>
- *                     Fixes, enhandcements, ideas, betatesting
- *
- *               "Ryuichi Oikawa" <roikawa@rr.iiij4u.or.jp>
- *                     PPC betatesting, PPC support, backward compatibility
- *
- *               "Paul Womar" <Paul@pwomar.demon.co.uk>
- *               "Owen Waller" <O.Waller@ee.qub.ac.uk>
- *                     PPC betatesting
- *
- *               "Thomas Pornin" <pornin@bolet.ens.fr>
- *                     Alpha betatesting
- *
- *               "Pieter van Leuven" <pvl@iae.nl>
- *               "Ulf Jaenicke-Roessler" <ujr@physik.phy.tu-dresden.de>
- *                     G100 testing
- *
- *               "H. Peter Arvin" <hpa@transmeta.com>
- *                     Ideas
- *
- *               "Cort Dougan" <cort@cs.nmt.edu>
- *                     CHRP fixes and PReP cleanup
- *
- *               "Mark Vojkovich" <mvojkovi@ucsd.edu>
- *                     G400 support
- *
- *               "Ken Aaker" <kdaaker@rchland.vnet.ibm.com>
- *                     memtype extension (needed for GXT130P RS/6000 adapter)
- *
- * (following author is not in any relation with this code, but his code
- *  is included in this driver)
- *
- * Based on framebuffer driver for VBE 2.0 compliant graphic boards
- *     (c) 1998 Gerd Knorr <kraxel@cs.tu-berlin.de>
- *
- * (following author is not in any relation with this code, but his ideas
- *  were used when writting this driver)
- *
- *		 FreeVBE/AF (Matrox), "Shawn Hargreaves" <shawn@talula.demon.co.uk>
+ * See matroxfb_base.c for contributors.
  *
  */
 
@@ -102,12 +33,14 @@
 #define DAC1064_OPT_RESERVED	0x10
 
 static void matroxfb_DAC1064_flashcursor(unsigned long ptr) {
+	unsigned long flags;
+
 #define minfo ((struct matrox_fb_info*)ptr)
-	matroxfb_DAC_lock();
+	matroxfb_DAC_lock_irqsave(flags);
 	outDAC1064(PMINFO M1064_XCURCTRL, inDAC1064(PMINFO M1064_XCURCTRL) ^ M1064_XCURCTRL_DIS ^ M1064_XCURCTRL_XGA);
 	ACCESS_FBINFO(cursor.timer.expires) = jiffies + HZ/2;
 	add_timer(&ACCESS_FBINFO(cursor.timer));
-	matroxfb_DAC_unlock();
+	matroxfb_DAC_unlock_irqrestore(flags);
 #undef minfo
 }
 
@@ -386,9 +319,10 @@ void DAC1064_global_restore(CPMINFO const struct matrox_hw_state* hw) {
 	outDAC1064(PMINFO M1064_XMISCCTRL, hw->DACreg[POS1064_XMISCCTRL]);
 	if (ACCESS_FBINFO(devflags.accelerator) == FB_ACCEL_MATROX_MGAG400) {
 		outDAC1064(PMINFO 0x20, 0x04);
-		outDAC1064(PMINFO 0x1F, 0x00);
+		outDAC1064(PMINFO 0x1F, ACCESS_FBINFO(devflags.dfp_type));
 		if (ACCESS_FBINFO(devflags.g450dac)) {
-			outDAC1064(PMINFO M1064_X8B, 0xCC);	/* only matrox know... */
+			outDAC1064(PMINFO M1064_XSYNCCTRL, 0xCC);	/* only matrox know... */
+			outDAC1064(PMINFO M1064_XPWRCTRL, 0x1F);	/* powerup everything */
 			outDAC1064(PMINFO M1064_XOUTPUTCONN, hw->DACreg[POS1064_XOUTPUTCONN]);
 		}
 	}
@@ -485,7 +419,12 @@ static void DAC1064_restore_1(WPMINFO const struct matrox_hw_state* hw, const st
 	outDAC1064(PMINFO DAC1064_XSYSPLLM, hw->DACclk[3]);
 	outDAC1064(PMINFO DAC1064_XSYSPLLN, hw->DACclk[4]);
 	outDAC1064(PMINFO DAC1064_XSYSPLLP, hw->DACclk[5]);
-	if (!oldhw || memcmp(hw->DACreg, oldhw->DACreg, sizeof(MGA1064_DAC_regs))) {
+	/*
+	 * We must ALWAYS reprogram hardware due to broken XF4 matrox drivers...
+	 *
+	 * if (!oldhw || memcmp(hw->DACreg, oldhw->DACreg, sizeof(MGA1064_DAC_regs))) 
+	 */
+	{
 		unsigned int i;
 
 		for (i = 0; i < sizeof(MGA1064_DAC_regs); i++) {
@@ -783,10 +722,16 @@ static int MGAG100_preinit(WPMINFO struct matrox_hw_state* hw){
 	ACCESS_FBINFO(capable.vxres) = vxres_g100;
 	ACCESS_FBINFO(features.accel.has_cacheflush) = 1;
 	ACCESS_FBINFO(cursor.timer.function) = matroxfb_DAC1064_flashcursor;
-	ACCESS_FBINFO(capable.plnwt) = ACCESS_FBINFO(devflags.accelerator) != FB_ACCEL_MATROX_MGAG100;
+	ACCESS_FBINFO(capable.plnwt) = ACCESS_FBINFO(devflags.accelerator) == FB_ACCEL_MATROX_MGAG100
+			? ACCESS_FBINFO(devflags.sgram) : 1;
 
 	ACCESS_FBINFO(primout) = &m1064;
 
+	if (ACCESS_FBINFO(devflags.g450dac)) {
+		/* we must do this always, BIOS does not do it for us
+		   and accelerator dies without it */
+		mga_outl(0x1C0C, 0);
+	}
 	if (ACCESS_FBINFO(devflags.noinit))
 		return 0;
 	hw->MXoptionReg &= 0xC0000100;
@@ -907,6 +852,11 @@ static void MGAG100_reset(WPMINFO struct matrox_hw_state* hw){
 		}
 	}
 	DAC1064_setmclk(PMINFO hw, DAC1064_OPT_RESERVED | DAC1064_OPT_MDIV2 | DAC1064_OPT_GDIV1 | DAC1064_OPT_SCLK_PLL, 133333);
+	if (ACCESS_FBINFO(devflags.accelerator) == FB_ACCEL_MATROX_MGAG400) {
+		if (ACCESS_FBINFO(devflags.dfp_type) == -1) {
+			ACCESS_FBINFO(devflags.dfp_type) = inDAC1064(PMINFO 0x1F);
+		}
+	}
 	if (ACCESS_FBINFO(devflags.noinit))
 		return;
 	MGAG100_setPixClock(PMINFO 4, 25175);
@@ -985,3 +935,4 @@ EXPORT_SYMBOL(matrox_G100);
 EXPORT_SYMBOL(DAC1064_global_init);
 EXPORT_SYMBOL(DAC1064_global_restore);
 #endif
+MODULE_LICENSE("GPL");

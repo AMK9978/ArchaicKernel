@@ -1,5 +1,5 @@
 /*
- * $Id: mtdcore.c,v 1.27 2000/12/10 01:10:09 dwmw2 Exp $
+ * $Id: mtdcore.c,v 1.31 2001/10/02 15:05:11 dwmw2 Exp $
  *
  * Core registration and callback routines for MTD
  * drivers and users.
@@ -11,7 +11,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/major.h>
@@ -258,8 +258,8 @@ static inline int mtd_proc_info (char *buf, int i)
 	if (!this)
 		return 0;
 
-	return sprintf(buf, "mtd%d: %8.8lx \"%s\"\n", i, this->size,
-		       this->name);
+	return sprintf(buf, "mtd%d: %8.8x %8.8x \"%s\"\n", i, this->size,
+		       this->erasesize, this->name);
 }
 
 static int mtd_read_proc ( char *page, char **start, off_t off,int count
@@ -270,11 +270,12 @@ static int mtd_read_proc ( char *page, char **start, off_t off,int count
 #endif
 			)
 {
-	int len = 0, l, i;
+	int len, l, i;
         off_t   begin = 0;
 
 	down(&mtd_table_mutex);
 
+	len = sprintf(page, "dev:    size   erasesize  name\n");
         for (i=0; i< MAX_MTD_DEVICES; i++) {
 
                 l = mtd_proc_info(page + len, i);
@@ -316,12 +317,7 @@ struct proc_dir_entry mtd_proc_entry = {
 /*====================================================================*/
 /* Init code */
 
-#if  LINUX_VERSION_CODE < 0x20212 && defined(MODULE)
-#define init_mtd init_module
-#define cleanup_mtd cleanup_module
-#endif
-
-mod_init_t init_mtd(void)
+int __init init_mtd(void)
 {
 #ifdef CONFIG_PROC_FS
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
@@ -342,7 +338,7 @@ mod_init_t init_mtd(void)
 	return 0;
 }
 
-mod_exit_t cleanup_mtd(void)
+static void __exit cleanup_mtd(void)
 {
 #ifdef CONFIG_PM
 	if (mtd_pm_dev) {
@@ -365,3 +361,6 @@ module_init(init_mtd);
 module_exit(cleanup_mtd);
 
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("David Woodhouse <dwmw2@infradead.org>");
+MODULE_DESCRIPTION("Core MTD registration and access routines");

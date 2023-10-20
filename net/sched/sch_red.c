@@ -363,10 +363,8 @@ red_drop(struct Qdisc* sch)
 static void red_reset(struct Qdisc* sch)
 {
 	struct red_sched_data *q = (struct red_sched_data *)sch->data;
-	struct sk_buff *skb;
 
-	while((skb=__skb_dequeue(&sch->q))!=NULL)
-		kfree_skb(skb);
+	__skb_queue_purge(&sch->q);
 	sch->stats.backlog = 0;
 	PSCHED_SET_PASTPERFECT(q->qidlestart);
 	q->qave = 0;
@@ -499,3 +497,4 @@ void cleanup_module(void)
 	unregister_qdisc(&red_qdisc_ops);
 }
 #endif
+MODULE_LICENSE("GPL");

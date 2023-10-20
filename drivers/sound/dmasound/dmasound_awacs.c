@@ -10,12 +10,13 @@
 
 #include <linux/module.h>
 #include <linux/config.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/soundcard.h>
 #include <linux/adb.h>
 #include <linux/nvram.h>
+#include <linux/tty.h>
 #include <linux/vt_kern.h>
 #ifdef CONFIG_ADB_CUDA
 #include <linux/cuda.h>
@@ -266,7 +267,7 @@ static ssize_t pmac_ct_law(const u_char *userPtr, size_t userCount,
 	frameLeft >>= 2;
 	if (stereo)
 		userCount >>= 1;
-	used = count = min(userCount, frameLeft);
+	used = count = min_t(unsigned long, userCount, frameLeft);
 	while (count > 0) {
 		u_char data;
 		if (get_user(data, userPtr++))
@@ -297,7 +298,7 @@ static ssize_t pmac_ct_s8(const u_char *userPtr, size_t userCount,
 	frameLeft >>= 2;
 	if (stereo)
 		userCount >>= 1;
-	used = count = min(userCount, frameLeft);
+	used = count = min_t(unsigned long, userCount, frameLeft);
 	while (count > 0) {
 		u_char data;
 		if (get_user(data, userPtr++))
@@ -328,7 +329,7 @@ static ssize_t pmac_ct_u8(const u_char *userPtr, size_t userCount,
 	frameLeft >>= 2;
 	if (stereo)
 		userCount >>= 1;
-	used = count = min(userCount, frameLeft);
+	used = count = min_t(unsigned long, userCount, frameLeft);
 	while (count > 0) {
 		u_char data;
 		if (get_user(data, userPtr++))
@@ -358,7 +359,7 @@ static ssize_t pmac_ct_s16(const u_char *userPtr, size_t userCount,
 
 	frameLeft >>= 2;
 	userCount >>= (stereo? 2: 1);
-	used = count = min(userCount, frameLeft);
+	used = count = min_t(unsigned long, userCount, frameLeft);
 	if (!stereo) {
 		short *up = (short *) userPtr;
 		while (count > 0) {
@@ -389,7 +390,7 @@ static ssize_t pmac_ct_u16(const u_char *userPtr, size_t userCount,
 
 	frameLeft >>= 2;
 	userCount >>= (stereo? 2: 1);
-	used = count = min(userCount, frameLeft);
+	used = count = min_t(unsigned long, userCount, frameLeft);
 	while (count > 0) {
 		int data;
 		if (get_user(data, up++))
@@ -647,7 +648,7 @@ static ssize_t pmac_ct_s8_read(const u_char *userPtr, size_t userCount,
 	frameLeft >>= 2;
 	if (stereo)
 		userCount >>= 1;
-	used = count = min(userCount, frameLeft);
+	used = count = min_t(unsigned long, userCount, frameLeft);
 	while (count > 0) {
 		u_char data;
 
@@ -680,7 +681,7 @@ static ssize_t pmac_ct_u8_read(const u_char *userPtr, size_t userCount,
 	frameLeft >>= 2;
 	if (stereo)
 		userCount >>= 1;
-	used = count = min(userCount, frameLeft);
+	used = count = min_t(unsigned long, userCount, frameLeft);
 	while (count > 0) {
 		u_char data;
 
@@ -712,7 +713,7 @@ static ssize_t pmac_ct_s16_read(const u_char *userPtr, size_t userCount,
 
 	frameLeft >>= 2;
 	userCount >>= (stereo? 2: 1);
-	used = count = min(userCount, frameLeft);
+	used = count = min_t(unsigned long, userCount, frameLeft);
 	if (!stereo) {
 		short *up = (short *) userPtr;
 		while (count > 0) {
@@ -743,7 +744,7 @@ static ssize_t pmac_ct_u16_read(const u_char *userPtr, size_t userCount,
 
 	frameLeft >>= 2;
 	userCount >>= (stereo? 2: 1);
-	used = count = min(userCount, frameLeft);
+	used = count = min_t(unsigned long, userCount, frameLeft);
 	while (count > 0) {
 		int data;
 
@@ -2179,3 +2180,4 @@ static void __exit dmasound_awacs_cleanup(void)
 
 module_init(dmasound_awacs_init);
 module_exit(dmasound_awacs_cleanup);
+MODULE_LICENSE("GPL");

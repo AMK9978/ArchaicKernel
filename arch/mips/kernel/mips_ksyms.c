@@ -5,7 +5,7 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1996, 1997, 1998, 2000 by Ralf Baechle
+ * Copyright (C) 1996, 1997, 1998, 2000, 2001 by Ralf Baechle
  */
 #include <linux/config.h>
 #include <linux/module.h>
@@ -17,6 +17,7 @@
 #include <linux/pci.h>
 #include <linux/ide.h>
 
+#include <asm/bootinfo.h>
 #include <asm/checksum.h>
 #include <asm/dma.h>
 #include <asm/io.h>
@@ -40,6 +41,7 @@ extern long __strlen_user_asm(const char *s);
 extern long __strnlen_user_nocheck_asm(const char *s);
 extern long __strnlen_user_asm(const char *s);
 
+EXPORT_SYMBOL(mips_machtype);
 EXPORT_SYMBOL(EISA_bus);
 
 /*
@@ -94,9 +96,10 @@ EXPORT_SYMBOL(invalid_pte_table);
 /*
  * Semaphore stuff
  */
-EXPORT_SYMBOL(__down_read);
-EXPORT_SYMBOL(__down_write);
-EXPORT_SYMBOL(__rwsem_wake);
+EXPORT_SYMBOL(__down);
+EXPORT_SYMBOL(__down_interruptible);
+EXPORT_SYMBOL(__down_trylock);
+EXPORT_SYMBOL(__up);
 
 /*
  * Base address of ports for Intel style I/O.
@@ -125,12 +128,6 @@ EXPORT_SYMBOL(hpc3c0);
 int register_fpe(void (*handler)(struct pt_regs *regs, unsigned int fcr31));
 int unregister_fpe(void (*handler)(struct pt_regs *regs, unsigned int fcr31));
 
-#ifdef CONFIG_MIPS_FPE_MODULE
-EXPORT_SYMBOL(__compute_return_epc);
-EXPORT_SYMBOL(register_fpe);
-EXPORT_SYMBOL(unregister_fpe);
-#endif
-
 #ifdef CONFIG_VT
 EXPORT_SYMBOL(screen_info);
 #endif
@@ -140,3 +137,4 @@ EXPORT_SYMBOL(ide_ops);
 #endif
 
 EXPORT_SYMBOL(get_wchan);
+EXPORT_SYMBOL(flush_tlb_page);

@@ -6,19 +6,19 @@
 	These cards are sold under several model numbers, usually 2724*.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
-	The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-
-	Center of Excellence in Space Data and Information Sciences
-		Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
 
 	As is often the case, a great deal of credit is owed to Russ Nelson.
 	The Crynwr packet driver was my primary source of HP-specific
 	programming information.
 */
 
-static const char *version =
+static const char version[] =
 "hp-plus.c:v1.10 9/24/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 #include <linux/module.h>
@@ -141,7 +141,7 @@ static int __init hpp_probe1(struct net_device *dev, int ioaddr)
 {
 	int i, retval;
 	unsigned char checksum = 0;
-	const char *name = "HP-PC-LAN+";
+	const char name[] = "HP-PC-LAN+";
 	int mem_start;
 	static unsigned version_printed;
 
@@ -408,6 +408,8 @@ static int irq[MAX_HPP_CARDS];
 
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_HPP_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_HPP_CARDS) "i");
+MODULE_PARM_DESC(io, "HP PC-LAN+ I/O port address(es)");
+MODULE_PARM_DESC(irq, "HP PC-LAN+ IRQ number(s); ignored if properly detected");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
@@ -455,6 +457,8 @@ cleanup_module(void)
 	}
 }
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
+
 
 /*
  * Local variables:

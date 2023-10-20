@@ -1,12 +1,12 @@
 /******************************************************************************
  *
  * Name: acconfig.h - Global configuration constants
- *       $Revision: 48 $
+ *       $Revision: 74 $
  *
  *****************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -53,7 +53,11 @@
 
 /* Version string */
 
-#define ACPI_CA_VERSION             __DATE__
+#define ACPI_CA_VERSION             0x20011018
+
+/* Version of ACPI supported */
+
+#define ACPI_CA_SUPPORT_LEVEL       2
 
 
 /* Maximum objects in the various object caches */
@@ -62,7 +66,7 @@
 #define MAX_PARSE_CACHE_DEPTH       96          /* Parse tree objects */
 #define MAX_EXTPARSE_CACHE_DEPTH    64          /* Parse tree objects */
 #define MAX_OBJECT_CACHE_DEPTH      64          /* Interpreter operand objects */
-#define MAX_WALK_CACHE_DEPTH        2           /* Objects for parse tree walks (method execution) */
+#define MAX_WALK_CACHE_DEPTH        4           /* Objects for parse tree walks (method execution) */
 
 
 /* String size constants */
@@ -78,7 +82,7 @@
 
 /* Max reference count (for debug only) */
 
-#define MAX_REFERENCE_COUNT         0x200
+#define MAX_REFERENCE_COUNT         0x400
 
 
 /* Size of cached memory mapping for system memory operation region */
@@ -89,7 +93,7 @@
 /*
  * Debugger threading model
  * Use single threaded if the entire subsystem is contained in an application
- * Use multiple threaded when the the subsystem is running in the kernel.
+ * Use multiple threaded when the subsystem is running in the kernel.
  *
  * By default the model is single threaded if ACPI_APPLICATION is set,
  * multi-threaded if ACPI_APPLICATION is not set.
@@ -122,6 +126,10 @@
 #define MTH_NUM_ARGS                7
 #define MTH_MAX_ARG                 6
 
+/* Maximum length of resulting string when converting from a buffer */
+
+#define ACPI_MAX_STRING_CONVERSION  200
+
 /*
  * Operand Stack (in WALK_STATE), Must be large enough to contain MTH_MAX_ARG
  */
@@ -144,10 +152,10 @@
 #define HI_RSDP_WINDOW_SIZE         0x20000
 #define RSDP_SCAN_STEP              16
 
+/* Maximum Space_ids for Operation Regions */
 
-/* Maximum nesting of package objects */
-
-#define MAX_PACKAGE_DEPTH           16
+#define ACPI_MAX_ADDRESS_SPACE      255
+#define ACPI_NUM_ADDRESS_SPACES     256
 
 
 #endif /* _ACCONFIG_H */

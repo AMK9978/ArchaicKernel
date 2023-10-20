@@ -1,12 +1,12 @@
 /******************************************************************************
  *
  * Module Name: tbutils - Table manipulation utilities
- *              $Revision: 31 $
+ *              $Revision: 42 $
  *
  *****************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -29,7 +29,7 @@
 #include "acinterp.h"
 
 
-#define _COMPONENT          TABLE_MANAGER
+#define _COMPONENT          ACPI_TABLES
 	 MODULE_NAME         ("tbutils")
 
 
@@ -46,19 +46,21 @@
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_tb_handle_to_object (
 	u16                     table_id,
-	ACPI_TABLE_DESC         **table_desc)
+	acpi_table_desc         **table_desc)
 {
 	u32                     i;
-	ACPI_TABLE_DESC         *list_head;
+	acpi_table_desc         *list_head;
+
+
+	PROC_NAME ("Tb_handle_to_object");
 
 
 	for (i = 0; i < ACPI_TABLE_MAX; i++) {
 		list_head = &acpi_gbl_acpi_tables[i];
-		do
-		{
+		do {
 			if (list_head->table_id == table_id) {
 				*table_desc = list_head;
 				return (AE_OK);
@@ -70,6 +72,7 @@ acpi_tb_handle_to_object (
 	}
 
 
+	ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "Table_id=%X does not exist\n", table_id));
 	return (AE_BAD_PARAMETER);
 }
 
@@ -91,8 +94,8 @@ acpi_tb_system_table_pointer (
 	void                    *where)
 {
 	u32                     i;
-	ACPI_TABLE_DESC         *table_desc;
-	ACPI_TABLE_HEADER       *table;
+	acpi_table_desc         *table_desc;
+	acpi_table_header       *table;
 
 
 	/* No function trace, called too often! */
@@ -108,8 +111,7 @@ acpi_tb_system_table_pointer (
 	/* Check for a pointer within the DSDT */
 
 	if ((acpi_gbl_DSDT) &&
-		(IS_IN_ACPI_TABLE (where, acpi_gbl_DSDT)))
-	{
+		(IS_IN_ACPI_TABLE (where, acpi_gbl_DSDT))) {
 		return (TRUE);
 	}
 
@@ -170,16 +172,21 @@ acpi_tb_system_table_pointer (
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_tb_validate_table_header (
-	ACPI_TABLE_HEADER       *table_header)
+	acpi_table_header       *table_header)
 {
-	ACPI_NAME               signature;
+	acpi_name               signature;
+
+
+	PROC_NAME ("Tb_validate_table_header");
 
 
 	/* Verify that this is a valid address */
 
-	if (!acpi_os_readable (table_header, sizeof (ACPI_TABLE_HEADER))) {
+	if (!acpi_os_readable (table_header, sizeof (acpi_table_header))) {
+		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
+			"Cannot read table header at %p\n", table_header));
 		return (AE_BAD_ADDRESS);
 	}
 
@@ -187,16 +194,26 @@ acpi_tb_validate_table_header (
 	/* Ensure that the signature is 4 ASCII characters */
 
 	MOVE_UNALIGNED32_TO_32 (&signature, &table_header->signature);
-	if (!acpi_cm_valid_acpi_name (signature)) {
-		REPORT_WARNING (("Invalid table signature found\n"));
+	if (!acpi_ut_valid_acpi_name (signature)) {
+		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
+			"Table signature at %p [%p] has invalid characters\n",
+			table_header, &signature));
+
+		REPORT_WARNING (("Invalid table signature %4.4s found\n", (char*)&signature));
+		DUMP_BUFFER (table_header, sizeof (acpi_table_header));
 		return (AE_BAD_SIGNATURE);
 	}
 
 
 	/* Validate the table length */
 
-	if (table_header->length < sizeof (ACPI_TABLE_HEADER)) {
+	if (table_header->length < sizeof (acpi_table_header)) {
+		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
+			"Invalid length in table header %p name %4.4s\n",
+			table_header, (char*)&signature));
+
 		REPORT_WARNING (("Invalid table header length found\n"));
+		DUMP_BUFFER (table_header, sizeof (acpi_table_header));
 		return (AE_BAD_HEADER);
 	}
 
@@ -220,15 +237,18 @@ acpi_tb_validate_table_header (
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_tb_map_acpi_table (
 	ACPI_PHYSICAL_ADDRESS   physical_address,
 	u32                     *size,
-	void                    **logical_address)
+	acpi_table_header       **logical_address)
 {
-	ACPI_TABLE_HEADER       *table;
+	acpi_table_header       *table;
 	u32                     table_size = *size;
-	ACPI_STATUS             status = AE_OK;
+	acpi_status             status = AE_OK;
+
+
+	PROC_NAME ("Tb_map_acpi_table");
 
 
 	/* If size is zero, look at the table header to get the actual size */
@@ -236,7 +256,7 @@ acpi_tb_map_acpi_table (
 	if ((*size) == 0) {
 		/* Get the table header so we can extract the table length */
 
-		status = acpi_os_map_memory (physical_address, sizeof (ACPI_TABLE_HEADER),
+		status = acpi_os_map_memory (physical_address, sizeof (acpi_table_header),
 				  (void **) &table);
 		if (ACPI_FAILURE (status)) {
 			return (status);
@@ -250,12 +270,11 @@ acpi_tb_map_acpi_table (
 		 * Validate the header and delete the mapping.
 		 * We will create a mapping for the full table below.
 		 */
-
 		status = acpi_tb_validate_table_header (table);
 
 		/* Always unmap the memory for the header */
 
-		acpi_os_unmap_memory (table, sizeof (ACPI_TABLE_HEADER));
+		acpi_os_unmap_memory (table, sizeof (acpi_table_header));
 
 		/* Exit if header invalid */
 
@@ -271,6 +290,10 @@ acpi_tb_map_acpi_table (
 	if (ACPI_FAILURE (status)) {
 		return (status);
 	}
+
+	ACPI_DEBUG_PRINT ((ACPI_DB_INFO,
+		"Mapped memory for ACPI table, length=%d(%X) at %p\n",
+		table_size, table_size, table));
 
 	*size = table_size;
 	*logical_address = table;
@@ -292,12 +315,15 @@ acpi_tb_map_acpi_table (
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_tb_verify_table_checksum (
-	ACPI_TABLE_HEADER       *table_header)
+	acpi_table_header       *table_header)
 {
 	u8                      checksum;
-	ACPI_STATUS             status = AE_OK;
+	acpi_status             status = AE_OK;
+
+
+	FUNCTION_TRACE ("Tb_verify_table_checksum");
 
 
 	/* Compute the checksum on the table */
@@ -308,13 +334,13 @@ acpi_tb_verify_table_checksum (
 
 	if (checksum) {
 		REPORT_WARNING (("Invalid checksum (%X) in table %4.4s\n",
-			checksum, &table_header->signature));
+			checksum, (char*)&table_header->signature));
 
 		status = AE_BAD_CHECKSUM;
 	}
 
 
-	return (status);
+	return_ACPI_STATUS (status);
 }
 
 

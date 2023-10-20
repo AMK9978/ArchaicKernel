@@ -11,6 +11,7 @@
  * 
  *     Copyright (c) 1998-2000 Dag Brattli <dagb@cs.uit.no>, 
  *     All Rights Reserved.
+ *     Copyright (c) 2000-2001 Jean Tourrilhes <jt@hpl.hp.com>
  *     
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -60,7 +61,7 @@ static inline void irlap_insert_info(struct irlap_cb *self,
 	 */
 	cb->magic = LAP_MAGIC;
 	cb->mtt = self->mtt_required;
-	cb->speed = self->speed;
+	cb->next_speed = self->speed;
 
 	/* Reset */
 	self->mtt_required = 0;
@@ -70,10 +71,13 @@ static inline void irlap_insert_info(struct irlap_cb *self,
 	 * force the negotiated minimum turnaround time 
 	 */
 	cb->xbofs = self->bofs_count;
+	cb->next_xbofs = self->next_bofs;
 	cb->xbofs_delay = self->xbofs_delay;
 	
 	/* Reset XBOF's delay (used only for getting min turn time) */
 	self->xbofs_delay = 0;
+	/* Put the correct xbofs value for the next packet */
+	self->bofs_count = self->next_bofs;
 }
 
 /*
@@ -693,7 +697,7 @@ static void irlap_recv_srej_frame(struct irlap_cb *self, struct sk_buff *skb,
 static void irlap_recv_disc_frame(struct irlap_cb *self, struct sk_buff *skb, 
 				  struct irlap_info *info, int command)
 {
-	IRDA_DEBUG(0, __FUNCTION__ "()\n");
+	IRDA_DEBUG(2, __FUNCTION__ "()\n");
 
 	/* Check if this is a command or a response frame */
 	if (command)
@@ -739,12 +743,6 @@ void irlap_send_data_primary(struct irlap_cb *self, struct sk_buff *skb)
 			return;
 		}
 		
-		/*
-		 *  make sure the skb->sk accounting of memory usage is sane
-		 */
-		if (skb->sk != NULL)
-			skb_set_owner_w(tx_skb, skb->sk);
-		
 		/* 
 		 *  Insert frame in store, in case of retransmissions 
 		 */
@@ -784,12 +782,6 @@ void irlap_send_data_primary_poll(struct irlap_cb *self, struct sk_buff *skb)
 		if (tx_skb == NULL) {
 			return;
 		}
-		
-		/*
-		 *  make sure the skb->sk accounting of memory usage is sane
-		 */
-		if (skb->sk != NULL)
-			skb_set_owner_w(tx_skb, skb->sk);
 		
 		/* 
 		 *  Insert frame in store, in case of retransmissions 
@@ -860,9 +852,6 @@ void irlap_send_data_secondary_final(struct irlap_cb *self,
 			return;
 		}		
 
-		if (skb->sk != NULL)
-			skb_set_owner_w(tx_skb, skb->sk);
-		
 		/* Insert frame in store */
 		skb_queue_tail(&self->wx_list, skb_get(skb));
 		
@@ -913,9 +902,6 @@ void irlap_send_data_secondary(struct irlap_cb *self, struct sk_buff *skb)
 		if (tx_skb == NULL) {
 			return;
 		}		
-		
-		if (skb->sk != NULL)
-			skb_set_owner_w(tx_skb, skb->sk);
 		
 		/* Insert frame in store */
 		skb_queue_tail(&self->wx_list, skb_get(skb));
@@ -969,12 +955,6 @@ void irlap_resend_rejected_frames(struct irlap_cb *self, int command)
 		/* Unlink tx_skb from list */
 		tx_skb->next = tx_skb->prev = NULL;
 		tx_skb->list = NULL;
-
-		/*
-		 *  make sure the skb->sk accounting of memory usage is sane
-		 */
-		if (skb->sk != NULL)
-			skb_set_owner_w(tx_skb, skb->sk);
 
 		/* Clear old Nr field + poll bit */
 		tx_skb->data[1] &= 0x0f;
@@ -1055,12 +1035,6 @@ void irlap_resend_rejected_frame(struct irlap_cb *self, int command)
 		/* Unlink tx_skb from list */
 		tx_skb->next = tx_skb->prev = NULL;
 		tx_skb->list = NULL;
-
-		/*
-		 *  make sure the skb->sk accounting of memory usage is sane
-		 */
-		if (skb->sk != NULL)
-			skb_set_owner_w(tx_skb, skb->sk);
 
 		/* Clear old Nr field + poll bit */
 		tx_skb->data[1] &= 0x0f;

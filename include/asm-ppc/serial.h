@@ -1,12 +1,20 @@
 /*
+ * BK Id: SCCS/s.serial.h 1.15 10/23/01 08:09:35 trini
+ */
+/*
  * include/asm-ppc/serial.h
  */
 
 #ifdef __KERNEL__
+#ifndef __ASM_SERIAL_H__
+#define __ASM_SERIAL_H__
+
 #include <linux/config.h>
 
 #ifdef CONFIG_GEMINI
 #include <asm/gemini_serial.h>
+#elif defined(CONFIG_4xx)
+#include <asm/ppc4xx_serial.h>
 #else
 
 /*
@@ -127,5 +135,6 @@
 	HUB6_SERIAL_PORT_DFNS		\
 	MCA_SERIAL_PORT_DFNS
 
-#endif /* CONFIG_GEMINI */
+#endif /* !CONFIG_GEMINI and others */
+#endif /* __ASM_SERIAL_H__ */
 #endif /* __KERNEL__ */

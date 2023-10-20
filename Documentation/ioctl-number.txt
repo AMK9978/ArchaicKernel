@@ -82,6 +82,7 @@ Code	Seq#	Include File		Comments
 'B'	C0-FF				advanced bbus
 					<mailto:maassen@uni-freiburg.de>
 'C'	all	linux/soundcard.h
+'D'	all	asm-s390/dasd.h
 'F'	all	linux/fb.h
 'I'	all	linux/isdn.h
 'J'	00-1F	drivers/scsi/gdth_ioctl.h
@@ -91,6 +92,7 @@ Code	Seq#	Include File		Comments
 					<http://linux01.gwdg.de/~alatham/ppdd.html>
 'M'	all	linux/soundcard.h	conflict!
 'M'	00-1F	linux/isicom.h		conflict!
+'N'	00-1F	drivers/usb/scanner.h
 'P'	all	linux/soundcard.h
 'Q'	all	linux/soundcard.h
 'R'	00-1F	linux/random.h
@@ -137,7 +139,7 @@ Code	Seq#	Include File		Comments
 'p'	00-3F	linux/mc146818rtc.h
 'p'	40-7F	linux/nvram.h
 'p'	80-9F				user-space parport
-					<mailto:tim@cyberelk.demon.co.uk>
+					<mailto:tim@cyberelk.net>
 'q'	00-1F	linux/videotext.h	conflict!
 'q'	80-FF				Internet PhoneJACK, Internet LineJACK
 					<http://www.quicknet.net>
@@ -185,3 +187,5 @@ Code	Seq#	Include File		Comments
 0xB1	00-1F	PPPoX			<mailto:mostrows@styx.uwaterloo.ca>
 0xCB	00-1F	CBM serial IEC bus	in development:
 					<mailto:michael.klein@puffin.lb.shuttle.de>
+
+0xFE	00-9F	Logical Volume Manager	<mailto:linux-lvm@sistina.com>

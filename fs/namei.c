@@ -15,21 +15,16 @@
  */
 
 #include <linux/init.h>
-#include <linux/mm.h>
-#include <linux/proc_fs.h>
-#include <linux/smp_lock.h>
+#include <linux/slab.h>
+#include <linux/fs.h>
 #include <linux/quotaops.h>
 #include <linux/pagemap.h>
-#include <linux/dcache.h>
 #include <linux/dnotify.h>
-
-#include <asm/uaccess.h>
-#include <asm/unaligned.h>
-#include <asm/semaphore.h>
-#include <asm/page.h>
-#include <asm/pgtable.h>
+#include <linux/smp_lock.h>
+#include <linux/personality.h>
 
 #include <asm/namei.h>
+#include <asm/uaccess.h>
 
 #define ACC_MODE(x) ("\000\004\002\006"[(x)&O_ACCMODE])
 
@@ -113,7 +108,7 @@ static inline int do_getname(const char *filename, char *page)
 	if ((unsigned long) filename >= TASK_SIZE) {
 		if (!segment_eq(get_fs(), KERNEL_DS))
 			return -EFAULT;
-	} else if (TASK_SIZE - (unsigned long) filename < PAGE_SIZE)
+	} else if (TASK_SIZE - (unsigned long) filename < PATH_MAX + 1)
 		len = TASK_SIZE - (unsigned long) filename;
 
 	retval = strncpy_from_user((char *)page, filename, len);
@@ -145,35 +140,55 @@ char * getname(const char * filename)
 }
 
 /*
- *	permission()
+ *	vfs_permission()
  *
  * is used to check for read/write/execute permissions on a file.
  * We use "fsuid" for this, letting us set arbitrary permissions
  * for filesystem access without changing the "normal" uids which
  * are used for other things..
  */
-int vfs_permission(struct inode * inode,int mask)
+int vfs_permission(struct inode * inode, int mask)
 {
-	int mode = inode->i_mode;
+	umode_t			mode = inode->i_mode;
 
-	if ((mask & S_IWOTH) && IS_RDONLY(inode) &&
-		 (S_ISREG(mode) || S_ISDIR(mode) || S_ISLNK(mode)))
-		return -EROFS; /* Nobody gets write access to a read-only fs */
+	if (mask & MAY_WRITE) {
+		/*
+		 * Nobody gets write access to a read-only fs.
+		 */
+		if (IS_RDONLY(inode) &&
+		    (S_ISREG(mode) || S_ISDIR(mode) || S_ISLNK(mode)))
+			return -EROFS;
 
-	if ((mask & S_IWOTH) && IS_IMMUTABLE(inode))
-		return -EACCES; /* Nobody gets write access to an immutable file */
+		/*
+		 * Nobody gets write access to an immutable file.
+		 */
+		if (IS_IMMUTABLE(inode))
+			return -EACCES;
+	}
 
 	if (current->fsuid == inode->i_uid)
 		mode >>= 6;
 	else if (in_group_p(inode->i_gid))
 		mode >>= 3;
 
-	if (((mode & mask & S_IRWXO) == mask) || capable(CAP_DAC_OVERRIDE))
+	/*
+	 * If the DACs are ok we don't need any capability check.
+	 */
+	if (((mode & mask & (MAY_READ|MAY_WRITE|MAY_EXEC)) == mask))
 		return 0;
 
-	/* read and search access */
-	if ((mask == S_IROTH) ||
-	    (S_ISDIR(inode->i_mode)  && !(mask & ~(S_IROTH | S_IXOTH))))
+	/*
+	 * Read/write DACs are always overridable.
+	 * Executable DACs are overridable if at least one exec bit is set.
+	 */
+	if ((mask & (MAY_READ|MAY_WRITE)) || (inode->i_mode & S_IXUGO))
+		if (capable(CAP_DAC_OVERRIDE))
+			return 0;
+
+	/*
+	 * Searching includes executable on directories, else just read.
+	 */
+	if (mask == MAY_READ || (S_ISDIR(inode->i_mode) && !(mask & MAY_WRITE)))
 		if (capable(CAP_DAC_READ_SEARCH))
 			return 0;
 
@@ -309,12 +324,26 @@ static struct dentry * real_lookup(struct dentry * parent, struct qstr * name, i
 	return result;
 }
 
+/*
+ * This limits recursive symlink follows to 8, while
+ * limiting consecutive symlinks to 40.
+ *
+ * Without that kind of total limit, nasty chains of consecutive
+ * symlinks can cause almost arbitrarily long lookups. 
+ */
 static inline int do_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
 	int err;
-	if (current->link_count >= 8)
+	if (current->link_count >= 5)
 		goto loop;
+	if (current->total_link_count >= 40)
+		goto loop;
+	if (current->need_resched) {
+		current->state = TASK_RUNNING;
+		schedule();
+	}
 	current->link_count++;
+	current->total_link_count++;
 	UPDATE_ATIME(dentry->d_inode);
 	err = dentry->d_inode->i_op->follow_link(dentry, nd);
 	current->link_count--;
@@ -351,22 +380,17 @@ int follow_up(struct vfsmount **mnt, struct dentry **dentry)
 
 static inline int __follow_down(struct vfsmount **mnt, struct dentry **dentry)
 {
-	struct list_head *p;
+	struct vfsmount *mounted;
+
 	spin_lock(&dcache_lock);
-	p = (*dentry)->d_vfsmnt.next;
-	while (p != &(*dentry)->d_vfsmnt) {
-		struct vfsmount *tmp;
-		tmp = list_entry(p, struct vfsmount, mnt_clash);
-		if (tmp->mnt_parent == *mnt) {
-			*mnt = mntget(tmp);
-			spin_unlock(&dcache_lock);
-			mntput(tmp->mnt_parent);
-			/* tmp holds the mountpoint, so... */
-			dput(*dentry);
-			*dentry = dget(tmp->mnt_root);
-			return 1;
-		}
-		p = p->next;
+	mounted = lookup_mnt(*mnt, *dentry);
+	if (mounted) {
+		*mnt = mntget(mounted);
+		spin_unlock(&dcache_lock);
+		dput(*dentry);
+		mntput(mounted->mnt_parent);
+		*dentry = dget(mounted->mnt_root);
+		return 1;
 	}
 	spin_unlock(&dcache_lock);
 	return 0;
@@ -411,6 +435,7 @@ static inline void follow_dotdot(struct nameidata *nd)
 		nd->mnt = parent;
 	}
 }
+
 /*
  * Name resolution.
  *
@@ -419,7 +444,7 @@ static inline void follow_dotdot(struct nameidata *nd)
  *
  * We expect 'base' to be positive and a directory.
  */
-int path_walk(const char * name, struct nameidata *nd)
+int link_path_walk(const char * name, struct nameidata *nd)
 {
 	struct dentry *dentry;
 	struct inode *inode;
@@ -610,15 +635,25 @@ return_err:
 	return err;
 }
 
+int path_walk(const char * name, struct nameidata *nd)
+{
+	current->total_link_count = 0;
+	return link_path_walk(name, nd);
+}
+
 /* SMP-safe */
 /* returns 1 if everything is done */
 static int __emul_lookup_dentry(const char *name, struct nameidata *nd)
 {
 	if (path_walk(name, nd))
-		return 0;
+		return 0;		/* something went wrong... */
 
-	if (!nd->dentry->d_inode) {
+	if (!nd->dentry->d_inode || S_ISDIR(nd->dentry->d_inode->i_mode)) {
 		struct nameidata nd_root;
+		/*
+		 * NAME was not found in alternate root or it's a directory.  Try to find
+		 * it in the normal root:
+		 */
 		nd_root.last_type = LAST_ROOT;
 		nd_root.flags = nd->flags;
 		read_lock(&current->fs->lock);
@@ -748,26 +783,24 @@ out:
 }
 
 /* SMP-safe */
-struct dentry * lookup_one(const char * name, struct dentry * base)
+struct dentry * lookup_one_len(const char * name, struct dentry * base, int len)
 {
 	unsigned long hash;
 	struct qstr this;
 	unsigned int c;
 
 	this.name = name;
-	c = *(const unsigned char *)name;
-	if (!c)
+	this.len = len;
+	if (!len)
 		goto access;
 
 	hash = init_name_hash();
-	do {
-		name++;
-		if (c == '/')
+	while (len--) {
+		c = *(const unsigned char *)name++;
+		if (c == '/' || c == '\0')
 			goto access;
 		hash = partial_name_hash(c, hash);
-		c = *(const unsigned char *)name;
-	} while (c);
-	this.len = name - (const char *) this.name;
+	}
 	this.hash = end_name_hash(hash);
 
 	return lookup_hash(&this, base);
@@ -899,7 +932,7 @@ int vfs_create(struct inode *dir, struct dentry *dentry, int mode)
 {
 	int error;
 
-	mode &= S_IALLUGO & ~current->fs->umask;
+	mode &= S_IALLUGO;
 	mode |= S_IFREG;
 
 	down(&dir->i_zombie);
@@ -988,7 +1021,8 @@ do_last:
 
 	/* Negative dentry, just create the file */
 	if (!dentry->d_inode) {
-		error = vfs_create(dir->d_inode, dentry, mode);
+		error = vfs_create(dir->d_inode, dentry,
+				   mode & ~current->fs->umask);
 		up(&dir->d_inode->i_sem);
 		dput(nd->dentry);
 		nd->dentry = dentry;
@@ -1013,7 +1047,7 @@ do_last:
 		error = -ELOOP;
 		if (flag & O_NOFOLLOW)
 			goto exit_dput;
-		do __follow_down(&nd->mnt,&dentry); while(d_mountpoint(dentry));
+		while (__follow_down(&nd->mnt,&dentry) && d_mountpoint(dentry));
 	}
 	error = -ENOENT;
 	if (!dentry->d_inode)
@@ -1053,7 +1087,7 @@ ok:
 	    	flag &= ~O_TRUNC;
 	} else if (S_ISBLK(inode->i_mode) || S_ISCHR(inode->i_mode)) {
 		error = -EACCES;
-		if (IS_NODEV(inode))
+		if (nd->mnt->mnt_flags & MNT_NODEV)
 			goto exit;
 
 		flag &= ~O_TRUNC;
@@ -1139,10 +1173,10 @@ do_link:
 		putname(nd->last.name);
 		goto exit;
 	}
+	error = -ELOOP;
 	if (count++==32) {
-		dentry = nd->dentry;
 		putname(nd->last.name);
-		goto ok;
+		goto exit;
 	}
 	dir = nd->dentry;
 	down(&dir->d_inode->i_sem);
@@ -1176,8 +1210,6 @@ fail:
 int vfs_mknod(struct inode *dir, struct dentry *dentry, int mode, dev_t dev)
 {
 	int error = -EPERM;
-
-	mode &= ~current->fs->umask;
 
 	down(&dir->i_zombie);
 	if ((S_ISCHR(mode) || S_ISBLK(mode)) && !capable(CAP_MKNOD))
@@ -1221,6 +1253,8 @@ asmlinkage long sys_mknod(const char * filename, int mode, dev_t dev)
 		goto out;
 	dentry = lookup_create(&nd, 0);
 	error = PTR_ERR(dentry);
+
+	mode &= ~current->fs->umask;
 	if (!IS_ERR(dentry)) {
 		switch (mode & S_IFMT) {
 		case 0: case S_IFREG:
@@ -1259,7 +1293,7 @@ int vfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 		goto exit_lock;
 
 	DQUOT_INIT(dir);
-	mode &= (S_IRWXUGO|S_ISVTX) & ~current->fs->umask;
+	mode &= (S_IRWXUGO|S_ISVTX);
 	lock_kernel();
 	error = dir->i_op->mkdir(dir, dentry, mode);
 	unlock_kernel();
@@ -1289,7 +1323,8 @@ asmlinkage long sys_mkdir(const char * pathname, int mode)
 		dentry = lookup_create(&nd, 1);
 		error = PTR_ERR(dentry);
 		if (!IS_ERR(dentry)) {
-			error = vfs_mkdir(nd.dentry->d_inode, dentry, mode);
+			error = vfs_mkdir(nd.dentry->d_inode, dentry,
+					  mode & ~current->fs->umask);
 			dput(dentry);
 		}
 		up(&nd.dentry->d_inode->i_sem);
@@ -1699,6 +1734,10 @@ int vfs_rename_dir(struct inode *old_dir, struct dentry *old_dentry,
 	error = -EINVAL;
 	if (is_subdir(new_dentry, old_dentry))
 		goto out_unlock;
+	/* Don't eat your daddy, dear... */
+	/* This also avoids locking issues */
+	if (old_dentry->d_parent == new_dentry)
+		goto out_unlock;
 	target = new_dentry->d_inode;
 	if (target) { /* Hastur! Hastur! Hastur! */
 		triple_down(&old_dir->i_zombie,
@@ -1917,7 +1956,7 @@ __vfs_follow_link(struct nameidata *nd, const char *link)
 			/* weird __emul_prefix() stuff did it */
 			goto out;
 	}
-	res = path_walk(link, nd);
+	res = link_path_walk(link, nd);
 out:
 	if (current->link_count || res || nd->last_type!=LAST_NORM)
 		return res;
@@ -1927,13 +1966,11 @@ out:
 	 * bloody create() on broken symlinks. Furrfu...
 	 */
 	name = __getname();
-	if (IS_ERR(name))
-		goto fail_name;
+	if (!name)
+		return -ENOMEM;
 	strcpy(name, nd->last.name);
 	nd->last.name = name;
 	return 0;
-fail_name:
-	link = name;
 fail:
 	path_release(nd);
 	return PTR_ERR(link);

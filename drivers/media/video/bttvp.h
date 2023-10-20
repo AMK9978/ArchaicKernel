@@ -25,7 +25,7 @@
 #ifndef _BTTVP_H_
 #define _BTTVP_H_
 
-#define BTTV_VERSION_CODE KERNEL_VERSION(0,7,50)
+#define BTTV_VERSION_CODE KERNEL_VERSION(0,7,83)
 
 
 #include <linux/types.h>
@@ -43,10 +43,14 @@
 /* bttv-driver.c                                              */
 
 /* insmod options / kernel args */
+extern int no_overlay;
 extern unsigned int bttv_verbose;
 extern unsigned int bttv_debug;
 extern unsigned int bttv_gpio;
 extern void bttv_gpio_tracking(struct bttv *btv, char *comment);
+extern int init_bttv_i2c(struct bttv *btv);
+
+#define dprintk		if (bttv_debug) printk
 
 /* Anybody who uses more than four? */
 #define BTTV_MAX 4
@@ -58,10 +62,14 @@ extern struct bttv bttvs[BTTV_MAX];
 #define O_NONCAP	O_TRUNC
 #endif
 
+#ifdef VIDEODAT_HACK
+# define VBI_MAXLINES   19
+#else
+# define VBI_MAXLINES   16
+#endif
+#define VBIBUF_SIZE     (2048*VBI_MAXLINES*2)
 #define MAX_GBUFFERS	64
 #define RISCMEM_LEN	(32744*2)
-#define VBI_MAXLINES    16
-#define VBIBUF_SIZE     (2048*VBI_MAXLINES*2)
 
 #define BTTV_MAX_FBUF	0x208000
 
@@ -143,6 +151,16 @@ struct bttv {
 	int audio;           /* audio mode */
 	int audio_chip;      /* set to one of the chips supported by bttv.c */
 	int radio;
+	int has_radio;
+
+	/* miro/pinnacle + Aimslab VHX
+	   philips matchbox (tea5757 radio tuner) support */
+	int has_matchbox;
+	int mbox_we;
+	int mbox_data;
+	int mbox_clk;
+	int mbox_most;
+	int mbox_mask;
 
 	u32 *risc_jmp;
 	u32 *vbi_odd;
@@ -181,20 +199,8 @@ struct bttv {
 };
 #endif
 
-#if defined(__powerpc__) /* big-endian */
-extern __inline__ void io_st_le32(volatile unsigned *addr, unsigned val)
-{
-        __asm__ __volatile__ ("stwbrx %1,0,%2" : \
-                            "=m" (*addr) : "r" (val), "r" (addr));
-      __asm__ __volatile__ ("eieio" : : : "memory");
-}
-
-#define btwrite(dat,adr)  io_st_le32((unsigned *)(btv->bt848_mem+(adr)),(dat))
-#define btread(adr)       ld_le32((unsigned *)(btv->bt848_mem+(adr)))
-#else
 #define btwrite(dat,adr)    writel((dat), (char *) (btv->bt848_mem+(adr)))
 #define btread(adr)         readl(btv->bt848_mem+(adr))
-#endif
 
 #define btand(dat,adr)      btwrite((dat) & btread(adr), adr)
 #define btor(dat,adr)       btwrite((dat) | btread(adr), adr)

@@ -1,12 +1,14 @@
-/* $Id: netjet.c,v 1.24.6.1 2000/12/06 16:59:20 kai Exp $
+/* $Id: netjet.c,v 1.24.6.6 2001/09/23 22:24:50 kai Exp $
  *
- * netjet.c     low level stuff for Traverse Technologie NETJet ISDN cards
+ * low level stuff for Traverse Technologie NETJet ISDN cards
  *
- * Author     Karsten Keil (keil@isdn4linux.de)
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- * Thanks to Traverse Technologie Australia for documents and informations
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Thanks to Traverse Technologie Australia for documents and information
  *
  */
 
@@ -19,17 +21,10 @@
 #include <linux/pci.h>
 #include <linux/interrupt.h>
 #include <linux/ppp_defs.h>
+#include <asm/io.h>
 #include "netjet.h"
 
-#ifndef bus_to_virt
-#define bus_to_virt (u_int *)
-#endif
-
-#ifndef virt_to_bus
-#define virt_to_bus (u_int)
-#endif
-
-const char *NETjet_revision = "$Revision: 1.24.6.1 $";
+const char *NETjet_revision = "$Revision: 1.24.6.6 $";
 
 /* Interface functions */
 
@@ -887,8 +882,8 @@ close_tigerstate(struct BCState *bcs)
 			kfree(bcs->hw.tiger.sendbuf);
 			bcs->hw.tiger.sendbuf = NULL;
 		}
-		discard_queue(&bcs->rqueue);
-		discard_queue(&bcs->squeue);
+		skb_queue_purge(&bcs->rqueue);
+		skb_queue_purge(&bcs->squeue);
 		if (bcs->tx_skb) {
 			dev_kfree_skb_any(bcs->tx_skb);
 			bcs->tx_skb = NULL;

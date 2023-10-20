@@ -40,7 +40,7 @@
 #include <linux/miscdevice.h>
 #include <linux/watchdog.h>
 #include "wd501p.h"
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/fcntl.h>
 #include <asm/io.h>
@@ -204,11 +204,6 @@ void wdt_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 }
 
 
-static long long wdt_llseek(struct file *file, long long offset, int origin)
-{
-	return -ESPIPE;
-}
-
 /**
  *	wdt_ping:
  *
@@ -311,7 +306,7 @@ static int wdt_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	switch(cmd)
 	{
 		default:
-			return -ENOIOCTLCMD;
+			return -ENOTTY;
 		case WDIOC_GETSUPPORT:
 			return copy_to_user((struct watchdog_info *)arg, &ident, sizeof(ident))?-EFAULT:0;
 
@@ -423,7 +418,7 @@ static int wdt_notify_sys(struct notifier_block *this, unsigned long code,
  
 static struct file_operations wdt_fops = {
 	owner:		THIS_MODULE,
-	llseek:		wdt_llseek,
+	llseek:		no_llseek,
 	read:		wdt_read,
 	write:		wdt_write,
 	ioctl:		wdt_ioctl,
@@ -543,3 +538,7 @@ outmisc:
 module_init(wdt_init);
 module_exit(wdt_exit);
 
+MODULE_AUTHOR("Alan Cox");
+MODULE_DESCRIPTION("Driver for ISA ICS watchdog cards (WDT500/501)");
+MODULE_LICENSE("GPL");
+EXPORT_NO_SYMBOLS;

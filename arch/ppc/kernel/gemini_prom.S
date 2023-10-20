@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.gemini_prom.S 1.5 05/17/01 18:14:21 cort
+ */
+/*
  *  arch/ppc/kernel/gemini_prom.S
  *
  *  Not really prom support code (yet), but sort of anti-prom code.  The current
@@ -24,7 +27,6 @@
  *
  */
 
-_GLOBAL(prom_init)
 _GLOBAL(gemini_prom_init)
 #ifdef CONFIG_SMP
 	/* Since the MMU's on, get stuff in rom space that we'll need */
@@ -39,6 +41,7 @@ _GLOBAL(gemini_prom_init)
 	ori	r3,r3,MSR_IR|MSR_DR
 	andc	r4,r4,r3
 	mtmsr	r4
+	isync
 #if 0
 	/* zero out the bats now that the MMU is off */
 prom_no_mmu:	

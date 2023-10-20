@@ -19,7 +19,7 @@
     are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
 
     Alternatively, the contents of this file may be used under the
-    terms of the GNU Public License version 2 (the "GPL"), in which
+    terms of the GNU General Public License version 2 (the "GPL"), in which
     case the provisions of the GPL are applicable instead of the
     above.  If you wish to allow the use of your version of this file
     only under the terms of the GPL and not to allow others to use
@@ -36,7 +36,7 @@
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/tty.h>
@@ -357,6 +357,7 @@ static int simple_config(dev_link_t *link)
 
 found_port:
     if (i != CS_SUCCESS) {
+	printk(KERN_NOTICE "serial_cs: no usable port range found, giving up\n");
 	cs_error(link->handle, RequestIO, i);
 	return -1;
     }
@@ -436,6 +437,7 @@ static int multi_config(dev_link_t *link)
     
     i = CardServices(RequestIRQ, link->handle, &link->irq);
     if (i != CS_SUCCESS) {
+	printk(KERN_NOTICE "serial_cs: no usable port range found, giving up\n");
 	cs_error(link->handle, RequestIRQ, i);
 	link->irq.AssignedIRQ = 0;
     }
@@ -661,3 +663,5 @@ static void __exit exit_serial_cs(void)
 
 module_init(init_serial_cs);
 module_exit(exit_serial_cs);
+
+MODULE_LICENSE("GPL");

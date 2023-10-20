@@ -1,6 +1,6 @@
 /* 
 	pcd.c	(c) 1997-8  Grant R. Guenther <grant@torque.net>
-		            Under the terms of the GNU public license.
+		            Under the terms of the GNU General Public License.
 
 	This is a high-level driver for parallel port ATAPI CD-ROM
         drives based on chips supported by the paride module.
@@ -265,6 +265,14 @@ static int pcd_warned = 0;		/* Have we logged a phase warning ? */
 
 /* kernel glue structures */
 
+static struct block_device_operations pcd_bdops = {
+	owner:			THIS_MODULE,
+	open:			cdrom_open,
+	release:		cdrom_release,
+	ioctl:			cdrom_ioctl,
+	check_media_change:	cdrom_media_changed,
+};
+
 static struct cdrom_device_ops pcd_dops = {
 	pcd_open,
 	pcd_release,
@@ -335,13 +343,17 @@ int pcd_init (void)	/* preliminary initialisation */
 	/* get the atapi capabilities page */
 	pcd_probe_capabilities();
 
-	if (register_blkdev(MAJOR_NR,name,&cdrom_fops)) {
+	if (register_blkdev(MAJOR_NR,name,&pcd_bdops)) {
 		printk("pcd: unable to get major number %d\n",MAJOR_NR);
 		return -1;
 	}
 
-	for (unit=0;unit<PCD_UNITS;unit++)
-		if (PCD.present) register_cdrom(&PCD.info);
+	for (unit=0;unit<PCD_UNITS;unit++) {
+		if (PCD.present) {
+			register_cdrom(&PCD.info);
+			devfs_plain_cdrom(&PCD.info, &pcd_bdops);
+		}
+	}
 
 	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
 	read_ahead[MAJOR_NR] = 8;	/* 8 sector (4kB) read ahead */
@@ -358,14 +370,12 @@ static int pcd_open(struct cdrom_device_info *cdi, int purpose)
 
 	if  ((unit >= PCD_UNITS) || (!PCD.present)) return -ENODEV;
 
-	MOD_INC_USE_COUNT;
-
 	return 0;
 }
 
 static void pcd_release(struct cdrom_device_info *cdi)
 
-{	MOD_DEC_USE_COUNT;
+{
 }
 
 #ifdef MODULE
@@ -948,3 +958,4 @@ static int pcd_get_mcn (struct cdrom_device_info *cdi, struct cdrom_mcn *mcn)
 
 /* end of pcd.c */
 
+MODULE_LICENSE("GPL");

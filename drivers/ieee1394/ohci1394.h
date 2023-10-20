@@ -23,98 +23,38 @@
 
 #include "ieee1394_types.h"
 
-#define IEEE1394_USE_BOTTOM_HALVES 1
-
 #define OHCI1394_DRIVER_NAME      "ohci1394"
 
-#define USE_DEVICE 0
+#define OHCI1394_MAX_AT_REQ_RETRIES	0x2
+#define OHCI1394_MAX_AT_RESP_RETRIES	0x2
+#define OHCI1394_MAX_PHYS_RESP_RETRIES	0x8
+#define OHCI1394_MAX_SELF_ID_ERRORS	16
 
-#if USE_DEVICE
+#define AR_REQ_NUM_DESC		4		/* number of AR req descriptors */
+#define AR_REQ_BUF_SIZE		PAGE_SIZE	/* size of AR req buffers */
+#define AR_REQ_SPLIT_BUF_SIZE	PAGE_SIZE	/* split packet buffer */
 
-#ifndef PCI_DEVICE_ID_TI_OHCI1394_LV22
-#define PCI_DEVICE_ID_TI_OHCI1394_LV22 0x8009
-#endif
+#define AR_RESP_NUM_DESC	4		/* number of AR resp descriptors */
+#define AR_RESP_BUF_SIZE	PAGE_SIZE	/* size of AR resp buffers */
+#define AR_RESP_SPLIT_BUF_SIZE	PAGE_SIZE	/* split packet buffer */
 
-#ifndef PCI_DEVICE_ID_TI_OHCI1394_LV23
-#define PCI_DEVICE_ID_TI_OHCI1394_LV23 0x8019
-#endif
+#define IR_NUM_DESC		16		/* number of IR descriptors */
+#define IR_BUF_SIZE		PAGE_SIZE	/* 4096 bytes/buffer */
+#define IR_SPLIT_BUF_SIZE	PAGE_SIZE	/* split packet buffer */
 
-#ifndef PCI_DEVICE_ID_TI_OHCI1394_LV26
-#define PCI_DEVICE_ID_TI_OHCI1394_LV26 0x8020
-#endif
+#define IT_NUM_DESC		16	/* number of IT descriptors */
 
-#ifndef PCI_DEVICE_ID_TI_OHCI1394_PCI4450
-#define PCI_DEVICE_ID_TI_OHCI1394_PCI4450 0x8011
-#endif
+#define AT_REQ_NUM_DESC		32	/* number of AT req descriptors */
+#define AT_RESP_NUM_DESC	32	/* number of AT resp descriptors */
 
-#ifndef PCI_DEVICE_ID_VIA_OHCI1394
-#define PCI_DEVICE_ID_VIA_OHCI1394 0x3044
-#endif
+#define OHCI_LOOP_COUNT		100	/* Number of loops for reg read waits */
 
-#ifndef PCI_VENDOR_ID_SONY
-#define PCI_VENDOR_ID_SONY 0x104d
-#endif
+#define OHCI_CONFIG_ROM_LEN	1024	/* Length of the mapped configrom space */
 
-#ifndef PCI_DEVICE_ID_SONY_CXD3222
-#define PCI_DEVICE_ID_SONY_CXD3222 0x8039
-#endif
+#define OHCI1394_SI_DMA_BUF_SIZE	8192 /* length of the selfid buffer */
 
-#ifndef PCI_DEVICE_ID_NEC_1394
-#define PCI_DEVICE_ID_NEC_1394 0x00cd
-#endif
-
-#ifndef PCI_DEVICE_ID_NEC_UPD72862
-#define PCI_DEVICE_ID_NEC_UPD72862      0x0063
-#endif
-
-#ifndef PCI_DEVICE_ID_NEC_UPD72870
-#define PCI_DEVICE_ID_NEC_UPD72870      0x00cd
-#endif
-
-#ifndef PCI_DEVICE_ID_NEC_UPD72871
-#define PCI_DEVICE_ID_NEC_UPD72871      0x00ce
-#endif
-
-#ifndef PCI_DEVICE_ID_APPLE_UNI_N_FW
-#define PCI_DEVICE_ID_APPLE_UNI_N_FW	0x0018
-#endif
-
-#ifndef PCI_DEVICE_ID_ALI_OHCI1394_M5251
-#define PCI_DEVICE_ID_ALI_OHCI1394_M5251 0x5251
-#endif
-
-#ifndef PCI_VENDOR_ID_LUCENT
-#define PCI_VENDOR_ID_LUCENT 0x11c1
-#endif
-
-#ifndef PCI_DEVICE_ID_LUCENT_FW323
-#define PCI_DEVICE_ID_LUCENT_FW323 0x5811
-#endif
-
-#endif /* USE_DEVICE */
-
-
-#define MAX_OHCI1394_CARDS        4
-
-#define OHCI1394_MAX_AT_REQ_RETRIES       0x2
-#define OHCI1394_MAX_AT_RESP_RETRIES      0x2
-#define OHCI1394_MAX_PHYS_RESP_RETRIES    0x8
-#define OHCI1394_MAX_SELF_ID_ERRORS       16
-
-#define AR_REQ_NUM_DESC                   4 /* number of AR req descriptors */
-#define AR_REQ_BUF_SIZE           PAGE_SIZE /* size of AR req buffers */
-#define AR_REQ_SPLIT_BUF_SIZE     PAGE_SIZE /* split packet buffer */
-
-#define AR_RESP_NUM_DESC                  4 /* number of AR resp descriptors */
-#define AR_RESP_BUF_SIZE          PAGE_SIZE /* size of AR resp buffers */
-#define AR_RESP_SPLIT_BUF_SIZE    PAGE_SIZE /* split packet buffer */
-
-#define IR_NUM_DESC                      16 /* number of IR descriptors */
-#define IR_BUF_SIZE               PAGE_SIZE /* 4096 bytes/buffer */
-#define IR_SPLIT_BUF_SIZE         PAGE_SIZE /* split packet buffer */
-
-#define AT_REQ_NUM_DESC                  32 /* number of AT req descriptors */
-#define AT_RESP_NUM_DESC                 32 /* number of AT resp descriptors */
+/* PCI configuration space addresses */
+#define OHCI1394_PCI_HCI_Control 0x40
 
 struct dma_cmd {
         u32 control;
@@ -141,6 +81,7 @@ struct dma_rcv_ctx {
 	void *ohci;
 	int ctx;
 	unsigned int num_desc;
+
 	unsigned int buf_size;
 	unsigned int split_buf_size;
 
@@ -156,7 +97,7 @@ struct dma_rcv_ctx {
         unsigned int buf_offset;
         quadlet_t *spb;
         spinlock_t lock;
-        struct tq_struct task;
+        struct tasklet_struct task;
 	int ctrlClear;
 	int ctrlSet;
 	int cmdPtr;
@@ -186,7 +127,7 @@ struct dma_trm_ctx {
         struct hpsb_packet *pending_last;
 
         spinlock_t lock;
-        struct tq_struct task;
+        struct tasklet_struct task;
 	int ctrlClear;
 	int ctrlSet;
 	int cmdPtr;
@@ -202,6 +143,8 @@ struct video_template {
 struct ti_ohci {
         int id; /* sequential card number */
 
+	struct list_head list;
+
         struct pci_dev *dev;
 
         u32 state;
@@ -216,6 +159,7 @@ struct ti_ohci {
 	/* buffer for csr config rom */
         quadlet_t *csr_config_rom_cpu; 
         dma_addr_t csr_config_rom_bus; 
+	int csr_config_rom_length;
 
 	unsigned int max_packet_size;
 
@@ -233,6 +177,7 @@ struct ti_ohci {
 	int nb_iso_rcv_ctx;
 
         /* iso transmit */
+	struct dma_trm_ctx *it_context;
 	int nb_iso_xmit_ctx;
 
         u64 ISO_channel_usage;
@@ -243,15 +188,20 @@ struct ti_ohci {
         int phyid, isroot;
 
         spinlock_t phy_reg_lock;
+	spinlock_t event_lock;
 
 	int self_id_errors;
-        int NumBusResets;
 
 	/* video device */
 	struct video_template *video_tmpl;
+
+	/* Swap the selfid buffer? */
+	unsigned int selfid_swap:1;
+	/* Some Apple chipset seem to swap incoming headers for us */
+	unsigned int no_swap_incoming:1;
 };
 
-inline static int cross_bound(unsigned long addr, unsigned int size)
+static inline int cross_bound(unsigned long addr, unsigned int size)
 {
 	int cross=0;
 	if (size>PAGE_SIZE) {
@@ -266,88 +216,15 @@ inline static int cross_bound(unsigned long addr, unsigned int size)
 /*
  * Register read and write helper functions.
  */
-inline static void reg_write(const struct ti_ohci *ohci, int offset, u32 data)
+static inline void reg_write(const struct ti_ohci *ohci, int offset, u32 data)
 {
         writel(data, ohci->registers + offset);
 }
 
-inline static u32 reg_read(const struct ti_ohci *ohci, int offset)
+static inline u32 reg_read(const struct ti_ohci *ohci, int offset)
 {
         return readl(ohci->registers + offset);
 }
-
-/* This structure is not properly initialized ... it is taken from
-   the lynx_csr_rom written by Andreas ... Some fields in the root
-   directory and the module dependent info needs to be modified
-   I do not have the proper doc */
-quadlet_t ohci_csr_rom[] = {
-        /* bus info block */
-        0x04040000, /* info/CRC length, CRC */
-        0x31333934, /* 1394 magic number */
-        0xf07da002, /* cyc_clk_acc = 125us, max_rec = 1024 */
-        0x00000000, /* vendor ID, chip ID high (written from card info) */
-        0x00000000, /* chip ID low (written from card info) */
-        /* root directory - FIXME */
-        0x00090000, /* CRC length, CRC */
-        0x03080028, /* vendor ID (Texas Instr.) */
-        0x81000009, /* offset to textual ID */
-        0x0c000200, /* node capabilities */
-        0x8d00000e, /* offset to unique ID */
-        0xc7000010, /* offset to module independent info */
-        0x04000000, /* module hardware version */
-        0x81000026, /* offset to textual ID */
-        0x09000000, /* node hardware version */
-        0x81000026, /* offset to textual ID */
-        /* module vendor ID textual */
-        0x00080000, /* CRC length, CRC */
-        0x00000000,
-        0x00000000,
-        0x54455841, /* "Texas Instruments" */
-        0x5320494e,
-        0x53545255,
-        0x4d454e54,
-        0x53000000,
-        /* node unique ID leaf */
-        0x00020000, /* CRC length, CRC */
-        0x08002856, /* vendor ID, chip ID high */
-        0x0000083E, /* chip ID low */
-        /* module dependent info - FIXME */
-        0x00060000, /* CRC length, CRC */
-        0xb8000006, /* ??? offset to module textual ID */
-        0x81000004, /* ??? textual descriptor */
-        0x00000000, /* SRAM size */
-        0x00000000, /* AUXRAM size */
-        0x00000000, /* AUX device */
-        /* module textual ID */
-        0x00050000, /* CRC length, CRC */
-        0x00000000,
-        0x00000000,
-        0x54534231, /* "TSB12LV22" */
-        0x324c5632,
-        0x32000000,
-        /* part number */
-        0x00060000, /* CRC length, CRC */
-        0x00000000,
-        0x00000000,
-        0x39383036, /* "9806000-0001" */
-        0x3030342d,
-        0x30303431,
-        0x20000001,
-        /* module hardware version textual */
-        0x00050000, /* CRC length, CRC */
-        0x00000000,
-        0x00000000,
-        0x5453424b, /* "TSBKOHCI403" */
-        0x4f484349,
-        0x34303300,
-        /* node hardware version textual */
-        0x00050000, /* CRC length, CRC */
-        0x00000000,
-        0x00000000,
-        0x54534234, /* "TSB41LV03" */
-        0x314c5630,
-        0x33000000
-};
 
 
 /* 2 KiloBytes of register space */
@@ -454,14 +331,16 @@ quadlet_t ohci_csr_rom[] = {
 #define OHCI1394_phyRegRcvd              0x04000000
 #define OHCI1394_masterIntEnable         0x80000000
 
-#define OUTPUT_MORE                      0x00000000
-#define OUTPUT_MORE_IMMEDIATE            0x02000000
-#define OUTPUT_LAST                      0x103c0000
-#define OUTPUT_LAST_IMMEDIATE            0x123c0000
-
-#define DMA_SPEED_100                    0x0
-#define DMA_SPEED_200                    0x1
-#define DMA_SPEED_400                    0x2
+/* DMA Control flags */
+#define DMA_CTL_OUTPUT_MORE              0x00000000
+#define DMA_CTL_OUTPUT_LAST              0x10000000
+#define DMA_CTL_INPUT_MORE               0x20000000
+#define DMA_CTL_INPUT_LAST               0x30000000
+#define DMA_CTL_UPDATE                   0x08000000
+#define DMA_CTL_IMMEDIATE                0x02000000
+#define DMA_CTL_IRQ                      0x00300000
+#define DMA_CTL_BRANCH                   0x000c0000
+#define DMA_CTL_WAIT                     0x00030000
 
 #define OHCI1394_TCODE_PHY               0xE
 

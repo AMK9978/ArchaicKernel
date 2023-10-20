@@ -40,7 +40,7 @@
 #include <linux/blkdev.h>
 #include <linux/errno.h>
 #include <linux/hdreg.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ide.h>
 
 #include <asm/io.h>
@@ -849,3 +849,4 @@ static void __exit exit_idescsi_module(void)
 
 module_init(init_idescsi_module);
 module_exit(exit_idescsi_module);
+MODULE_LICENSE("GPL");

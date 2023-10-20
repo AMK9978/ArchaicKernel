@@ -1,11 +1,11 @@
-/* $Id: sbus.c,v 1.91 2000/11/08 05:04:06 davem Exp $
+/* $Id: sbus.c,v 1.95 2001/03/15 02:11:10 davem Exp $
  * sbus.c:  SBus support routines.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  */
 
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/config.h>
 #include <linux/init.h>
 #include <linux/pci.h>
@@ -67,29 +67,12 @@ static void __init fill_sbus_device(int prom_node, struct sbus_dev *sdev)
 	sdev->ranges_applied = 0;
 
 	base = (unsigned long) sdev->reg_addrs[0].phys_addr;
-	if (base >= SUN_SBUS_BVADDR ||
-	    (sparc_cpu_model != sun4c && sparc_cpu_model != sun4)) {
-		/* OK, we can compute the slot number in a
-		 * straightforward manner.
-		 */
-		if (sparc_cpu_model == sun4u ||
-		    sparc_cpu_model == sun4d)
-			sdev->slot = sdev->reg_addrs[0].which_io;
-		else
-			sdev->slot = sbus_dev_slot(base);
-	} else {
-		int rnum;
 
-		/* Fixups are needed to compute the slot number. */
+	/* Compute the slot number. */
+	if (base >= SUN_SBUS_BVADDR && sparc_cpu_model == sun4m) {
+		sdev->slot = sbus_dev_slot(base);
+	} else {
 		sdev->slot = sdev->reg_addrs[0].which_io;
-		sdev->reg_addrs[0].phys_addr =
-			sbus_devaddr(sdev->slot, base);
-		for (rnum = 1; rnum < sdev->num_registers; rnum++) {
-			base = (unsigned long)
-				sdev->reg_addrs[rnum].phys_addr;
-			sdev->reg_addrs[rnum].phys_addr =
-				sbus_devaddr(sdev->slot, base);
-		}
 	}
 
 no_regs:
@@ -238,10 +221,14 @@ static void __init __apply_ranges_to_regs(struct linux_prom_ranges *ranges,
 					break;
 			}
 			if (rngnum == num_ranges) {
-				prom_printf("sbus_apply_ranges: Cannot find matching "
-					    "range nregs[%d] nranges[%d].\n",
-					    num_regs, num_ranges);
-				prom_halt();
+				/* We used to flag this as an error.  Actually
+				 * some devices do not report the regs as we expect.
+				 * For example, see SUNW,pln device.  In that case
+				 * the reg property is in a format internal to that
+				 * node, ie. it is not in the SBUS register space
+				 * per se. -DaveM
+				 */
+				return;
 			}
 			regs[regnum].which_io = ranges[rngnum].ot_parent_space;
 			regs[regnum].phys_addr += ranges[rngnum].ot_parent_base;
@@ -293,6 +280,8 @@ static void __init sbus_fixup_all_regs(struct sbus_dev *first_sdev)
 }
 
 extern void register_proc_sparc_ioport(void);
+extern void firetruck_init(void);
+extern void rs_init(void);
 
 void __init sbus_init(void)
 {
@@ -323,7 +312,6 @@ void __init sbus_init(void)
 				prom_halt();
 			} else {
 #ifdef __sparc_v9__
-				extern void firetruck_init(void);
 				firetruck_init();
 #endif
 			}
@@ -501,10 +489,10 @@ void __init sbus_init(void)
 		sun4d_init_sbi_irq();
 	}
 	
+	rs_init();
+
 #ifdef __sparc_v9__
 	if (sparc_cpu_model == sun4u) {
-		extern void firetruck_init(void);
-
 		firetruck_init();
 	}
 #endif

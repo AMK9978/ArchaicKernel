@@ -1,6 +1,6 @@
 /*
     NetWinder Floating Point Emulator
-    (c) Rebel.com, 1998-1999
+    (c) Rebel.COM, 1998,1999
 
     Direct questions, comments to Scott Bambrough <scottb@netwinder.org>
 
@@ -23,8 +23,6 @@
 #include "fpopcode.h"
 #include "fpa11.h"
 
-float32 getSingleConstant(unsigned int);
-
 float32 float32_exp(float32 Fm);
 float32 float32_ln(float32 Fm);
 float32 float32_sin(float32 rFm);
@@ -39,6 +37,7 @@ float32 float32_pol(float32 rFn,float32 rFm);
 
 unsigned int SingleCPDO(const unsigned int opcode)
 {
+   FPA11 *fpa11 = GET_FPA11();
    float32 rFm, rFn;
    unsigned int Fd, Fm, Fn, nRc = 1;
 

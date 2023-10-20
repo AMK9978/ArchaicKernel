@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.floppy.h 1.5 05/17/01 18:14:24 cort
+ */
+/*
  * Architecture specific parts of the Floppy driver
  *
  * This file is subject to the terms and conditions of the GNU General Public
@@ -55,4 +58,7 @@ static int FDC2 = -1;
 #define CROSS_64KB(a,s)	(0)
 
 #endif /* __ASM_PPC_FLOPPY_H */
+
+#define EXTRA_FLOPPY_PARAMS
+
 #endif /* __KERNEL__ */

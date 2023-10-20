@@ -43,7 +43,7 @@
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/errno.h>
@@ -744,7 +744,7 @@ static void sdla_receive(struct net_device *dev)
 	struct buf_entry  *pbuf;
 
 	unsigned long	  flags;
-	int               i, received, success, addr, buf_base, buf_top;
+	int               i=0, received, success, addr, buf_base, buf_top;
 	short             dlci, len, len2, split;
 
 	flp = dev->priv;
@@ -1641,8 +1641,6 @@ int __init sdla_init(struct net_device *dev)
 	dev->addr_len		= 0;
 	dev->mtu		= SDLA_MAX_MTU;
 
-	dev_init_buffers(dev);
-   
 	flp->activate		= sdla_activate;
 	flp->deactivate		= sdla_deactivate;
 	flp->assoc		= sdla_assoc;
@@ -1666,6 +1664,8 @@ int __init sdla_c_setup(void)
 
 #ifdef MODULE
 static struct net_device sdla0 = {"sdla0", 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, sdla_init};
+
+MODULE_LICENSE("GPL");
 
 int init_module(void)
 {

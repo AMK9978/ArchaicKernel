@@ -28,7 +28,7 @@
 #include <linux/sched.h>
 #include <linux/miscdevice.h>
 #include <linux/watchdog.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/fcntl.h>
 #include <asm/io.h>
@@ -110,7 +110,7 @@ static int acq_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	  break;
 
 	default:
-	  return -ENOIOCTLCMD;
+	  return -ENOTTY;
 	}
 	return 0;
 }
@@ -226,3 +226,6 @@ static void __exit acq_exit(void)
 
 module_init(acq_init);
 module_exit(acq_exit);
+
+MODULE_LICENSE("GPL");
+EXPORT_NO_SYMBOLS;

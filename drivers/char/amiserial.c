@@ -59,9 +59,6 @@
  * End of serial driver configuration section.
  */
 
-#ifdef MODVERSIONS
-#include <linux/modversions.h>
-#endif
 #include <linux/module.h>
 
 #include <linux/types.h>
@@ -85,7 +82,7 @@ static char *serial_version = "4.30";
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 
@@ -2291,7 +2288,7 @@ static void amiga_serial_putc(char c)
  *	Print a string to the serial port trying not to disturb
  *	any possible real use of the port...
  *
- *	The console_lock must be held when we get here.
+ *	The console must be locked when we get here.
  */
 static void serial_console_write(struct console *co, const char *s,
 				unsigned count)
@@ -2356,3 +2353,5 @@ void __init serial_console_init(void)
 	register_console(&sercons);
 }
 #endif
+
+MODULE_LICENSE("GPL");

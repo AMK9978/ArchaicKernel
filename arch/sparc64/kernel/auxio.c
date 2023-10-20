@@ -18,6 +18,7 @@
 #include <asm/sbus.h>
 #include <asm/ebus.h>
 #include <asm/fhc.h>
+#include <asm/spitfire.h>
 #include <asm/starfire.h>
 
 /* Probe and map in the Auxiliary I/O register */
@@ -56,12 +57,8 @@ found_sdev:
 			return;
 		}
 #endif
-		if(central_bus || this_is_starfire) {
-			auxio_register = 0UL;
-			return;
-		}
-		prom_printf("Cannot find auxio node, cannot continue...\n");
-		prom_halt();
+		auxio_register = 0UL;
+		return;
 	}
 
 	/* Map the register both read and write */

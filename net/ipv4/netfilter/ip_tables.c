@@ -1059,6 +1059,10 @@ do_replace(void *user, unsigned int len)
 	if (len != sizeof(tmp) + tmp.size)
 		return -ENOPROTOOPT;
 
+	/* Pedantry: prevent them from hitting BUG() in vmalloc.c --RR */
+	if ((SMP_ALIGN(tmp.size) >> PAGE_SHIFT) + 2 > num_physpages)
+		return -ENOMEM;
+
 	newinfo = vmalloc(sizeof(struct ipt_table_info)
 			  + SMP_ALIGN(tmp.size) * smp_num_cpus);
 	if (!newinfo)
@@ -1243,6 +1247,7 @@ do_ipt_get_ctl(struct sock *sk, int cmd, void *user, int *len)
 			ret = -EFAULT;
 			break;
 		}
+		name[IPT_TABLE_MAXNAMELEN-1] = '\0';
 		t = find_table_lock(name, &ret, &ipt_mutex);
 		if (t) {
 			struct ipt_getinfo info;
@@ -1729,9 +1734,15 @@ static int __init init(void)
 	}
 
 #ifdef CONFIG_PROC_FS
-	if (!proc_net_create("ip_tables_names", 0, ipt_get_tables)) {
+	{
+	struct proc_dir_entry *proc;
+
+	proc = proc_net_create("ip_tables_names", 0, ipt_get_tables);
+	if (!proc) {
 		nf_unregister_sockopt(&ipt_sockopts);
 		return -ENOMEM;
+	}
+	proc->owner = THIS_MODULE;
 	}
 #endif
 
@@ -1757,3 +1768,4 @@ EXPORT_SYMBOL(ipt_unregister_target);
 
 module_init(init);
 module_exit(fini);
+MODULE_LICENSE("GPL");

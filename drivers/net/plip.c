@@ -2,7 +2,7 @@
 /* PLIP: A parallel port "network" driver for Linux. */
 /* This driver is for parallel port with 5-bit cable (LapLink (R) cable). */
 /*
- * Authors:	Donald Becker <becker@super.org>
+ * Authors:	Donald Becker <becker@scyld.com>
  *		Tommy Thorn <thorn@daimi.aau.dk>
  *		Tanabe Hiroyasu <hiro@sanpo.t.u-tokyo.ac.jp>
  *		Alan Cox <gw4pts@gw4pts.ampr.org>
@@ -37,7 +37,7 @@
  */
 
 /*
- * Original version and the name 'PLIP' from Donald Becker <becker@super.org>
+ * Original version and the name 'PLIP' from Donald Becker <becker@scyld.com>
  * inspired by Russ Nelson's parallel port packet driver.
  *
  * NOTE:
@@ -54,7 +54,7 @@
  *     To use with DOS box, please do (Turn on ARP switch):
  *	# ifconfig plip[0-2] arp
  */
-static const char *version = "NET3 PLIP version 2.4-parport gniibe@mri.co.jp\n";
+static const char version[] = "NET3 PLIP version 2.4-parport gniibe@mri.co.jp\n";
 
 /*
   Sources:
@@ -728,6 +728,7 @@ plip_receive_packet(struct net_device *dev, struct net_local *nl,
 		/* Inform the upper layer for the arrival of a packet. */
 		rcv->skb->protocol=plip_type_trans(rcv->skb, dev);
 		netif_rx(rcv->skb);
+		dev->last_rx = jiffies;
 		nl->enet_stats.rx_bytes += rcv->length.h;
 		nl->enet_stats.rx_packets++;
 		rcv->skb = NULL;
@@ -994,7 +995,6 @@ plip_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 		netif_wake_queue (dev);
 	case PLIP_CN_NONE:
 	case PLIP_CN_SEND:
-		dev->last_rx = jiffies;
 		rcv->state = PLIP_PK_TRIGGER;
 		nl->connection = PLIP_CN_RECEIVE;
 		nl->timeout_count = 0;
@@ -1293,10 +1293,11 @@ plip_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 }
 
 static int parport[PLIP_MAX] = { [0 ... PLIP_MAX-1] = -1 };
-static int timid = 0;
+static int timid;
 
 MODULE_PARM(parport, "1-" __MODULE_STRING(PLIP_MAX) "i");
 MODULE_PARM(timid, "1i");
+MODULE_PARM_DESC(parport, "List of parport device numbers to use by plip");
 
 static struct net_device *dev_plip[PLIP_MAX] = { NULL, };
 
@@ -1314,7 +1315,7 @@ plip_searchfor(int list[], int a)
  * available to use. */
 static void plip_attach (struct parport *port)
 {
-	static int i = 0;
+	static int i;
 
 	if ((parport[0] == -1 && (!timid || !port->devices)) || 
 	    plip_searchfor(parport, port->number)) {
@@ -1377,7 +1378,7 @@ static void __exit plip_cleanup_module (void)
 
 #ifndef MODULE
 
-static int parport_ptr = 0;
+static int parport_ptr;
 
 static int __init plip_setup(char *str)
 {
@@ -1431,6 +1432,7 @@ static int __init plip_init (void)
 
 module_init(plip_init);
 module_exit(plip_cleanup_module);
+MODULE_LICENSE("GPL");
 
 /*
  * Local variables:

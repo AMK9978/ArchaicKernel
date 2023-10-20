@@ -12,7 +12,7 @@
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/adfs_fs.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/stat.h>
 #include <linux/string.h>
@@ -39,7 +39,7 @@ void __adfs_error(struct super_block *sb, const char *function, const char *fmt,
 	va_end(args);
 
 	printk(KERN_CRIT "ADFS-fs error (device %s)%s%s: %s\n",
-		kdevname(sb->s_dev), function ? ": " : "",
+		bdevname(sb->s_dev), function ? ": " : "",
 		function ? function : "", error_buf);
 }
 
@@ -330,7 +330,7 @@ struct super_block *adfs_read_super(struct super_block *sb, void *data, int sile
 	if (adfs_checkbblk(b_data)) {
 		if (!silent)
 			printk("VFS: Can't find an adfs filesystem on dev "
-				"%s.\n", kdevname(dev));
+				"%s.\n", bdevname(dev));
 		goto error_free_bh;
 	}
 
@@ -342,7 +342,7 @@ struct super_block *adfs_read_super(struct super_block *sb, void *data, int sile
 	if (adfs_checkdiscrecord(dr)) {
 		if (!silent)
 			printk("VPS: Can't find an adfs filesystem on dev "
-				"%s.\n", kdevname(dev));
+				"%s.\n", bdevname(dev));
 		goto error_free_bh;
 	}
 
@@ -370,7 +370,7 @@ struct super_block *adfs_read_super(struct super_block *sb, void *data, int sile
 	if (sb->s_blocksize != bh->b_size) {
 		if (!silent)
 			printk(KERN_ERR "VFS: Unsupported blocksize on dev "
-				"%s.\n", kdevname(dev));
+				"%s.\n", bdevname(dev));
 		goto error_free_bh;
 	}
 
@@ -385,7 +385,7 @@ struct super_block *adfs_read_super(struct super_block *sb, void *data, int sile
 	sb->u.adfs_sb.s_size     = adfs_discsize(dr, sb->s_blocksize_bits);
 	sb->u.adfs_sb.s_version  = dr->format_version;
 	sb->u.adfs_sb.s_log2sharesize = dr->log2sharesize;
-
+	
 	sb->u.adfs_sb.s_map = adfs_read_map(sb, dr);
 	if (!sb->u.adfs_sb.s_map)
 		goto error_free_bh;

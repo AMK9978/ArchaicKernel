@@ -71,6 +71,7 @@
 #include <linux/poll.h>
 #include <linux/cache.h>
 #include <linux/module.h>
+#include <linux/highmem.h>
 
 #if defined(CONFIG_KMOD) && defined(CONFIG_NET)
 #include <linux/kmod.h>
@@ -104,6 +105,8 @@ static ssize_t sock_readv(struct file *file, const struct iovec *vector,
 			  unsigned long count, loff_t *ppos);
 static ssize_t sock_writev(struct file *file, const struct iovec *vector,
 			  unsigned long count, loff_t *ppos);
+static ssize_t sock_sendpage(struct file *file, struct page *page,
+			     int offset, size_t size, loff_t *ppos, int more);
 
 
 /*
@@ -122,7 +125,8 @@ static struct file_operations socket_file_ops = {
 	release:	sock_close,
 	fasync:		sock_fasync,
 	readv:		sock_readv,
-	writev:		sock_writev
+	writev:		sock_writev,
+	sendpage:	sock_sendpage
 };
 
 /*
@@ -299,8 +303,7 @@ static struct super_block * sockfs_read_super(struct super_block *sb, void *data
 }
 
 static struct vfsmount *sock_mnt;
-static DECLARE_FSTYPE(sock_fs_type, "sockfs", sockfs_read_super,
-	FS_NOMOUNT|FS_SINGLE);
+static DECLARE_FSTYPE(sock_fs_type, "sockfs", sockfs_read_super, FS_NOMOUNT);
 static int sockfs_delete_dentry(struct dentry *dentry)
 {
 	return 1;
@@ -602,6 +605,24 @@ static ssize_t sock_write(struct file *file, const char *ubuf,
 	return sock_sendmsg(sock, &msg, size);
 }
 
+ssize_t sock_sendpage(struct file *file, struct page *page,
+		      int offset, size_t size, loff_t *ppos, int more)
+{
+	struct socket *sock;
+	int flags;
+
+	if (ppos != &file->f_pos)
+		return -ESPIPE;
+
+	sock = socki_lookup(file->f_dentry->d_inode);
+
+	flags = !(file->f_flags & O_NONBLOCK) ? 0 : MSG_DONTWAIT;
+	if (more)
+		flags |= MSG_MORE;
+
+	return sock->ops->sendpage(sock, page, offset, size, flags);
+}
+
 int sock_readv_writev(int type, struct inode * inode, struct file * file,
 		      const struct iovec * iov, long count, long size)
 {
@@ -819,8 +840,10 @@ int sock_create(int family, int type, int protocol, struct socket **res)
 	/*
 	 *	Check protocol is in range
 	 */
-	if(family<0 || family>=NPROTO)
+	if (family < 0 || family >= NPROTO)
 		return -EAFNOSUPPORT;
+	if (type < 0 || type >= SOCK_MAX)
+		return -EINVAL;
 
 	/* Compatibility.
 
@@ -1181,13 +1204,14 @@ asmlinkage long sys_sendto(int fd, void * buff, size_t len, unsigned flags,
 	msg.msg_iovlen=1;
 	msg.msg_control=NULL;
 	msg.msg_controllen=0;
-	msg.msg_namelen=addr_len;
+	msg.msg_namelen=0;
 	if(addr)
 	{
 		err = move_addr_to_kernel(addr, addr_len, address);
 		if (err < 0)
 			goto out_put;
 		msg.msg_name=address;
+		msg.msg_namelen=addr_len;
 	}
 	if (sock->file->f_flags & O_NONBLOCK)
 		flags |= MSG_DONTWAIT;
@@ -1269,7 +1293,10 @@ asmlinkage long sys_setsockopt(int fd, int level, int optname, char *optval, int
 {
 	int err;
 	struct socket *sock;
-	
+
+	if (optlen < 0)
+		return -EINVAL;
+			
 	if ((sock = sockfd_lookup(fd, &err))!=NULL)
 	{
 		if (level == SOL_SOCKET)
@@ -1643,6 +1670,10 @@ extern void sk_init(void);
 extern void wanrouter_init(void);
 #endif
 
+#ifdef CONFIG_BLUEZ
+extern void bluez_init(void);
+#endif
+
 void __init sock_init(void)
 {
 	int i;
@@ -1701,6 +1732,10 @@ void __init sock_init(void)
 #endif
 #ifdef CONFIG_NETFILTER
 	netfilter_init();
+#endif
+
+#ifdef CONFIG_BLUEZ
+	bluez_init();
 #endif
 }
 

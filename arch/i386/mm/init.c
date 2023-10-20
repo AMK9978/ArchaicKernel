@@ -35,137 +35,30 @@
 #include <asm/fixmap.h>
 #include <asm/e820.h>
 #include <asm/apic.h>
+#include <asm/tlb.h>
 
+mmu_gather_t mmu_gathers[NR_CPUS];
 unsigned long highstart_pfn, highend_pfn;
 static unsigned long totalram_pages;
 static unsigned long totalhigh_pages;
-
-/*
- * BAD_PAGE is the page that is used for page faults when linux
- * is out-of-memory. Older versions of linux just did a
- * do_exit(), but using this instead means there is less risk
- * for a process dying in kernel mode, possibly leaving an inode
- * unused etc..
- *
- * BAD_PAGETABLE is the accompanying page-table: it is initialized
- * to point to BAD_PAGE entries.
- *
- * ZERO_PAGE is a special page that is used for zero-initialized
- * data and COW.
- */
-
-/*
- * These are allocated in head.S so that we get proper page alignment.
- * If you change the size of these then change head.S as well.
- */
-extern char empty_bad_page[PAGE_SIZE];
-#if CONFIG_X86_PAE
-extern pmd_t empty_bad_pmd_table[PTRS_PER_PMD];
-#endif
-extern pte_t empty_bad_pte_table[PTRS_PER_PTE];
-
-/*
- * We init them before every return and make them writable-shared.
- * This guarantees we get out of the kernel in some more or less sane
- * way.
- */
-#if CONFIG_X86_PAE
-static pmd_t * get_bad_pmd_table(void)
-{
-	pmd_t v;
-	int i;
-
-	set_pmd(&v, __pmd(_PAGE_TABLE + __pa(empty_bad_pte_table)));
-
-	for (i = 0; i < PAGE_SIZE/sizeof(pmd_t); i++)
-		empty_bad_pmd_table[i] = v;
-
-	return empty_bad_pmd_table;
-}
-#endif
-
-static pte_t * get_bad_pte_table(void)
-{
-	pte_t v;
-	int i;
-
-	v = pte_mkdirty(mk_pte_phys(__pa(empty_bad_page), PAGE_SHARED));
-
-	for (i = 0; i < PAGE_SIZE/sizeof(pte_t); i++)
-		empty_bad_pte_table[i] = v;
-
-	return empty_bad_pte_table;
-}
-
-
-
-void __handle_bad_pmd(pmd_t *pmd)
-{
-	pmd_ERROR(*pmd);
-	set_pmd(pmd, __pmd(_PAGE_TABLE + __pa(get_bad_pte_table())));
-}
-
-void __handle_bad_pmd_kernel(pmd_t *pmd)
-{
-	pmd_ERROR(*pmd);
-	set_pmd(pmd, __pmd(_KERNPG_TABLE + __pa(get_bad_pte_table())));
-}
-
-pte_t *get_pte_kernel_slow(pmd_t *pmd, unsigned long offset)
-{
-	pte_t *pte;
-
-	pte = (pte_t *) __get_free_page(GFP_KERNEL);
-	if (pmd_none(*pmd)) {
-		if (pte) {
-			clear_page(pte);
-			set_pmd(pmd, __pmd(_KERNPG_TABLE + __pa(pte)));
-			return pte + offset;
-		}
-		set_pmd(pmd, __pmd(_KERNPG_TABLE + __pa(get_bad_pte_table())));
-		return NULL;
-	}
-	free_page((unsigned long)pte);
-	if (pmd_bad(*pmd)) {
-		__handle_bad_pmd_kernel(pmd);
-		return NULL;
-	}
-	return (pte_t *) pmd_page(*pmd) + offset;
-}
-
-pte_t *get_pte_slow(pmd_t *pmd, unsigned long offset)
-{
-	unsigned long pte;
-
-	pte = (unsigned long) __get_free_page(GFP_KERNEL);
-	if (pmd_none(*pmd)) {
-		if (pte) {
-			clear_page((void *)pte);
-			set_pmd(pmd, __pmd(_PAGE_TABLE + __pa(pte)));
-			return (pte_t *)pte + offset;
-		}
-		set_pmd(pmd, __pmd(_PAGE_TABLE + __pa(get_bad_pte_table())));
-		return NULL;
-	}
-	free_page(pte);
-	if (pmd_bad(*pmd)) {
-		__handle_bad_pmd(pmd);
-		return NULL;
-	}
-	return (pte_t *) pmd_page(*pmd) + offset;
-}
 
 int do_check_pgt_cache(int low, int high)
 {
 	int freed = 0;
 	if(pgtable_cache_size > high) {
 		do {
-			if(pgd_quicklist)
-				free_pgd_slow(get_pgd_fast()), freed++;
-			if(pmd_quicklist)
-				free_pmd_slow(get_pmd_fast()), freed++;
-			if(pte_quicklist)
-				free_pte_slow(get_pte_fast()), freed++;
+			if (pgd_quicklist) {
+				free_pgd_slow(get_pgd_fast());
+				freed++;
+			}
+			if (pmd_quicklist) {
+				pmd_free_slow(pmd_alloc_one_fast(NULL, 0));
+				freed++;
+			}
+			if (pte_quicklist) {
+				pte_free_slow(pte_alloc_one_fast(NULL, 0));
+				freed++;
+			}
 		} while(pgtable_cache_size > low);
 	}
 	return freed;
@@ -317,7 +210,7 @@ static void __init pagetable_init (void)
 	pgd_t *pgd, *pgd_base;
 	int i, j, k;
 	pmd_t *pmd;
-	pte_t *pte;
+	pte_t *pte, *pte_base;
 
 	/*
 	 * This can be zero as well - no problem, in that case we exit
@@ -327,10 +220,8 @@ static void __init pagetable_init (void)
 
 	pgd_base = swapper_pg_dir;
 #if CONFIG_X86_PAE
-	for (i = 0; i < PTRS_PER_PGD; i++) {
-		pgd = pgd_base + i;
-		__pgd_clear(pgd);
-	}
+	for (i = 0; i < PTRS_PER_PGD; i++)
+		set_pgd(pgd_base + i, __pgd(1 + __pa(empty_zero_page)));
 #endif
 	i = __pgd_offset(PAGE_OFFSET);
 	pgd = pgd_base + i;
@@ -366,11 +257,7 @@ static void __init pagetable_init (void)
 				continue;
 			}
 
-			pte = (pte_t *) alloc_bootmem_low_pages(PAGE_SIZE);
-			set_pmd(pmd, __pmd(_KERNPG_TABLE + __pa(pte)));
-
-			if (pte != pte_offset(pmd, 0))
-				BUG();
+			pte_base = pte = (pte_t *) alloc_bootmem_low_pages(PAGE_SIZE);
 
 			for (k = 0; k < PTRS_PER_PTE; pte++, k++) {
 				vaddr = i*PGDIR_SIZE + j*PMD_SIZE + k*PAGE_SIZE;
@@ -378,6 +265,10 @@ static void __init pagetable_init (void)
 					break;
 				*pte = mk_pte_phys(__pa(vaddr), PAGE_KERNEL);
 			}
+			set_pmd(pmd, __pmd(_KERNPG_TABLE + __pa(pte_base)));
+			if (pte_base != pte_offset(pmd, 0))
+				BUG();
+
 		}
 	}
 
@@ -420,14 +311,11 @@ void __init zap_low_mappings (void)
 	 * Zap initial low-memory mappings.
 	 *
 	 * Note that "pgd_clear()" doesn't do it for
-	 * us in this case, because pgd_clear() is a
-	 * no-op in the 2-level case (pmd_clear() is
-	 * the thing that clears the page-tables in
-	 * that case).
+	 * us, because pgd_clear() is a no-op on i386.
 	 */
 	for (i = 0; i < USER_PTRS_PER_PGD; i++)
 #if CONFIG_X86_PAE
-		pgd_clear(swapper_pg_dir+i);
+		set_pgd(swapper_pg_dir+i, __pgd(1 + __pa(empty_zero_page)));
 #else
 		set_pgd(swapper_pg_dir+i, __pgd(0));
 #endif
@@ -551,13 +439,24 @@ static inline int page_is_ram (unsigned long pagenr)
 	return 0;
 }
 
+static inline int page_kills_ppro(unsigned long pagenr)
+{
+	if(pagenr >= 0x70000 && pagenr <= 0x7003F)
+		return 1;
+	return 0;
+}
+	
 void __init mem_init(void)
 {
+	extern int ppro_with_ram_bug(void);
 	int codesize, reservedpages, datasize, initsize;
 	int tmp;
+	int bad_ppro;
 
 	if (!mem_map)
 		BUG();
+	
+	bad_ppro = ppro_with_ram_bug();
 
 #ifdef CONFIG_HIGHMEM
 	highmem_start_page = mem_map + highstart_pfn;
@@ -585,6 +484,11 @@ void __init mem_init(void)
 		struct page *page = mem_map + tmp;
 
 		if (!page_is_ram(tmp)) {
+			SetPageReserved(page);
+			continue;
+		}
+		if (bad_ppro && page_kills_ppro(tmp))
+		{
 			SetPageReserved(page);
 			continue;
 		}

@@ -40,9 +40,10 @@
  *	1.10b	Andrew Morton: SMP lock fix
  *	1.10c	Cesar Barros: SMP locking fixes and cleanup
  *	1.10d	Paul Gortmaker: delete paranoia check in rtc_exit
+ *	1.10e	Maciej W. Rozycki: Handle DECstation's year weirdness.
  */
 
-#define RTC_VERSION		"1.10d"
+#define RTC_VERSION		"1.10e"
 
 #define RTC_IO_EXTENT	0x10	/* Only really two ports, but...	*/
 
@@ -73,10 +74,15 @@
 
 #ifdef __sparc__
 #include <asm/ebus.h>
+#ifdef __sparc_v9__
+#include <asm/isa.h>
+#endif
 
 static unsigned long rtc_port;
-static int rtc_irq;
+static int rtc_irq = PCI_IRQ_NONE;
 #endif
+
+static int rtc_has_irq = 1;
 
 /*
  *	We sponge a minor off of the misc major. No need slurping
@@ -90,8 +96,6 @@ static struct fasync_struct *rtc_async_queue;
 static DECLARE_WAIT_QUEUE_HEAD(rtc_wait);
 
 static struct timer_list rtc_irq_timer;
-
-static loff_t rtc_llseek(struct file *file, loff_t offset, int origin);
 
 static ssize_t rtc_read(struct file *file, char *buf,
 			size_t count, loff_t *ppos);
@@ -186,11 +190,6 @@ static void rtc_interrupt(int irq, void *dev_id, struct pt_regs *regs)
  *	Now all the various file operations that we export.
  */
 
-static loff_t rtc_llseek(struct file *file, loff_t offset, int origin)
-{
-	return -ESPIPE;
-}
-
 static ssize_t rtc_read(struct file *file, char *buf,
 			size_t count, loff_t *ppos)
 {
@@ -201,6 +200,9 @@ static ssize_t rtc_read(struct file *file, char *buf,
 	unsigned long data;
 	ssize_t retval;
 	
+	if (rtc_has_irq == 0)
+		return -EIO;
+
 	if (count < sizeof(unsigned long))
 		return -EINVAL;
 
@@ -246,6 +248,22 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		     unsigned long arg)
 {
 	struct rtc_time wtime; 
+
+#if RTC_IRQ
+	if (rtc_has_irq == 0) {
+		switch (cmd) {
+		case RTC_AIE_OFF:
+		case RTC_AIE_ON:
+		case RTC_PIE_OFF:
+		case RTC_PIE_ON:
+		case RTC_UIE_OFF:
+		case RTC_UIE_ON:
+		case RTC_IRQP_READ:
+		case RTC_IRQP_SET:
+			return -EINVAL;
+		};
+	}
+#endif
 
 	switch (cmd) {
 #if RTC_IRQ
@@ -365,6 +383,9 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		unsigned char mon, day, hrs, min, sec, leap_yr;
 		unsigned char save_control, save_freq_select;
 		unsigned int yrs;
+#ifdef CONFIG_DECSTATION
+		unsigned int real_yrs;
+#endif
 
 		if (!capable(CAP_SYS_TIME))
 			return -EACCES;
@@ -398,15 +419,32 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 			return -EINVAL;
 
 		spin_lock_irq(&rtc_lock);
+#ifdef CONFIG_DECSTATION
+		real_yrs = yrs;
+		yrs = 72;
+
+		/*
+		 * We want to keep the year set to 73 until March
+		 * for non-leap years, so that Feb, 29th is handled
+		 * correctly.
+		 */
+		if (!leap_yr && mon < 3) {
+			real_yrs--;
+			yrs = 73;
+		}
+#endif
+		/* These limits and adjustments are independant of
+		 * whether the chip is in binary mode or not.
+		 */
+		if (yrs > 169) {
+			spin_unlock_irq(&rtc_lock);
+			return -EINVAL;
+		}
+		if (yrs >= 100)
+			yrs -= 100;
+
 		if (!(CMOS_READ(RTC_CONTROL) & RTC_DM_BINARY)
 		    || RTC_ALWAYS_BCD) {
-			if (yrs > 169) {
-				spin_unlock_irq(&rtc_lock);
-				return -EINVAL;
-			}
-			if (yrs >= 100)
-				yrs -= 100;
-
 			BIN_TO_BCD(sec);
 			BIN_TO_BCD(min);
 			BIN_TO_BCD(hrs);
@@ -420,6 +458,9 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		save_freq_select = CMOS_READ(RTC_FREQ_SELECT);
 		CMOS_WRITE((save_freq_select|RTC_DIV_RESET2), RTC_FREQ_SELECT);
 
+#ifdef CONFIG_DECSTATION
+		CMOS_WRITE(real_yrs, RTC_DEC_YEAR);
+#endif
 		CMOS_WRITE(yrs, RTC_YEAR);
 		CMOS_WRITE(mon, RTC_MONTH);
 		CMOS_WRITE(day, RTC_DAY_OF_MONTH);
@@ -473,7 +514,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		spin_unlock_irq(&rtc_lock);
 		return 0;
 	}
-#elif !defined(CONFIG_DECSTATION)
+#endif
 	case RTC_EPOCH_READ:	/* Read the epoch.	*/
 	{
 		return put_user (epoch, (unsigned long *)arg);
@@ -492,7 +533,6 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		epoch = arg;
 		return 0;
 	}
-#endif
 	default:
 		return -EINVAL;
 	}
@@ -534,12 +574,15 @@ static int rtc_fasync (int fd, struct file *filp, int on)
 static int rtc_release(struct inode *inode, struct file *file)
 {
 #if RTC_IRQ
+	unsigned char tmp;
+
+	if (rtc_has_irq == 0)
+		goto no_irq;
+
 	/*
 	 * Turn off all interrupts once the device is no longer
 	 * in use, and clear the data.
 	 */
-
-	unsigned char tmp;
 
 	spin_lock_irq(&rtc_lock);
 	tmp = CMOS_READ(RTC_CONTROL);
@@ -558,6 +601,7 @@ static int rtc_release(struct inode *inode, struct file *file)
 	if (file->f_flags & FASYNC) {
 		rtc_fasync (-1, file, 0);
 	}
+no_irq:
 #endif
 
 	spin_lock_irq (&rtc_lock);
@@ -575,6 +619,9 @@ static int rtc_release(struct inode *inode, struct file *file)
 static unsigned int rtc_poll(struct file *file, poll_table *wait)
 {
 	unsigned long l;
+
+	if (rtc_has_irq == 0)
+		return 0;
 
 	poll_wait(file, &rtc_wait, wait);
 
@@ -594,7 +641,7 @@ static unsigned int rtc_poll(struct file *file, poll_table *wait)
 
 static struct file_operations rtc_fops = {
 	owner:		THIS_MODULE,
-	llseek:		rtc_llseek,
+	llseek:		no_llseek,
 	read:		rtc_read,
 #if RTC_IRQ
 	poll:		rtc_poll,
@@ -622,28 +669,48 @@ static int __init rtc_init(void)
 #ifdef __sparc__
 	struct linux_ebus *ebus;
 	struct linux_ebus_device *edev;
+#ifdef __sparc_v9__
+	struct isa_bridge *isa_br;
+	struct isa_device *isa_dev;
+#endif
 #endif
 
 #ifdef __sparc__
 	for_each_ebus(ebus) {
 		for_each_ebusdev(edev, ebus) {
 			if(strcmp(edev->prom_name, "rtc") == 0) {
+				rtc_port = edev->resource[0].start;
+				rtc_irq = edev->irqs[0];
 				goto found;
 			}
 		}
 	}
+#ifdef __sparc_v9__
+	for_each_isa(isa_br) {
+		for_each_isadev(isa_dev, isa_br) {
+			if (strcmp(isa_dev->prom_name, "rtc") == 0) {
+				rtc_port = isa_dev->resource.start;
+				rtc_irq = isa_dev->irq;
+				goto found;
+			}
+		}
+	}
+#endif
 	printk(KERN_ERR "rtc_init: no PC rtc found\n");
 	return -EIO;
 
 found:
-	rtc_port = edev->resource[0].start;
-	rtc_irq = edev->irqs[0];
+	if (rtc_irq == PCI_IRQ_NONE) {
+		rtc_has_irq = 0;
+		goto no_irq;
+	}
+
 	/*
 	 * XXX Interrupt pin #7 in Espresso is shared between RTC and
 	 * PCI Slot 2 INTA# (and some INTx# in Slot 1). SA_INTERRUPT here
 	 * is asking for trouble with add-on boards. Change to SA_SHIRQ.
 	 */
-	if(request_irq(rtc_irq, rtc_interrupt, SA_INTERRUPT, "rtc", (void *)&rtc_port)) {
+	if (request_irq(rtc_irq, rtc_interrupt, SA_INTERRUPT, "rtc", (void *)&rtc_port)) {
 		/*
 		 * Standard way for sparc to print irq's is to use
 		 * __irq_itoa(). I think for EBus it's ok to use %d.
@@ -651,6 +718,7 @@ found:
 		printk(KERN_ERR "rtc: cannot register IRQ %d\n", rtc_irq);
 		return -EIO;
 	}
+no_irq:
 #else
 	if (check_region (RTC_PORT (0), RTC_IO_EXTENT))
 	{
@@ -681,8 +749,10 @@ found:
 	
 	uip_watchdog = jiffies;
 	if (rtc_is_updating() != 0)
-		while (jiffies - uip_watchdog < 2*HZ/100)
+		while (jiffies - uip_watchdog < 2*HZ/100) { 
 			barrier();
+			cpu_relax();
+		}
 	
 	spin_lock_irq(&rtc_lock);
 	year = CMOS_READ(RTC_YEAR);
@@ -692,15 +762,24 @@ found:
 	if (!(ctrl & RTC_DM_BINARY) || RTC_ALWAYS_BCD)
 		BCD_TO_BIN(year);       /* This should never happen... */
 	
-	if (year >= 20 && year < 48) {
+	if (year < 20) {
+		epoch = 2000;
+		guess = "SRM (post-2000)";
+	} else if (year >= 20 && year < 48) {
 		epoch = 1980;
 		guess = "ARC console";
-	} else if (year >= 48 && year < 70) {
+	} else if (year >= 48 && year < 72) {
 		epoch = 1952;
 		guess = "Digital UNIX";
-	} else if (year >= 70 && year < 100) {
-		epoch = 1928;
+#if defined(__mips__)
+	} else if (year >= 72 && year < 74) {
+		epoch = 2000;
 		guess = "Digital DECstation";
+#else
+	} else if (year >= 70) {
+		epoch = 1900;
+		guess = "Standard PC (1900)";
+#endif
 	}
 	if (guess)
 		printk(KERN_INFO "rtc: %s epoch (%lu) detected\n", guess, epoch);
@@ -726,11 +805,13 @@ static void __exit rtc_exit (void)
 	misc_deregister(&rtc_dev);
 
 #ifdef __sparc__
-	free_irq (rtc_irq, &rtc_port);
+	if (rtc_has_irq)
+		free_irq (rtc_irq, &rtc_port);
 #else
 	release_region (RTC_PORT (0), RTC_IO_EXTENT);
 #if RTC_IRQ
-	free_irq (RTC_IRQ, NULL);
+	if (rtc_has_irq)
+		free_irq (RTC_IRQ, NULL);
 #endif
 #endif /* __sparc__ */
 }
@@ -891,6 +972,9 @@ static void get_rtc_time(struct rtc_time *rtc_tm)
 {
 	unsigned long uip_watchdog = jiffies;
 	unsigned char ctrl;
+#ifdef CONFIG_DECSTATION
+	unsigned int real_year;
+#endif
 
 	/*
 	 * read RTC once any update in progress is done. The update
@@ -903,8 +987,10 @@ static void get_rtc_time(struct rtc_time *rtc_tm)
 	 */
 
 	if (rtc_is_updating() != 0)
-		while (jiffies - uip_watchdog < 2*HZ/100)
+		while (jiffies - uip_watchdog < 2*HZ/100) {
 			barrier();
+			cpu_relax();
+		}
 
 	/*
 	 * Only the values that we read from the RTC are set. We leave
@@ -919,6 +1005,9 @@ static void get_rtc_time(struct rtc_time *rtc_tm)
 	rtc_tm->tm_mday = CMOS_READ(RTC_DAY_OF_MONTH);
 	rtc_tm->tm_mon = CMOS_READ(RTC_MONTH);
 	rtc_tm->tm_year = CMOS_READ(RTC_YEAR);
+#ifdef CONFIG_DECSTATION
+	real_year = CMOS_READ(RTC_DEC_YEAR);
+#endif
 	ctrl = CMOS_READ(RTC_CONTROL);
 	spin_unlock_irq(&rtc_lock);
 
@@ -931,6 +1020,10 @@ static void get_rtc_time(struct rtc_time *rtc_tm)
 		BCD_TO_BIN(rtc_tm->tm_mon);
 		BCD_TO_BIN(rtc_tm->tm_year);
 	}
+
+#ifdef CONFIG_DECSTATION
+	rtc_tm->tm_year += real_year - 72;
+#endif
 
 	/*
 	 * Account for differences between how the RTC uses the values
@@ -1004,3 +1097,6 @@ static void set_rtc_irq_bit(unsigned char bit)
 	spin_unlock_irq(&rtc_lock);
 }
 #endif
+
+MODULE_AUTHOR("Paul Gortmaker");
+MODULE_LICENSE("GPL");

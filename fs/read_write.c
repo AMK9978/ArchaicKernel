@@ -4,7 +4,7 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <linux/malloc.h> 
+#include <linux/slab.h> 
 #include <linux/stat.h>
 #include <linux/fcntl.h>
 #include <linux/file.h>
@@ -15,6 +15,7 @@
 #include <asm/uaccess.h>
 
 struct file_operations generic_ro_fops = {
+	llseek:		generic_file_llseek,
 	read:		generic_file_read,
 	mmap:		generic_file_mmap,
 };
@@ -22,6 +23,34 @@ struct file_operations generic_ro_fops = {
 ssize_t generic_read_dir(struct file *filp, char *buf, size_t siz, loff_t *ppos)
 {
 	return -EISDIR;
+}
+
+loff_t generic_file_llseek(struct file *file, loff_t offset, int origin)
+{
+	long long retval;
+
+	switch (origin) {
+		case 2:
+			offset += file->f_dentry->d_inode->i_size;
+			break;
+		case 1:
+			offset += file->f_pos;
+	}
+	retval = -EINVAL;
+	if (offset>=0 && offset<=file->f_dentry->d_inode->i_sb->s_maxbytes) {
+		if (offset != file->f_pos) {
+			file->f_pos = offset;
+			file->f_reada = 0;
+			file->f_version = ++event;
+		}
+		retval = offset;
+	}
+	return retval;
+}
+
+loff_t no_llseek(struct file *file, loff_t offset, int origin)
+{
+	return -ESPIPE;
 }
 
 loff_t default_llseek(struct file *file, loff_t offset, int origin)

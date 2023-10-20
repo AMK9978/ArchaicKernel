@@ -19,7 +19,7 @@
  */
 
 #include <linux/config.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/sysctl.h>
 #include <linux/swapctl.h>
 #include <linux/proc_fs.h>
@@ -47,6 +47,8 @@ extern int sysctl_overcommit_memory;
 extern int max_threads;
 extern int nr_queued_signals, max_queued_signals;
 extern int sysrq_enabled;
+extern int core_uses_pid;
+extern int cad_pid;
 
 /* this is needed for the proc_dointvec_minmax for [fs_]overflow UID and GID */
 static int maxolduid = 65535;
@@ -75,8 +77,16 @@ extern int sem_ctls[];
 extern char reboot_command [];
 extern int stop_a_enabled;
 #endif
-#ifdef __powerpc__
-extern unsigned long htab_reclaim_on, zero_paged_on, powersave_nap;
+
+#ifdef CONFIG_ARCH_S390
+#ifdef CONFIG_MATHEMU
+extern int sysctl_ieee_emulation_warnings;
+#endif
+extern int sysctl_userprocess_debug;
+#endif
+
+#ifdef CONFIG_PPC32
+extern unsigned long zero_paged_on, powersave_nap;
 int proc_dol2crvec(ctl_table *table, int write, struct file *filp,
 		  void *buffer, size_t *lenp);
 #endif
@@ -130,9 +140,6 @@ static void register_proc_table(ctl_table *, struct proc_dir_entry *);
 static void unregister_proc_table(ctl_table *, struct proc_dir_entry *);
 #endif
 
-extern int inodes_stat[];
-extern int dentry_stat[];
-
 /* The default sysctl tables: */
 
 static ctl_table root_table[] = {
@@ -161,6 +168,10 @@ static ctl_table kern_table[] = {
 	 0644, NULL, &proc_doutsstring, &sysctl_string},
 	{KERN_PANIC, "panic", &panic_timeout, sizeof(int),
 	 0644, NULL, &proc_dointvec},
+	{KERN_CORE_USES_PID, "core_uses_pid", &core_uses_pid, sizeof(int),
+	 0644, NULL, &proc_dointvec},
+	{KERN_TAINTED, "tainted", &tainted, sizeof(int),
+	 0644, NULL, &proc_dointvec},
 	{KERN_CAP_BSET, "cap-bound", &cap_bset, sizeof(kernel_cap_t),
 	 0600, NULL, &proc_dointvec_bset},
 #ifdef CONFIG_BLK_DEV_INITRD
@@ -173,9 +184,7 @@ static ctl_table kern_table[] = {
 	{KERN_SPARC_STOP_A, "stop-a", &stop_a_enabled, sizeof (int),
 	 0644, NULL, &proc_dointvec},
 #endif
-#ifdef __powerpc__
-	{KERN_PPC_HTABRECLAIM, "htab-reclaim", &htab_reclaim_on, sizeof(int),
-	 0644, NULL, &proc_dointvec},
+#ifdef CONFIG_PPC32
 	{KERN_PPC_ZEROPAGED, "zero-paged", &zero_paged_on, sizeof(int),
 	 0644, NULL, &proc_dointvec},
 	{KERN_PPC_POWERSAVE_NAP, "powersave-nap", &powersave_nap, sizeof(int),
@@ -227,6 +236,8 @@ static ctl_table kern_table[] = {
 	{KERN_SYSRQ, "sysrq", &sysrq_enabled, sizeof (int),
 	 0644, NULL, &proc_dointvec},
 #endif	 
+	{KERN_CADPID, "cad_pid", &cad_pid, sizeof (int),
+	 0600, NULL, &proc_dointvec},
 	{KERN_MAX_THREADS, "threads-max", &max_threads, sizeof(int),
 	 0644, NULL, &proc_dointvec},
 	{KERN_RANDOM, "random", NULL, 0, 0555, random_table},
@@ -236,21 +247,23 @@ static ctl_table kern_table[] = {
 	{KERN_OVERFLOWGID, "overflowgid", &overflowgid, sizeof(int), 0644, NULL,
 	 &proc_dointvec_minmax, &sysctl_intvec, NULL,
 	 &minolduid, &maxolduid},
+#ifdef CONFIG_ARCH_S390
+#ifdef CONFIG_MATHEMU
+	{KERN_IEEE_EMULATION_WARNINGS,"ieee_emulation_warnings",
+	 &sysctl_ieee_emulation_warnings,sizeof(int),0644,NULL,&proc_dointvec},
+#endif
+	{KERN_S390_USER_DEBUG_LOGGING,"userprocess_debug",
+	 &sysctl_userprocess_debug,sizeof(int),0644,NULL,&proc_dointvec},
+#endif
 	{0}
 };
 
 static ctl_table vm_table[] = {
-	{VM_FREEPG, "freepages", 
-	 &freepages, sizeof(freepages_t), 0444, NULL, &proc_dointvec},
 	{VM_BDFLUSH, "bdflush", &bdf_prm, 9*sizeof(int), 0644, NULL,
 	 &proc_dointvec_minmax, &sysctl_intvec, NULL,
 	 &bdflush_min, &bdflush_max},
 	{VM_OVERCOMMIT_MEMORY, "overcommit_memory", &sysctl_overcommit_memory,
 	 sizeof(sysctl_overcommit_memory), 0644, NULL, &proc_dointvec},
-	{VM_BUFFERMEM, "buffermem",
-	 &buffer_mem, sizeof(buffer_mem_t), 0644, NULL, &proc_dointvec},
-	{VM_PAGECACHE, "pagecache",
-	 &page_cache, sizeof(buffer_mem_t), 0644, NULL, &proc_dointvec},
 	{VM_PAGERDAEMON, "kswapd",
 	 &pager_daemon, sizeof(pager_daemon_t), 0644, NULL, &proc_dointvec},
 	{VM_PGT_CACHE, "pagetable_cache", 
@@ -273,14 +286,8 @@ static ctl_table fs_table[] = {
 	 0444, NULL, &proc_dointvec},
 	{FS_MAXFILE, "file-max", &files_stat.max_files, sizeof(int),
 	 0644, NULL, &proc_dointvec},
-	{FS_NRSUPER, "super-nr", &nr_super_blocks, sizeof(int),
-	 0444, NULL, &proc_dointvec},
-	{FS_MAXSUPER, "super-max", &max_super_blocks, sizeof(int),
-	 0644, NULL, &proc_dointvec},
 	{FS_NRDQUOT, "dquot-nr", &nr_dquots, 2*sizeof(int),
 	 0444, NULL, &proc_dointvec},
-	{FS_MAXDQUOT, "dquot-max", &max_dquots, sizeof(int),
-	 0644, NULL, &proc_dointvec},
 	{FS_DENTRY, "dentry-state", &dentry_stat, 6*sizeof(int),
 	 0444, NULL, &proc_dointvec},
 	{FS_OVERFLOWUID, "overflowuid", &fs_overflowuid, sizeof(int), 0644, NULL,
@@ -321,7 +328,7 @@ int do_sysctl(int *name, int nlen, void *oldval, size_t *oldlenp,
 {
 	struct list_head *tmp;
 
-	if (nlen == 0 || nlen >= CTL_MAXNAME)
+	if (nlen <= 0 || nlen >= CTL_MAXNAME)
 		return -ENOTDIR;
 	if (oldval) {
 		int old_len;
@@ -426,7 +433,8 @@ int do_sysctl_strategy (ctl_table *table,
 			void *oldval, size_t *oldlenp,
 			void *newval, size_t newlen, void **context)
 {
-	int op = 0, rc, len;
+	int op = 0, rc;
+	size_t len;
 
 	if (oldval)
 		op |= 004;
@@ -469,13 +477,82 @@ int do_sysctl_strategy (ctl_table *table,
 	return 0;
 }
 
+/**
+ * register_sysctl_table - register a sysctl heirarchy
+ * @table: the top-level table structure
+ * @insert_at_head: whether the entry should be inserted in front or at the end
+ *
+ * Register a sysctl table heirarchy. @table should be a filled in ctl_table
+ * array. An entry with a ctl_name of 0 terminates the table. 
+ *
+ * The members of the &ctl_table structure are used as follows:
+ *
+ * ctl_name - This is the numeric sysctl value used by sysctl(2). The number
+ *            must be unique within that level of sysctl
+ *
+ * procname - the name of the sysctl file under /proc/sys. Set to %NULL to not
+ *            enter a sysctl file
+ *
+ * data - a pointer to data for use by proc_handler
+ *
+ * maxlen - the maximum size in bytes of the data
+ *
+ * mode - the file permissions for the /proc/sys file, and for sysctl(2)
+ *
+ * child - a pointer to the child sysctl table if this entry is a directory, or
+ *         %NULL.
+ *
+ * proc_handler - the text handler routine (described below)
+ *
+ * strategy - the strategy routine (described below)
+ *
+ * de - for internal use by the sysctl routines
+ *
+ * extra1, extra2 - extra pointers usable by the proc handler routines
+ *
+ * Leaf nodes in the sysctl tree will be represented by a single file
+ * under /proc; non-leaf nodes will be represented by directories.
+ *
+ * sysctl(2) can automatically manage read and write requests through
+ * the sysctl table.  The data and maxlen fields of the ctl_table
+ * struct enable minimal validation of the values being written to be
+ * performed, and the mode field allows minimal authentication.
+ *
+ * More sophisticated management can be enabled by the provision of a
+ * strategy routine with the table entry.  This will be called before
+ * any automatic read or write of the data is performed.
+ *
+ * The strategy routine may return
+ *
+ * < 0 - Error occurred (error is passed to user process)
+ *
+ * 0   - OK - proceed with automatic read or write.
+ *
+ * > 0 - OK - read or write has been done by the strategy routine, so
+ *       return immediately.
+ *
+ * There must be a proc_handler routine for any terminal nodes
+ * mirrored under /proc/sys (non-terminals are handled by a built-in
+ * directory handler).  Several default handlers are available to
+ * cover common cases -
+ *
+ * proc_dostring(), proc_dointvec(), proc_dointvec_jiffies(),
+ * proc_dointvec_minmax(), proc_doulongvec_ms_jiffies_minmax(),
+ * proc_doulongvec_minmax()
+ *
+ * It is the handler's job to read the input buffer from user memory
+ * and process it. The handler should return 0 on success.
+ *
+ * This routine returns %NULL on a failure to register, and a pointer
+ * to the table header on success.
+ */
 struct ctl_table_header *register_sysctl_table(ctl_table * table, 
 					       int insert_at_head)
 {
 	struct ctl_table_header *tmp;
 	tmp = kmalloc(sizeof(struct ctl_table_header), GFP_KERNEL);
 	if (!tmp)
-		return 0;
+		return NULL;
 	tmp->ctl_table = table;
 	INIT_LIST_HEAD(&tmp->ctl_entry);
 	if (insert_at_head)
@@ -488,8 +565,12 @@ struct ctl_table_header *register_sysctl_table(ctl_table * table,
 	return tmp;
 }
 
-/*
- * Unlink and free a ctl_table.
+/**
+ * unregister_sysctl_table - unregister a sysctl table heirarchy
+ * @header: the header returned from register_sysctl_table
+ *
+ * Unregisters the sysctl table and all children. proc entries may not
+ * actually be removed until they are no longer used by anyone.
  */
 void unregister_sysctl_table(struct ctl_table_header * header)
 {
@@ -633,10 +714,27 @@ static int proc_sys_permission(struct inode *inode, int op)
 	return test_perm(inode->i_mode, op);
 }
 
+/**
+ * proc_dostring - read a string sysctl
+ * @table: the sysctl table
+ * @write: %TRUE if this is a write to the sysctl file
+ * @filp: the file structure
+ * @buffer: the user buffer
+ * @lenp: the size of the user buffer
+ *
+ * Reads/writes a string from/to the user buffer. If the kernel
+ * buffer provided is not large enough to hold the string, the
+ * string is truncated. The copied string is %NULL-terminated.
+ * If the string is being read by the user process, it is copied
+ * and a newline '\n' is added. It is truncated if the buffer is
+ * not large enough.
+ *
+ * Returns 0 on success.
+ */
 int proc_dostring(ctl_table *table, int write, struct file *filp,
 		  void *buffer, size_t *lenp)
 {
-	int len;
+	size_t len;
 	char *p, c;
 	
 	if (!table->data || !table->maxlen || !*lenp ||
@@ -712,7 +810,9 @@ static int proc_doutsstring(ctl_table *table, int write, struct file *filp,
 static int do_proc_dointvec(ctl_table *table, int write, struct file *filp,
 		  void *buffer, size_t *lenp, int conv, int op)
 {
-	int *i, vleft, first=1, len, left, neg, val;
+	int *i, vleft, first=1, neg, val;
+	size_t left, len;
+	
 	#define TMPBUFLEN 20
 	char buf[TMPBUFLEN], *p;
 	
@@ -810,6 +910,19 @@ static int do_proc_dointvec(ctl_table *table, int write, struct file *filp,
 	return 0;
 }
 
+/**
+ * proc_dointvec - read a vector of integers
+ * @table: the sysctl table
+ * @write: %TRUE if this is a write to the sysctl file
+ * @filp: the file structure
+ * @buffer: the user buffer
+ * @lenp: the size of the user buffer
+ *
+ * Reads/writes up to table->maxlen/sizeof(unsigned int) integer
+ * values from/to the user buffer, treated as an ASCII string. 
+ *
+ * Returns 0 on success.
+ */
 int proc_dointvec(ctl_table *table, int write, struct file *filp,
 		     void *buffer, size_t *lenp)
 {
@@ -830,10 +943,27 @@ int proc_dointvec_bset(ctl_table *table, int write, struct file *filp,
 				(current->pid == 1) ? OP_SET : OP_AND);
 }
 
+/**
+ * proc_dointvec_minmax - read a vector of integers with min/max values
+ * @table: the sysctl table
+ * @write: %TRUE if this is a write to the sysctl file
+ * @filp: the file structure
+ * @buffer: the user buffer
+ * @lenp: the size of the user buffer
+ *
+ * Reads/writes up to table->maxlen/sizeof(unsigned int) integer
+ * values from/to the user buffer, treated as an ASCII string.
+ *
+ * This routine will ensure the values are within the range specified by
+ * table->extra1 (min) and table->extra2 (max).
+ *
+ * Returns 0 on success.
+ */
 int proc_dointvec_minmax(ctl_table *table, int write, struct file *filp,
 		  void *buffer, size_t *lenp)
 {
-	int *i, *min, *max, vleft, first=1, len, left, neg, val;
+	int *i, *min, *max, vleft, first=1, neg, val;
+	size_t len, left;
 	#define TMPBUFLEN 20
 	char buf[TMPBUFLEN], *p;
 	
@@ -928,10 +1058,6 @@ int proc_dointvec_minmax(ctl_table *table, int write, struct file *filp,
 	return 0;
 }
 
-/*
- * an unsigned long function version
- */
-
 static int do_proc_doulongvec_minmax(ctl_table *table, int write,
 				     struct file *filp,
 				     void *buffer, size_t *lenp,
@@ -940,7 +1066,8 @@ static int do_proc_doulongvec_minmax(ctl_table *table, int write,
 {
 #define TMPBUFLEN 20
 	unsigned long *i, *min, *max, val;
-	int vleft, first=1, len, left, neg;
+	int vleft, first=1, neg;
+	size_t len, left;
 	char buf[TMPBUFLEN], *p;
 	
 	if (!table->data || !table->maxlen || !*lenp ||
@@ -1037,12 +1164,45 @@ static int do_proc_doulongvec_minmax(ctl_table *table, int write,
 #undef TMPBUFLEN
 }
 
+/**
+ * proc_doulongvec_minmax - read a vector of long integers with min/max values
+ * @table: the sysctl table
+ * @write: %TRUE if this is a write to the sysctl file
+ * @filp: the file structure
+ * @buffer: the user buffer
+ * @lenp: the size of the user buffer
+ *
+ * Reads/writes up to table->maxlen/sizeof(unsigned long) unsigned long
+ * values from/to the user buffer, treated as an ASCII string.
+ *
+ * This routine will ensure the values are within the range specified by
+ * table->extra1 (min) and table->extra2 (max).
+ *
+ * Returns 0 on success.
+ */
 int proc_doulongvec_minmax(ctl_table *table, int write, struct file *filp,
 			   void *buffer, size_t *lenp)
 {
     return do_proc_doulongvec_minmax(table, write, filp, buffer, lenp, 1l, 1l);
 }
 
+/**
+ * proc_doulongvec_ms_jiffies_minmax - read a vector of millisecond values with min/max values
+ * @table: the sysctl table
+ * @write: %TRUE if this is a write to the sysctl file
+ * @filp: the file structure
+ * @buffer: the user buffer
+ * @lenp: the size of the user buffer
+ *
+ * Reads/writes up to table->maxlen/sizeof(unsigned long) unsigned long
+ * values from/to the user buffer, treated as an ASCII string. The values
+ * are treated as milliseconds, and converted to jiffies when they are stored.
+ *
+ * This routine will ensure the values are within the range specified by
+ * table->extra1 (min) and table->extra2 (max).
+ *
+ * Returns 0 on success.
+ */
 int proc_doulongvec_ms_jiffies_minmax(ctl_table *table, int write,
 				      struct file *filp,
 				      void *buffer, size_t *lenp)
@@ -1052,7 +1212,21 @@ int proc_doulongvec_ms_jiffies_minmax(ctl_table *table, int write,
 }
 
 
-/* Like proc_dointvec, but converts seconds to jiffies */
+/**
+ * proc_dointvec_jiffies - read a vector of integers as seconds
+ * @table: the sysctl table
+ * @write: %TRUE if this is a write to the sysctl file
+ * @filp: the file structure
+ * @buffer: the user buffer
+ * @lenp: the size of the user buffer
+ *
+ * Reads/writes up to table->maxlen/sizeof(unsigned int) integer
+ * values from/to the user buffer, treated as an ASCII string. 
+ * The values read are assumed to be in seconds, and are converted into
+ * jiffies.
+ *
+ * Returns 0 on success.
+ */
 int proc_dointvec_jiffies(ctl_table *table, int write, struct file *filp,
 			  void *buffer, size_t *lenp)
 {
@@ -1123,7 +1297,7 @@ int sysctl_string(ctl_table *table, int *name, int nlen,
 		  void *oldval, size_t *oldlenp,
 		  void *newval, size_t newlen, void **context)
 {
-	int l, len;
+	size_t l, len;
 	
 	if (!table->data || !table->maxlen) 
 		return -ENOTDIR;
@@ -1166,7 +1340,8 @@ int sysctl_intvec(ctl_table *table, int *name, int nlen,
 		void *oldval, size_t *oldlenp,
 		void *newval, size_t newlen, void **context)
 {
-	int i, length, *vec, *min, *max;
+	int i, *vec, *min, *max;
+	size_t length;
 
 	if (newval && newlen) {
 		if (newlen % sizeof(int) != 0)

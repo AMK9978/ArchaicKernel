@@ -2,7 +2,7 @@
  *  linux/arch/arm/mm/fault-armv.c
  *
  *  Copyright (C) 1995  Linus Torvalds
- *  Modifications for ARM processor (c) 1995-1999 Russell King
+ *  Modifications for ARM processor (c) 1995-2001 Russell King
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -20,34 +20,24 @@
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 #include <linux/proc_fs.h>
+#include <linux/bitops.h>
 #include <linux/init.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
+#include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 #include <asm/unaligned.h>
 
-#define FAULT_CODE_READ		0x02
-
-#define DO_COW(m)		(!((m) & FAULT_CODE_READ))
-#define READ_FAULT(m)		((m) & FAULT_CODE_READ)
-
 extern void die_if_kernel(const char *str, struct pt_regs *regs, int err);
-
-#include "fault-common.c"
-
-#ifdef DEBUG
-static int sp_valid(unsigned long *sp)
-{
-	unsigned long addr = (unsigned long) sp;
-
-	if (addr >= 0xb0000000 && addr < 0xd0000000)
-		return 1;
-	if (addr >= 0x03ff0000 && addr < 0x04000000)
-		return 1;
-	return 0;
-}
-#endif
+extern void show_pte(struct mm_struct *mm, unsigned long addr);
+extern int do_page_fault(unsigned long addr, int error_code,
+			 struct pt_regs *regs);
+extern int do_translation_fault(unsigned long addr, int error_code,
+				struct pt_regs *regs);
+extern void do_bad_area(struct task_struct *tsk, struct mm_struct *mm,
+			unsigned long addr, int error_code,
+			struct pt_regs *regs);
 
 #ifdef CONFIG_ALIGNMENT_TRAP
 /*
@@ -55,12 +45,10 @@ static int sp_valid(unsigned long *sp)
  * /proc/sys/debug/alignment, modified and integrated into
  * Linux 2.1 by Russell King
  *
- * NOTE!!! This is not portable onto the ARM6/ARM7 processors yet.  Also,
- * it seems to give a severe performance impact (1 abort/ms - NW runs at
- * ARM6 speeds) with GCC 2.7.2.2 - needs checking with a later GCC/EGCS.
+ * Speed optimisations and better fault handling by Russell King.
  *
- * IMHO, I don't think that the trap handler is advantageous on ARM6,7
- * processors (they'll run like an ARM3).  We'll see.
+ * *** NOTE ***
+ * This code is not portable to processors with late data abort handling.
  */
 #define CODING_BITS(i)	(i & 0x0e000000)
 
@@ -69,6 +57,8 @@ static int sp_valid(unsigned long *sp)
 #define LDST_U_BIT(i)	(i & (1 << 23))		/* Add offset		*/
 #define LDST_W_BIT(i)	(i & (1 << 21))		/* Writeback		*/
 #define LDST_L_BIT(i)	(i & (1 << 20))		/* Load			*/
+
+#define LDST_P_EQ_U(i)	((((i) ^ ((i) >> 1)) & (1 << 23)) == 0)
 
 #define LDSTH_I_BIT(i)	(i & (1 << 22))		/* half-word immed	*/
 #define LDM_S_BIT(i)	(i & (1 << 22))		/* write CPSR from SPSR	*/
@@ -133,82 +123,332 @@ static int __init alignment_init(void)
 __initcall(alignment_init);
 #endif /* CONFIG_SYSCTL */
 
+union offset_union {
+	unsigned long un;
+	  signed long sn;
+};
+
+#define TYPE_ERROR	0
+#define TYPE_FAULT	1
+#define TYPE_LDST	2
+#define TYPE_DONE	3
+
+#define get8_unaligned_check(val,addr,err)		\
+	__asm__(					\
+	"1:	ldrb	%1, [%2], #1\n"			\
+	"2:\n"						\
+	"	.section .fixup,\"ax\"\n"		\
+	"	.align	2\n"				\
+	"3:	mov	%0, #1\n"			\
+	"	b	2b\n"				\
+	"	.previous\n"				\
+	"	.section __ex_table,\"a\"\n"		\
+	"	.align	3\n"				\
+	"	.long	1b, 3b\n"			\
+	"	.previous\n"				\
+	: "=r" (err), "=&r" (val), "=r" (addr)		\
+	: "0" (err), "2" (addr))
+
+#define get8t_unaligned_check(val,addr,err)		\
+	__asm__(					\
+	"1:	ldrbt	%1, [%2], #1\n"			\
+	"2:\n"						\
+	"	.section .fixup,\"ax\"\n"		\
+	"	.align	2\n"				\
+	"3:	mov	%0, #1\n"			\
+	"	b	2b\n"				\
+	"	.previous\n"				\
+	"	.section __ex_table,\"a\"\n"		\
+	"	.align	3\n"				\
+	"	.long	1b, 3b\n"			\
+	"	.previous\n"				\
+	: "=r" (err), "=&r" (val), "=r" (addr)		\
+	: "0" (err), "2" (addr))
+
+#define get16_unaligned_check(val,addr)				\
+	do {							\
+		unsigned int err = 0, v, a = addr;		\
+		get8_unaligned_check(val,a,err);		\
+		get8_unaligned_check(v,a,err);			\
+		val |= v << 8;					\
+		if (err)					\
+			goto fault;				\
+	} while (0)
+
+#define put16_unaligned_check(val,addr)				\
+	do {							\
+		unsigned int err = 0, v = val, a = addr;	\
+		__asm__(					\
+		"1:	strb	%1, [%2], #1\n"			\
+		"	mov	%1, %1, lsr #8\n"		\
+		"2:	strb	%1, [%2]\n"			\
+		"3:\n"						\
+		"	.section .fixup,\"ax\"\n"		\
+		"	.align	2\n"				\
+		"4:	mov	%0, #1\n"			\
+		"	b	3b\n"				\
+		"	.previous\n"				\
+		"	.section __ex_table,\"a\"\n"		\
+		"	.align	3\n"				\
+		"	.long	1b, 4b\n"			\
+		"	.long	2b, 4b\n"			\
+		"	.previous\n"				\
+		: "=r" (err), "=&r" (v), "=&r" (a)		\
+		: "0" (err), "1" (v), "2" (a));			\
+		if (err)					\
+			goto fault;				\
+	} while (0)
+
+#define __put32_unaligned_check(ins,val,addr)			\
+	do {							\
+		unsigned int err = 0, v = val, a = addr;	\
+		__asm__(					\
+		"1:	"ins"	%1, [%2], #1\n"			\
+		"	mov	%1, %1, lsr #8\n"		\
+		"2:	"ins"	%1, [%2], #1\n"			\
+		"	mov	%1, %1, lsr #8\n"		\
+		"3:	"ins"	%1, [%2], #1\n"			\
+		"	mov	%1, %1, lsr #8\n"		\
+		"4:	"ins"	%1, [%2]\n"			\
+		"5:\n"						\
+		"	.section .fixup,\"ax\"\n"		\
+		"	.align	2\n"				\
+		"6:	mov	%0, #1\n"			\
+		"	b	5b\n"				\
+		"	.previous\n"				\
+		"	.section __ex_table,\"a\"\n"		\
+		"	.align	3\n"				\
+		"	.long	1b, 6b\n"			\
+		"	.long	2b, 6b\n"			\
+		"	.long	3b, 6b\n"			\
+		"	.long	4b, 6b\n"			\
+		"	.previous\n"				\
+		: "=r" (err), "=&r" (v), "=&r" (a)		\
+		: "0" (err), "1" (v), "2" (a));			\
+		if (err)					\
+			goto fault;				\
+	} while (0)
+
+#define get32_unaligned_check(val,addr)				\
+	do {							\
+		unsigned int err = 0, v, a = addr;		\
+		get8_unaligned_check(val,a,err);		\
+		get8_unaligned_check(v,a,err);			\
+		val |= v << 8;					\
+		get8_unaligned_check(v,a,err);			\
+		val |= v << 16;					\
+		get8_unaligned_check(v,a,err);			\
+		val |= v << 24;					\
+		if (err)					\
+			goto fault;				\
+	} while (0)
+
+#define put32_unaligned_check(val,addr)	 \
+	__put32_unaligned_check("strb", val, addr)
+
+#define get32t_unaligned_check(val,addr)			\
+	do {							\
+		unsigned int err = 0, v, a = addr;		\
+		get8t_unaligned_check(val,a,err);		\
+		get8t_unaligned_check(v,a,err);			\
+		val |= v << 8;					\
+		get8t_unaligned_check(v,a,err);			\
+		val |= v << 16;					\
+		get8t_unaligned_check(v,a,err);			\
+		val |= v << 24;					\
+		if (err)					\
+			goto fault;				\
+	} while (0)
+
+#define put32t_unaligned_check(val,addr) \
+	__put32_unaligned_check("strbt", val, addr)
+
+static void
+do_alignment_finish_ldst(unsigned long addr, unsigned long instr, struct pt_regs *regs, union offset_union offset)
+{
+	if (!LDST_U_BIT(instr))
+		offset.un = -offset.un;
+
+	if (!LDST_P_BIT(instr))
+		addr += offset.un;
+
+	if (!LDST_P_BIT(instr) || LDST_W_BIT(instr))
+		regs->uregs[RN_BITS(instr)] = addr;
+}
+
+static int
+do_alignment_ldrhstrh(unsigned long addr, unsigned long instr, struct pt_regs *regs)
+{
+	unsigned int rd = RD_BITS(instr);
+
+	if ((instr & 0x01f00ff0) == 0x01000090)
+		goto swp;
+
+	if ((instr & 0x90) != 0x90 || (instr & 0x60) == 0)
+		goto bad;
+
+	ai_half += 1;
+
+	if (LDST_L_BIT(instr)) {
+		unsigned long val;
+		get16_unaligned_check(val, addr);
+
+		/* signed half-word? */
+		if (instr & 0x40)
+			val = (signed long)((signed short) val);
+
+		regs->uregs[rd] = val;
+	} else
+		put16_unaligned_check(regs->uregs[rd], addr);
+
+	return TYPE_LDST;
+
+swp:
+	printk(KERN_ERR "Alignment trap: not handling swp instruction\n");
+bad:
+	return TYPE_ERROR;
+
+fault:
+	return TYPE_FAULT;
+}
+
+static int
+do_alignment_ldrstr(unsigned long addr, unsigned long instr, struct pt_regs *regs)
+{
+	unsigned int rd = RD_BITS(instr);
+
+	ai_word += 1;
+
+	if (!LDST_P_BIT(instr) && LDST_W_BIT(instr))
+		goto trans;
+
+	if (LDST_L_BIT(instr))
+		get32_unaligned_check(regs->uregs[rd], addr);
+	else
+		put32_unaligned_check(regs->uregs[rd], addr);
+	return TYPE_LDST;
+
+trans:
+	if (LDST_L_BIT(instr))
+		get32t_unaligned_check(regs->uregs[rd], addr);
+	else
+		put32t_unaligned_check(regs->uregs[rd], addr);
+	return TYPE_LDST;
+
+fault:
+	return TYPE_FAULT;
+}
+
+/*
+ * LDM/STM alignment handler.
+ *
+ * There are 4 variants of this instruction:
+ *
+ * B = rn pointer before instruction, A = rn pointer after instruction
+ *              ------ increasing address ----->
+ *	        |    | r0 | r1 | ... | rx |    |
+ * PU = 01             B                    A
+ * PU = 11        B                    A
+ * PU = 00        A                    B
+ * PU = 10             A                    B
+ */
+static int
+do_alignment_ldmstm(unsigned long addr, unsigned long instr, struct pt_regs *regs)
+{
+	unsigned int rd, rn, correction, nr_regs, regbits;
+	unsigned long eaddr, newaddr;
+
+	if (LDM_S_BIT(instr))
+		goto bad;
+
+	correction = 4; /* processor implementation defined */
+	regs->ARM_pc += correction;
+
+	ai_multi += 1;
+
+	/* count the number of registers in the mask to be transferred */
+	nr_regs = hweight16(REGMASK_BITS(instr)) * 4;
+
+	rn = RN_BITS(instr);
+	newaddr = eaddr = regs->uregs[rn];
+
+	if (!LDST_U_BIT(instr))
+		nr_regs = -nr_regs;
+	newaddr += nr_regs;
+	if (!LDST_U_BIT(instr))
+		eaddr = newaddr;
+
+	if (LDST_P_EQ_U(instr))	/* U = P */
+		eaddr += 4;
+
+	/*
+	 * This is a "hint" - we already have eaddr worked out by the
+	 * processor for us.
+	 */
+	if (addr != eaddr) {
+		printk(KERN_ERR "LDMSTM: PC = %08lx, instr = %08lx, "
+			"addr = %08lx, eaddr = %08lx\n",
+			 instruction_pointer(regs), instr, addr, eaddr);
+		show_regs(regs);
+	}
+
+	for (regbits = REGMASK_BITS(instr), rd = 0; regbits; regbits >>= 1, rd += 1)
+		if (regbits & 1) {
+			if (LDST_L_BIT(instr))
+				get32_unaligned_check(regs->uregs[rd], eaddr);
+			else
+				put32_unaligned_check(regs->uregs[rd], eaddr);
+			eaddr += 4;
+		}
+
+	if (LDST_W_BIT(instr))
+		regs->uregs[rn] = newaddr;
+	if (!LDST_L_BIT(instr) || !(REGMASK_BITS(instr) & (1 << 15)))
+		regs->ARM_pc -= correction;
+	return TYPE_DONE;
+
+fault:
+	regs->ARM_pc -= correction;
+	return TYPE_FAULT;
+
+bad:
+	printk(KERN_ERR "Alignment trap: not handling ldm with s-bit set\n");
+	return TYPE_ERROR;
+}
+
 static int
 do_alignment(unsigned long addr, int error_code, struct pt_regs *regs)
 {
-	unsigned int instr, rd, rn, correction, nr_regs, regbits;
-	unsigned long eaddr;
-	union { unsigned long un; signed long sn; } offset;
+	union offset_union offset;
+	unsigned long instr, instrptr;
+	int (*handler)(unsigned long addr, unsigned long instr, struct pt_regs *regs);
+	unsigned int type;
 
-	if (user_mode(regs)) {
-		set_cr(cr_no_alignment);
-		ai_user += 1;
-		return 0;
-	}
+	if (user_mode(regs))
+		goto user;
 
 	ai_sys += 1;
 
-	instr = *(unsigned long *)instruction_pointer(regs);
-	correction = 4; /* sometimes 8 on ARMv3 */
-	regs->ARM_pc += correction + 4;
+	instrptr = instruction_pointer(regs);
+	instr = *(unsigned long *)instrptr;
 
-	rd = RD_BITS(instr);
-	rn = RN_BITS(instr);
-	eaddr = regs->uregs[rn];
+	regs->ARM_pc += 4;
 
-	switch(CODING_BITS(instr)) {
-	case 0x00000000:
-		if ((instr & 0x0ff00ff0) == 0x01000090) {
-			ai_skipped += 1;
-			printk(KERN_ERR "Unaligned trap: not handling swp instruction\n");
-			return 1;
-		}
-
-		if (((instr & 0x0e000090) == 0x00000090) && (instr & 0x60) != 0) {
-			ai_half += 1;
-			if (LDSTH_I_BIT(instr))
-				offset.un = (instr & 0xf00) >> 4 | (instr & 15);
-			else
-				offset.un = regs->uregs[RM_BITS(instr)];
-
-			if (LDST_P_BIT(instr)) {
-				if (LDST_U_BIT(instr))
-					eaddr += offset.un;
-				else
-					eaddr -= offset.un;
-			}
-
-			if (LDST_L_BIT(instr))
-				regs->uregs[rd] = get_unaligned((unsigned short *)eaddr);
-			else
-				put_unaligned(regs->uregs[rd], (unsigned short *)eaddr);
-
-			/* signed half-word? */
-			if (instr & 0x40)
-				regs->uregs[rd] = (long)((short) regs->uregs[rd]);
-
-			if (!LDST_P_BIT(instr)) {
-				if (LDST_U_BIT(instr))
-					eaddr += offset.un;
-				else
-					eaddr -= offset.un;
-				regs->uregs[rn] = eaddr;
-			} else if (LDST_W_BIT(instr))
-				regs->uregs[rn] = eaddr;
-			break;
-		}
-
-	default:
-		ai_skipped += 1;
-		panic("Alignment trap: not handling instruction %08X at %08lX",
-				instr, regs->ARM_pc - correction - 4);
+	switch (CODING_BITS(instr)) {
+	case 0x00000000:	/* ldrh or strh */
+		if (LDSTH_I_BIT(instr))
+			offset.un = (instr & 0xf00) >> 4 | (instr & 15);
+		else
+			offset.un = regs->uregs[RM_BITS(instr)];
+		handler = do_alignment_ldrhstrh;
 		break;
 
-	case 0x04000000:
+	case 0x04000000:	/* ldr or str immediate */
 		offset.un = OFFSET_BITS(instr);
-		goto ldr_str;
+		handler = do_alignment_ldrstr;
+		break;
 
-	case 0x06000000:
+	case 0x06000000:	/* ldr or str register */
 		offset.un = regs->uregs[RM_BITS(instr)];
 
 		if (IS_SHIFT(instr)) {
@@ -238,81 +478,49 @@ do_alignment(unsigned long addr, int error_code, struct pt_regs *regs)
 				break;
 			}
 		}
-
-	ldr_str:
-		ai_word += 1;
-		if (LDST_P_BIT(instr)) {
-			if (LDST_U_BIT(instr))
-				eaddr += offset.un;
-			else
-				eaddr -= offset.un;
-		} else {
-			if (LDST_W_BIT(instr)) {
-				printk(KERN_ERR "Not handling ldrt/strt correctly\n");
-				return 1;
-			}
-		}
-
-if (addr != eaddr)
-printk("PC = %08lx, instr = %08x, addr = %08lx, eaddr = %08lx\n", instruction_pointer(regs), instr, addr, eaddr);
-		if (LDST_L_BIT(instr)) {
-			regs->uregs[rd] = get_unaligned((unsigned long *)eaddr);
-			if (rd == 15)
-				correction = 0;
-		} else
-			put_unaligned(regs->uregs[rd], (unsigned long *)eaddr);
-
-		if (!LDST_P_BIT(instr)) {
-			if (LDST_U_BIT(instr))
-				eaddr += offset.un;
-			else
-				eaddr -= offset.un;
-
-			regs->uregs[rn] = eaddr;
-		} else if (LDST_W_BIT(instr))
-			regs->uregs[rn] = eaddr;
+		handler = do_alignment_ldrstr;
 		break;
 
-	case 0x08000000:
-		if (LDM_S_BIT(instr))
-			panic("Alignment trap: not handling LDM with s-bit\n");
-		ai_multi += 1;
-
-		for (regbits = REGMASK_BITS(instr), nr_regs = 0; regbits; regbits >>= 1)
-			nr_regs += 4;
-
-		if  (!LDST_U_BIT(instr))
-			eaddr -= nr_regs;
-
-		if ((LDST_U_BIT(instr) == 0 && LDST_P_BIT(instr) == 0) ||
-		    (LDST_U_BIT(instr)      && LDST_P_BIT(instr)))
-			eaddr += 4;
-
-		for (regbits = REGMASK_BITS(instr), rd = 0; regbits; regbits >>= 1, rd += 1)
-			if (regbits & 1) {
-				if (LDST_L_BIT(instr)) {
-					regs->uregs[rd] = get_unaligned((unsigned long *)eaddr);
-					if (rd == 15)
-						correction = 0;
-				} else
-					put_unaligned(regs->uregs[rd], (unsigned long *)eaddr);
-				eaddr += 4;
-			}
-
-		if (LDST_W_BIT(instr)) {
-			if (LDST_P_BIT(instr) && !LDST_U_BIT(instr))
-				eaddr -= nr_regs;
-			else if (LDST_P_BIT(instr))
-				eaddr -= 4;
-			else if (!LDST_U_BIT(instr))
-				eaddr -= 4 + nr_regs;
-			regs->uregs[rn] = eaddr;
-		}
+	case 0x08000000:	/* ldm or stm */
+		handler = do_alignment_ldmstm;
 		break;
+
+	default:
+		goto bad;
 	}
 
-	regs->ARM_pc -= correction;
+	type = handler(addr, instr, regs);
 
+	if (type == TYPE_ERROR || type == TYPE_FAULT)
+		goto bad_or_fault;
+
+	if (type == TYPE_LDST)
+		do_alignment_finish_ldst(addr, instr, regs, offset);
+
+	return 0;
+
+bad_or_fault:
+	if (type == TYPE_ERROR)
+		goto bad;
+	regs->ARM_pc -= 4;
+	/*
+	 * We got a fault - fix it up, or die.
+	 */
+	do_bad_area(current, current->mm, addr, error_code, regs);
+	return 0;
+
+bad:
+	/*
+	 * Oops, we didn't handle the instruction.
+	 */
+	printk(KERN_ERR "Alignment trap: not handling instruction "
+		"%08lx at [<%08lx>]\n", instr, instrptr);
+	ai_skipped += 1;
+	return 1;
+
+user:
+	set_cr(cr_no_alignment);
+	ai_user += 1;
 	return 0;
 }
 
@@ -322,39 +530,32 @@ printk("PC = %08lx, instr = %08x, addr = %08lx, eaddr = %08lx\n", instruction_po
 
 #endif
 
-#ifdef CONFIG_DEBUG_USER
-
+/*
+ * Some section permission faults need to be handled gracefully, for
+ * instance, when they happen due to a __{get,put}_user during an oops).
+ */
 static int
 do_sect_fault(unsigned long addr, int error_code, struct pt_regs *regs)
 {
-	if (user_mode(regs)) {
-		printk("%s: permission fault on section, "
-		       "address=0x%08lx, code %d\n",
-		       current->comm, addr, error_code);
-#ifdef DEBUG
-		{
-			unsigned int i, j;
-			unsigned long *sp;
-
-			sp = (unsigned long *) (regs->ARM_sp - 128);
-			for (j = 0; j < 20 && sp_valid(sp); j++) {
-				printk("%p: ", sp);
-				for (i = 0; i < 8 && sp_valid(sp); i += 1, sp++)
-					printk("%08lx ", *sp);
-				printk("\n");
-			}
-			show_regs(regs);
-			c_backtrace(regs->ARM_fp, regs->ARM_cpsr);
-		}
-#endif
-	}
-	return 1;	/* not fixed up */
+	struct task_struct *tsk = current;
+	do_bad_area(tsk, tsk->active_mm, addr, error_code, regs);
+	return 0;
 }
-#else
 
-#define do_sect_fault NULL
+/*
+ * Hook for things that need to trap external faults.  Note that
+ * we don't guarantee that this will be the final version of the
+ * interface.
+ */
+int (*external_fault)(unsigned long addr, struct pt_regs *regs);
 
-#endif
+static int
+do_external_fault(unsigned long addr, int error_code, struct pt_regs *regs)
+{
+	if (external_fault)
+		return external_fault(addr, regs);
+	return 1;
+}
 
 static const struct fsr_info {
 	int	(*fn)(unsigned long addr, int error_code, struct pt_regs *regs);
@@ -362,17 +563,17 @@ static const struct fsr_info {
 	char	*name;
 } fsr_info[] = {
 	{ NULL,			SIGSEGV, "vector exception"		   },
-	{ do_alignment,		SIGBUS,	 "alignment exception"		   },
+	{ do_alignment,		SIGILL,	 "alignment exception"		   },
 	{ NULL,			SIGKILL, "terminal exception"		   },
-	{ do_alignment,		SIGBUS,	 "alignment exception"		   },
-	{ NULL,			SIGBUS,	 "external abort on linefetch"	   },
-	{ do_page_fault,	SIGSEGV, "page fault"			   },
-	{ NULL,			SIGBUS,	 "external abort on linefetch"	   },
-	{ do_page_fault,	SIGSEGV, "page fault"			   },
-	{ NULL,			SIGBUS,	 "external abort on non-linefetch" },
-	{ NULL,			SIGSEGV, "domain fault"			   },
-	{ NULL,			SIGBUS,	 "external abort on non-linefetch" },
-	{ NULL,			SIGSEGV, "domain fault"			   },
+	{ do_alignment,		SIGILL,	 "alignment exception"		   },
+	{ do_external_fault,	SIGBUS,	 "external abort on linefetch"	   },
+	{ do_translation_fault,	SIGSEGV, "section translation fault"	   },
+	{ do_external_fault,	SIGBUS,	 "external abort on linefetch"	   },
+	{ do_page_fault,	SIGSEGV, "page translation fault"	   },
+	{ do_external_fault,	SIGBUS,	 "external abort on non-linefetch" },
+	{ NULL,			SIGSEGV, "section domain fault"		   },
+	{ do_external_fault,	SIGBUS,	 "external abort on non-linefetch" },
+	{ NULL,			SIGSEGV, "page domain fault"		   },
 	{ NULL,			SIGBUS,	 "external abort on translation"   },
 	{ do_sect_fault,	SIGSEGV, "section permission fault"	   },
 	{ NULL,			SIGBUS,	 "external abort on translation"   },
@@ -382,18 +583,15 @@ static const struct fsr_info {
 /*
  * Currently dropped down to debug level
  */
-#define BUG_PROC_MSG \
-  KERN_DEBUG "Weird data abort (%08X).\n" \
-  KERN_DEBUG "Please see http://www.arm.linux.org.uk/state.html for " \
-	"more information\n"
-
 asmlinkage void
 do_DataAbort(unsigned long addr, int error_code, struct pt_regs *regs, int fsr)
 {
 	const struct fsr_info *inf = fsr_info + (fsr & 15);
 
+#if defined(CONFIG_CPU_SA110) || defined(CONFIG_CPU_SA1100) || defined(CONFIG_DEBUG_ERRORS)
 	if (addr == regs->ARM_pc)
-		goto weirdness;
+		goto sa1_weirdness;
+#endif
 
 	if (!inf->fn)
 		goto bad;
@@ -401,34 +599,153 @@ do_DataAbort(unsigned long addr, int error_code, struct pt_regs *regs, int fsr)
 	if (!inf->fn(addr, error_code, regs))
 		return;
 bad:
-	force_sig(inf->sig, current);
-
 	printk(KERN_ALERT "Unhandled fault: %s (%X) at 0x%08lx\n",
 		inf->name, fsr, addr);
 	show_pte(current->mm, addr);
+	force_sig(inf->sig, current);
 	die_if_kernel("Oops", regs, 0);
 	return;
 
-weirdness:
+#if defined(CONFIG_CPU_SA110) || defined(CONFIG_CPU_SA1100) || defined(CONFIG_DEBUG_ERRORS)
+sa1_weirdness:
 	if (user_mode(regs)) {
 		static int first = 1;
-		if (first)
-			/*
-			 * I want statistical information on this problem,
-			 * but we don't want to hastle the users too much.
-			 */
-			printk(BUG_PROC_MSG, fsr);
+		if (first) {
+			printk(KERN_DEBUG "Fixing up bad data abort at %08lx\n", addr);
+#ifdef CONFIG_DEBUG_ERRORS
+			show_pte(current->mm, addr);
+#endif
+		}
 		first = 0;
 		return;
 	}
 
 	if (!inf->fn || inf->fn(addr, error_code, regs))
 		goto bad;
+	return;
+#endif
 }
 
-asmlinkage int
+asmlinkage void
 do_PrefetchAbort(unsigned long addr, struct pt_regs *regs)
 {
-	do_page_fault(addr, FAULT_CODE_READ, regs);
-	return 1;
+	do_translation_fault(addr, 0, regs);
+}
+
+/*
+ * We take the easy way out of this problem - we make the
+ * PTE uncacheable.  However, we leave the write buffer on.
+ */
+static void adjust_pte(struct vm_area_struct *vma, unsigned long address)
+{
+	pgd_t *pgd;
+	pmd_t *pmd;
+	pte_t *pte, entry;
+
+	pgd = pgd_offset(vma->vm_mm, address);
+	if (pgd_none(*pgd))
+		return;
+	if (pgd_bad(*pgd))
+		goto bad_pgd;
+
+	pmd = pmd_offset(pgd, address);
+	if (pmd_none(*pmd))
+		return;
+	if (pmd_bad(*pmd))
+		goto bad_pmd;
+
+	pte = pte_offset(pmd, address);
+	entry = *pte;
+
+	/*
+	 * If this page isn't present, or is already setup to
+	 * fault (ie, is old), we can safely ignore any issues.
+	 */
+	if (pte_present(entry) && pte_val(entry) & L_PTE_CACHEABLE) {
+		flush_cache_page(vma, address);
+		pte_val(entry) &= ~L_PTE_CACHEABLE;
+		set_pte(pte, entry);
+		flush_tlb_page(vma, address);
+	}
+	return;
+
+bad_pgd:
+	pgd_ERROR(*pgd);
+	pgd_clear(pgd);
+	return;
+
+bad_pmd:
+	pmd_ERROR(*pmd);
+	pmd_clear(pmd);
+	return;
+}
+
+/*
+ * Take care of architecture specific things when placing a new PTE into
+ * a page table, or changing an existing PTE.  Basically, there are two
+ * things that we need to take care of:
+ *
+ *  1. If PG_dcache_dirty is set for the page, we need to ensure
+ *     that any cache entries for the kernels virtual memory
+ *     range are written back to the page.
+ *  2. If we have multiple shared mappings of the same space in
+ *     an object, we need to deal with the cache aliasing issues.
+ *
+ * Note that the page_table_lock will be held.
+ */
+void update_mmu_cache(struct vm_area_struct *vma, unsigned long addr, pte_t pte)
+{
+	struct page *page = pte_page(pte);
+	struct vm_area_struct *mpnt;
+	struct mm_struct *mm;
+	unsigned long pgoff;
+	int aliases;
+
+	if (!VALID_PAGE(page) || !page->mapping)
+		return;
+
+	if (test_and_clear_bit(PG_dcache_dirty, &page->flags)) {
+		unsigned long kvirt = (unsigned long)page_address(page);
+		cpu_cache_clean_invalidate_range(kvirt, kvirt + PAGE_SIZE, 0);
+	}
+
+	mm = vma->vm_mm;
+	pgoff = (addr - vma->vm_start) >> PAGE_SHIFT;
+	aliases = 0;
+
+	/*
+	 * If we have any shared mappings that are in the same mm
+	 * space, then we need to handle them specially to maintain
+	 * cache coherency.
+	 */
+	for (mpnt = page->mapping->i_mmap_shared; mpnt;
+	     mpnt = mpnt->vm_next_share) {
+		unsigned long off;
+
+		/*
+		 * If this VMA is not in our MM, we can ignore it.
+		 * Note that we intentionally don't mask out the VMA
+		 * that we are fixing up.
+		 */
+		if (mpnt->vm_mm != mm && mpnt != vma)
+			continue;
+
+		/*
+		 * If the page isn't in this VMA, we can also ignore it.
+		 */
+		if (pgoff < mpnt->vm_pgoff)
+			continue;
+
+		off = pgoff - mpnt->vm_pgoff;
+		if (off >= (mpnt->vm_end - mpnt->vm_start) >> PAGE_SHIFT)
+			continue;
+
+		/*
+		 * Ok, it is within mpnt.  Fix it up.
+		 */
+		adjust_pte(mpnt, mpnt->vm_start + (off << PAGE_SHIFT));
+		aliases ++;
+	}
+	if (aliases)
+		adjust_pte(vma, addr);
 }

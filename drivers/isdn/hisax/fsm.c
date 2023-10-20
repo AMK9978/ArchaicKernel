@@ -1,27 +1,44 @@
-/* $Id: fsm.c,v 1.14 2000/11/24 17:05:37 kai Exp $
+/* $Id: fsm.c,v 1.14.6.4 2001/09/23 22:24:47 kai Exp $
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
- *              based on the teles driver from Jan den Ouden
+ * Finite state machine
+ *
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ *              by Kai Germaschewski <kai.germaschewski@gmx.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  * Thanks to    Jan den Ouden
  *              Fritz Elfert
  *
- * This file is (c) under GNU PUBLIC LICENSE
- *
  */
+
 #define __NO_VERSION__
+#include <linux/module.h>
 #include <linux/init.h>
 #include "hisax.h"
 
 #define FSM_TIMER_DEBUG 0
 
-void __init
+EXPORT_SYMBOL(FsmNew);
+EXPORT_SYMBOL(FsmFree);
+EXPORT_SYMBOL(FsmEvent);
+EXPORT_SYMBOL(FsmChangeState);
+EXPORT_SYMBOL(FsmInitTimer);
+EXPORT_SYMBOL(FsmDelTimer);
+EXPORT_SYMBOL(FsmRestartTimer);
+
+int __init
 FsmNew(struct Fsm *fsm, struct FsmNode *fnlist, int fncount)
 {
 	int i;
 
 	fsm->jumpmatrix = (FSMFNPTR *)
 		kmalloc(sizeof (FSMFNPTR) * fsm->state_count * fsm->event_count, GFP_KERNEL);
+	if (!fsm->jumpmatrix)
+		return -ENOMEM;
+
 	memset(fsm->jumpmatrix, 0, sizeof (FSMFNPTR) * fsm->state_count * fsm->event_count);
 
 	for (i = 0; i < fncount; i++) 
@@ -32,6 +49,7 @@ FsmNew(struct Fsm *fsm, struct FsmNode *fnlist, int fncount)
 		} else		
 			fsm->jumpmatrix[fsm->state_count * fnlist[i].event +
 				fnlist[i].state] = (FSMFNPTR) fnlist[i].routine;
+	return 0;
 }
 
 void

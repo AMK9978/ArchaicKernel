@@ -1,9 +1,15 @@
 /*
+ * BK Id: SCCS/s.smplock.h 1.10 10/23/01 08:09:35 trini
+ */
+/*
  * <asm/smplock.h>
  *
  * Default SMP lock implementation
  */
 #ifdef __KERNEL__
+#ifndef __ASM_SMPLOCK_H__
+#define __ASM_SMPLOCK_H__
+
 #include <linux/interrupt.h>
 #include <linux/spinlock.h>
 
@@ -39,15 +45,16 @@ do { \
  * so we only need to worry about other
  * CPU's.
  */
-extern __inline__ void lock_kernel(void)
+static __inline__ void lock_kernel(void)
 {
 	if (!++current->lock_depth)
 		spin_lock(&kernel_flag);
 }
 
-extern __inline__ void unlock_kernel(void)
+static __inline__ void unlock_kernel(void)
 {
 	if (--current->lock_depth < 0)
 		spin_unlock(&kernel_flag);
 }
+#endif /* __ASM_SMPLOCK_H__ */
 #endif /* __KERNEL__ */

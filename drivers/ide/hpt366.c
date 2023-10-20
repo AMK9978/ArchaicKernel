@@ -51,10 +51,39 @@ const char *quirk_drives[] = {
 };
 
 const char *bad_ata100_5[] = {
+	"IBM-DTLA-307075",
+	"IBM-DTLA-307060",
+	"IBM-DTLA-307045",
+	"IBM-DTLA-307030",
+	"IBM-DTLA-307020",
+	"IBM-DTLA-307015",
+	"IBM-DTLA-305040",
+	"IBM-DTLA-305030",
+	"IBM-DTLA-305020",
+	"IC35L010AVER07-0",
+	"IC35L020AVER07-0",
+	"IC35L030AVER07-0",
+	"IC35L040AVER07-0",
+	"IC35L060AVER07-0",
+	"WDC AC310200R",
 	NULL
 };
 
 const char *bad_ata66_4[] = {
+	"IBM-DTLA-307075",
+	"IBM-DTLA-307060",
+	"IBM-DTLA-307045",
+	"IBM-DTLA-307030",
+	"IBM-DTLA-307020",
+	"IBM-DTLA-307015",
+	"IBM-DTLA-305040",
+	"IBM-DTLA-305030",
+	"IBM-DTLA-305020",
+	"IC35L010AVER07-0",
+	"IC35L020AVER07-0",
+	"IC35L030AVER07-0",
+	"IC35L040AVER07-0",
+	"IC35L060AVER07-0",
 	"WDC AC310200R",
 	NULL
 };
@@ -214,8 +243,8 @@ static int hpt366_get_info (char *buffer, char **addr, off_t offset, int count)
 byte hpt366_proc = 0;
 
 extern char *ide_xfer_verbose (byte xfer_rate);
-byte hpt363_shared_irq = 0;
-byte hpt363_shared_pin = 0;
+byte hpt363_shared_irq;
+byte hpt363_shared_pin;
 
 static unsigned int pci_rev_check_hpt3xx (struct pci_dev *dev)
 {
@@ -697,7 +726,10 @@ void __init ide_init_hpt366 (ide_hwif_t *hwif)
 		} else {
 			hwif->dmaproc = &hpt366_dmaproc;
 		}
-		hwif->autodma = 1;
+		if (!noautodma)
+			hwif->autodma = 1;
+		else
+			hwif->autodma = 0;
 	} else {
 		hwif->autodma = 0;
 		hwif->drives[0].autotune = 1;

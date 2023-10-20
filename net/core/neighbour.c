@@ -308,7 +308,7 @@ struct neighbour * neigh_create(struct neigh_table *tbl, const void *pkey,
 	}
 
 	/* Device specific setup. */
-	if (n->parms && n->parms->neigh_setup &&
+	if (n->parms->neigh_setup &&
 	    (error = n->parms->neigh_setup(n)) < 0) {
 		neigh_release(n);
 		return ERR_PTR(error);
@@ -725,11 +725,11 @@ int __neigh_event_send(struct neighbour *neigh, struct sk_buff *skb)
 			if (skb) {
 				if (skb_queue_len(&neigh->arp_queue) >= neigh->parms->queue_len) {
 					struct sk_buff *buff;
-					buff = neigh->arp_queue.prev;
+					buff = neigh->arp_queue.next;
 					__skb_unlink(buff, &neigh->arp_queue);
 					kfree_skb(buff);
 				}
-				__skb_queue_head(&neigh->arp_queue, skb);
+				__skb_queue_tail(&neigh->arp_queue, skb);
 			}
 			write_unlock_bh(&neigh->lock);
 			return 1;

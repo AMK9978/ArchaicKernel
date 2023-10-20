@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.unistd.h 1.11 10/18/01 17:29:53 trini
+ */
 #ifndef _ASM_PPC_UNISTD_H_
 #define _ASM_PPC_UNISTD_H_
 
@@ -195,6 +198,7 @@
 #define __NR_putpmsg		188	/* some people actually want streams */
 #define __NR_vfork		189
 #define __NR_ugetrlimit		190	/* SuS compliant getrlimit */
+#define __NR_readahead		191
 #define __NR_mmap2		192
 #define __NR_truncate64		193
 #define __NR_ftruncate64	194
@@ -206,6 +210,11 @@
 #define __NR_pciconfig_iobase	200
 #define __NR_multiplexer	201
 #define __NR_getdents64		202
+#define __NR_pivot_root		203
+#define __NR_fcntl64		204
+#define __NR_madvise		205
+#define __NR_mincore		206
+#define __NR_gettid		207
 
 #define __NR(n)	#n
 

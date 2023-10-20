@@ -3,7 +3,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 
@@ -368,3 +368,5 @@ static int q40con_updatevar(int con, struct fb_info *info)
 static void q40con_blank(int blank, struct fb_info *info)
 {
 }
+
+MODULE_LICENSE("GPL");

@@ -118,9 +118,8 @@ static int read_regs(struct hpsb_host *host, int nodeid, quadlet_t *buf,
         int oldcycle;
         quadlet_t ret;
         
-        if ((csraddr | length) & 0x3) {
+        if ((csraddr | length) & 0x3)
                 return RCODE_TYPE_ERROR;
-        }
 
         length /= 4;
 
@@ -222,14 +221,13 @@ static int read_regs(struct hpsb_host *host, int nodeid, quadlet_t *buf,
         return RCODE_COMPLETE;
 }
 
-static int write_regs(struct hpsb_host *host, int nodeid, quadlet_t *data,
-                      u64 addr, unsigned int length)
+static int write_regs(struct hpsb_host *host, int nodeid, int destid,
+		      quadlet_t *data, u64 addr, unsigned int length)
 {
         int csraddr = addr - CSR_REGISTER_BASE;
         
-        if ((csraddr | length) & 0x3) {
+        if ((csraddr | length) & 0x3)
                 return RCODE_TYPE_ERROR;
-        }
 
         length /= 4;
 
@@ -310,7 +308,8 @@ static int lock_regs(struct hpsb_host *host, int nodeid, quadlet_t *store,
         unsigned long flags;
         quadlet_t *regptr = NULL;
 
-        if (csraddr & 0x3) return RCODE_TYPE_ERROR;
+        if (csraddr & 0x3)
+		return RCODE_TYPE_ERROR;
 
         if (csraddr < CSR_BUS_MANAGER_ID || csraddr > CSR_CHANNELS_AVAILABLE_LO
             || extcode != EXTCODE_COMPARE_SWAP)
@@ -379,14 +378,13 @@ static int lock_regs(struct hpsb_host *host, int nodeid, quadlet_t *store,
         }
 }
 
-static int write_fcp(struct hpsb_host *host, int nodeid, quadlet_t *data,
-                     u64 addr, unsigned int length)
+static int write_fcp(struct hpsb_host *host, int nodeid, int dest,
+		     quadlet_t *data, u64 addr, unsigned int length)
 {
         int csraddr = addr - CSR_REGISTER_BASE;
 
-        if (length > 512) {
+        if (length > 512)
                 return RCODE_TYPE_ERROR;
-        }
 
         switch (csraddr) {
         case CSR_FCP_COMMAND:
@@ -403,31 +401,30 @@ static int write_fcp(struct hpsb_host *host, int nodeid, quadlet_t *data,
 }
 
 
-struct hpsb_highlevel_ops csr_ops = {
+static struct hpsb_highlevel_ops csr_ops = {
         add_host: add_host,
         host_reset: host_reset,
 };
 
 
-struct hpsb_address_ops map_ops = {
+static struct hpsb_address_ops map_ops = {
         read: read_maps,
 };
 
-struct hpsb_address_ops fcp_ops = {
+static struct hpsb_address_ops fcp_ops = {
         write: write_fcp,
 };
 
-struct hpsb_address_ops reg_ops = {
+static struct hpsb_address_ops reg_ops = {
         read: read_regs,
         write: write_regs,
         lock: lock_regs,
 };
 
+static struct hpsb_highlevel *hl;
 
 void init_csr(void)
 {
-        struct hpsb_highlevel *hl;
-
         hl = hpsb_register_highlevel("standard registers", &csr_ops);
         if (hl == NULL) {
                 HPSB_ERR("out of memory during ieee1394 initialization");
@@ -448,4 +445,9 @@ void init_csr(void)
         hpsb_register_addrspace(hl, &map_ops,
                                 CSR_REGISTER_BASE + CSR_SPEED_MAP,
                                 CSR_REGISTER_BASE + CSR_SPEED_MAP_END);
+}
+
+void cleanup_csr(void)
+{
+        hpsb_unregister_highlevel(hl);
 }

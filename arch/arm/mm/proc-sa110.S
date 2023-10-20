@@ -19,9 +19,9 @@
  */
 #include <linux/linkage.h>
 #include <asm/assembler.h>
+#include <asm/constants.h>
 #include <asm/procinfo.h>
 #include <asm/hardware.h>
-#include "../lib/constants.h"
 
 /* This is the maximum size of an area which will be flushed.  If the area
  * is larger than this, then we flush the whole cache
@@ -83,9 +83,9 @@ ENTRY(cpu_sa110_data_abort)
 ENTRY(cpu_sa1100_data_abort)
 	ldr	r1, [r0]			@ read aborted instruction
 	mrc	p15, 0, r0, c6, c0, 0		@ get FAR
-	mov	r1, r1, lsr #19			@ b1 = L
+	tst	r1, r1, lsr #21			@ C = bit 20
 	mrc	p15, 0, r3, c5, c0, 0		@ get FSR
-	and	r1, r1, #2
+	sbc	r1, r1, r1			@ r1 = C - 1
 	and	r3, r3, #255
 	mov	pc, lr
 
@@ -271,7 +271,7 @@ ENTRY(cpu_sa110_cache_clean_invalidate_range)
 	bic	r0, r0, #DCACHELINESIZE - 1
 	sub	r3, r1, r0
 	cmp	r3, #MAX_AREA_SIZE
-	bgt	cpu_sa110_cache_clean_invalidate_all_r2
+	bhi	cpu_sa110_cache_clean_invalidate_all_r2
 1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
 	add	r0, r0, #DCACHELINESIZE
@@ -279,7 +279,7 @@ ENTRY(cpu_sa110_cache_clean_invalidate_range)
 	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
 	add	r0, r0, #DCACHELINESIZE
 	cmp	r0, r1
-	blt	1b
+	blo	1b
 	teq	r2, #0
 	movne	r0, #0
 	mcrne	p15, 0, r0, c7, c5, 0		@ invalidate I cache
@@ -288,7 +288,7 @@ ENTRY(cpu_sa110_cache_clean_invalidate_range)
 ENTRY(cpu_sa1100_cache_clean_invalidate_range)
 	sub	r3, r1, r0
 	cmp	r3, #MAX_AREA_SIZE
-	bgt	cpu_sa1100_cache_clean_invalidate_all_r2
+	bhi	cpu_sa1100_cache_clean_invalidate_all_r2
 	b	1b
 
 /*
@@ -335,7 +335,7 @@ ENTRY(cpu_sa1100_dcache_invalidate_range)
 1:	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
 	add	r0, r0, #DCACHELINESIZE
 	cmp	r0, r1
-	blt	1b
+	blo	1b
 	mov	pc, lr
 
 /*
@@ -354,7 +354,7 @@ ENTRY(cpu_sa110_dcache_clean_range)
 	sub	r1, r1, r0
 	cmp	r1, #MAX_AREA_SIZE
 	mov	r2, #0
-	bgt	cpu_sa110_cache_clean_invalidate_all_r2
+	bhi	cpu_sa110_cache_clean_invalidate_all_r2
 1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 	add	r0, r0, #DCACHELINESIZE
 	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
@@ -369,7 +369,7 @@ ENTRY(cpu_sa1100_dcache_clean_range)
 	sub	r1, r1, r0
 	cmp	r1, #MAX_AREA_SIZE
 	mov	r2, #0
-	bgt	cpu_sa1100_cache_clean_invalidate_all_r2
+	bhi	cpu_sa1100_cache_clean_invalidate_all_r2
 	b	1b
 
 /*
@@ -423,6 +423,7 @@ ENTRY(cpu_sa1100_dcache_clean_entry)
 	.align	5
 ENTRY(cpu_sa110_icache_invalidate_range)
 ENTRY(cpu_sa1100_icache_invalidate_range)
+	bic	r0, r0, #DCACHELINESIZE - 1
 1:	mcr	p15, 0, r0, c7, c10, 1		@ Clean D entry
 	add	r0, r0, #DCACHELINESIZE
 	cmp	r0, r1
@@ -460,12 +461,14 @@ ENTRY(cpu_sa1100_tlb_invalidate_all)
 	.align	5
 ENTRY(cpu_sa110_tlb_invalidate_range)
 ENTRY(cpu_sa1100_tlb_invalidate_range)
+	bic	r0, r0, #0x0ff
+	bic	r0, r0, #0xf00
 	mov	r3, #0
 	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
 1:	mcr	p15, 0, r0, c8, c6, 1		@ invalidate D TLB entry
 	add	r0, r0, #PAGESIZE
 	cmp	r0, r1
-	blt	1b
+	blo	1b
 	mcr	p15, 0, r3, c8, c5, 0		@ invalidate I TLB
 	mov	pc, lr
 
@@ -556,7 +559,7 @@ ENTRY(cpu_sa1100_set_pmd)
 	mov	pc, lr
 
 /*
- * cpu_sa110_arm920_set_pte(ptep, pte)
+ * cpu_sa110_set_pte(ptep, pte)
  *
  * Set a PTE and flush it out
  */
@@ -601,22 +604,27 @@ cpu_sa1110_name:
 
 __sa1100_setup:	@ Allow read-buffer operations from userland
 	mcr	p15, 0, r0, c9, c0, 5
+	mrc	p15, 0, r0, c1, c0		@ get control register v4
+	bic	r0, r0, #0x0e00			@ ..VI ZFRS BLDP WCAM
+	bic	r0, r0, #0x0002			@ .... 000. .... ..0.
+	orr	r0, r0, #0x003d
+	orr	r0, r0, #0x3100			@ ..11 ...1 ..11 11.1
+	b	__setup_common
 
 __sa110_setup:
-	mov	r0, #F_BIT | I_BIT | SVC_MODE
-	msr	cpsr_c, r0
-	mov	r0, #0
-	mcr	p15, 0, r0, c7, c7		@ invalidate I,D caches on v4
-	mcr	p15, 0, r0, c7, c10, 4		@ drain write buffer on v4
-	mcr	p15, 0, r0, c8, c7		@ invalidate I,D TLBs on v4
-	mcr	p15, 0, r4, c2, c0		@ load page table pointer
-	mov	r0, #0x1f			@ Domains 0, 1 = client
-	mcr	p15, 0, r0, c3, c0		@ load domain access register
 	mrc	p15, 0, r0, c1, c0		@ get control register v4
-	bic	r0, r0, #0x0e00			@ ....??r.........
-	bic	r0, r0, #0x0002			@ ..............a.
-	orr	r0, r0, #0x003d			@ ..........DPWC.M
-	orr	r0, r0, #0x1100			@ ...I...S........
+	bic	r0, r0, #0x2e00			@ ..VI ZFRS BLDP WCAM
+	bic	r0, r0, #0x0002			@ ..0. 000. .... ..0.
+	orr	r0, r0, #0x003d
+	orr	r0, r0, #0x1100			@ ...1 ...1 ..11 11.1
+__setup_common:
+	mov	r10, #0
+	mcr	p15, 0, r10, c7, c7		@ invalidate I,D caches on v4
+	mcr	p15, 0, r10, c7, c10, 4		@ drain write buffer on v4
+	mcr	p15, 0, r10, c8, c7		@ invalidate I,D TLBs on v4
+	mcr	p15, 0, r4, c2, c0		@ load page table pointer
+	mov	r10, #0x1f			@ Domains 0, 1 = client
+	mcr	p15, 0, r10, c3, c0		@ load domain access register
 	mov	pc, lr
 
 	.text
@@ -737,7 +745,7 @@ __sa110_proc_info:
 	b	__sa110_setup
 	.long	cpu_arch_name
 	.long	cpu_elf_name
-	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_26BIT
+	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_26BIT | HWCAP_FAST_MULT
 	.long	cpu_sa110_info
 	.long	sa110_processor_functions
 	.size	__sa110_proc_info, . - __sa110_proc_info
@@ -750,7 +758,7 @@ __sa1100_proc_info:
 	b	__sa1100_setup
 	.long	cpu_arch_name
 	.long	cpu_elf_name
-	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_26BIT
+	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_26BIT | HWCAP_FAST_MULT
 	.long	cpu_sa1100_info
 	.long	sa1100_processor_functions
 	.size	__sa1100_proc_info, . - __sa1100_proc_info
@@ -763,7 +771,7 @@ __sa1110_proc_info:
 	b	__sa1100_setup
 	.long	cpu_arch_name
 	.long	cpu_elf_name
-	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_26BIT
+	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_26BIT | HWCAP_FAST_MULT
 	.long	cpu_sa1110_info
 	.long	sa1100_processor_functions
 	.size	__sa1110_proc_info, . - __sa1110_proc_info

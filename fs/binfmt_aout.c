@@ -20,7 +20,7 @@
 #include <linux/fcntl.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/binfmts.h>
 #include <linux/personality.h>
 #include <linux/init.h>
@@ -73,7 +73,7 @@ if (file->f_op->llseek) { \
  * Currently only a stub-function.
  *
  * Note that setuid/setgid files won't make a core-dump if the uid/gid
- * changed due to the set[u|g]id. It's enforced by the "current->dumpable"
+ * changed due to the set[u|g]id. It's enforced by the "current->mm->dumpable"
  * field, which also makes sure the core-dumps won't be recursive if the
  * dumping of the process results in another error..
  */
@@ -90,7 +90,7 @@ static int aout_core_dump(long signr, struct pt_regs * regs, struct file *file)
 #	define START_DATA(u)	((u.u_tsize << PAGE_SHIFT) + u.start_code)
 #elif defined(__sparc__)
 #       define START_DATA(u)    (u.u_tsize)
-#elif defined(__i386__) || defined(__mc68000__)
+#elif defined(__i386__) || defined(__mc68000__) || defined(__arch_um__)
 #       define START_DATA(u)	(u.u_tsize << PAGE_SHIFT)
 #endif
 #ifdef __sparc__
@@ -219,7 +219,7 @@ static unsigned long * create_aout_tables(char * p, struct linux_binprm * bprm)
 	envp = (char **) sp;
 	sp -= argc+1;
 	argv = (char **) sp;
-#if defined(__i386__) || defined(__mc68000__) || defined(__arm__)
+#if defined(__i386__) || defined(__mc68000__) || defined(__arm__) || defined(__arch_um__)
 	put_user((unsigned long) envp,--sp);
 	put_user((unsigned long) argv,--sp);
 #endif
@@ -285,13 +285,15 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 		return retval;
 
 	/* OK, This is the point of no return */
-#if !defined(__sparc__)
-	set_personality(PER_LINUX);
-#else
+#if defined(__alpha__)
+	SET_AOUT_PERSONALITY(bprm, ex);
+#elif defined(__sparc__)
 	set_personality(PER_SUNOS);
 #if !defined(__sparc_v9__)
 	memcpy(&current->thread.core_exec, &ex, sizeof(struct exec));
 #endif
+#else
+	set_personality(PER_LINUX);
 #endif
 
 	current->mm->end_code = ex.a_text +
@@ -342,7 +344,7 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 
 		error = bprm->file->f_op->read(bprm->file, (char *)text_addr,
 			  ex.a_text+ex.a_data, &pos);
-		if (error < 0) {
+		if ((signed long)error < 0) {
 			send_sig(SIGKILL, current, 0);
 			return error;
 		}
@@ -377,24 +379,24 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 			goto beyond_if;
 		}
 
-		down(&current->mm->mmap_sem);
+		down_write(&current->mm->mmap_sem);
 		error = do_mmap(bprm->file, N_TXTADDR(ex), ex.a_text,
 			PROT_READ | PROT_EXEC,
 			MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
 			fd_offset);
-		up(&current->mm->mmap_sem);
+		up_write(&current->mm->mmap_sem);
 
 		if (error != N_TXTADDR(ex)) {
 			send_sig(SIGKILL, current, 0);
 			return error;
 		}
 
-		down(&current->mm->mmap_sem);
+		down_write(&current->mm->mmap_sem);
  		error = do_mmap(bprm->file, N_DATADDR(ex), ex.a_data,
 				PROT_READ | PROT_WRITE | PROT_EXEC,
 				MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
 				fd_offset + ex.a_text);
-		up(&current->mm->mmap_sem);
+		up_write(&current->mm->mmap_sem);
 		if (error != N_DATADDR(ex)) {
 			send_sig(SIGKILL, current, 0);
 			return error;
@@ -476,12 +478,12 @@ static int load_aout_library(struct file *file)
 		goto out;
 	}
 	/* Now use mmap to map the library into memory. */
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	error = do_mmap(file, start_addr, ex.a_text + ex.a_data,
 			PROT_READ | PROT_WRITE | PROT_EXEC,
 			MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE,
 			N_TXTOFF(ex));
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 	retval = error;
 	if (error != start_addr)
 		goto out;
@@ -513,3 +515,4 @@ EXPORT_NO_SYMBOLS;
 
 module_init(init_aout_binfmt);
 module_exit(exit_aout_binfmt);
+MODULE_LICENSE("GPL");

@@ -1,8 +1,7 @@
 /*
- *  arch/ppc/kernel/head.S
- *
- *  $Id: head.S,v 1.154 1999/10/12 00:33:31 cort Exp $
- *
+ * BK Id: SCCS/s.head.S 1.31 10/18/01 15:02:09 trini
+ */
+/*
  *  PowerPC version 
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
  *
@@ -26,28 +25,18 @@
  *	
  */
 
+#include <linux/config.h>
 #include "ppc_asm.h"
 #include <asm/processor.h>
 #include <asm/page.h>
-#include <linux/config.h>
 #include <asm/mmu.h>
-#include "mol.h"
+#include <asm/pgtable.h>
+#include <asm/cputable.h>
+#include <asm/cache.h>
 
 #ifdef CONFIG_APUS
 #include <asm/amigappc.h>
 #endif
-
-#ifndef CONFIG_PPC64BRIDGE
-CACHELINE_BYTES = 32
-LG_CACHELINE_BYTES = 5
-CACHELINE_MASK = 0x1f
-CACHELINE_WORDS = 8
-#else
-CACHELINE_BYTES = 128
-LG_CACHELINE_BYTES = 7
-CACHELINE_MASK = 0x7f
-CACHELINE_WORDS = 32
-#endif /* CONFIG_PPC64BRIDGE */
 
 #ifdef CONFIG_PPC64BRIDGE
 #define LOAD_BAT(n, reg, RA, RB)	\
@@ -149,7 +138,12 @@ __start:
 	mr	r28,r6
 	mr	r27,r7
 	li	r24,0			/* cpu # */
-	bl	prom_init
+/*
+ * early_init() does the early machine identification and does
+ * the necessary low-level setup and clears the BSS
+ *  -- Cort <cort@fsmlabs.com>
+ */ 
+	bl	early_init
 
 #ifdef CONFIG_APUS
 /* On APUS the __va/__pa constants need to be set to the correct 
@@ -161,7 +155,7 @@ __start:
 
 #ifndef CONFIG_GEMINI
 /* Switch MMU off, clear BATs and flush TLB. At this point, r3 contains
- * the physical address we are running at, returned by prom_init()
+ * the physical address we are running at, returned by early_init()
  */
  	bl	mmu_off
 __after_mmu_off:
@@ -186,7 +180,7 @@ __after_mmu_off:
 	mtspr	SDR1,r4
 	slbia
 	lis	r5,0x2000		/* set pseudo-segment reg 12 */
-	ori	r5,r5,12
+	ori	r5,r5,0x0ccc
 	mtsr	12,r5
 #endif /* CONFIG_POWER4 */
 
@@ -290,17 +284,7 @@ label:						\
 	addi	r3,r1,STACK_FRAME_OVERHEAD;	\
 	li	r20,MSR_KERNEL;			\
 	bl	transfer_to_handler; 		\
-	.long	hdlr;				\
-	.long	ret_from_except
-
-#define STD_MOL_EXCEPTION(n, label, hdlr, hook)	\
-	. = n;					\
-label:						\
-	EXCEPTION_PROLOG;			\
-	MOL_HOOK(hook); 			\
-	addi	r3,r1,STACK_FRAME_OVERHEAD;	\
-	li	r20,MSR_KERNEL;			\
-	bl	transfer_to_handler; 		\
+i##n:						\
 	.long	hdlr;				\
 	.long	ret_from_except
 
@@ -328,13 +312,11 @@ DataAccessCont:
 DataAccess:
 	EXCEPTION_PROLOG
 #endif /* CONFIG_PPC64BRIDGE */
-	MOL_HOOK(0)
 	mfspr	r20,DSISR
 	andis.	r0,r20,0xa470		/* weird error? */
 	bne	1f			/* if not, try to put a PTE */
-	mfspr	r3,DAR			/* into the hash table */
-	rlwinm	r4,r23,32-13,30,30	/* MSR_PR -> _PAGE_USER */
-	rlwimi	r4,r20,32-23,29,29	/* DSISR_STORE -> _PAGE_RW */
+	mfspr	r4,DAR			/* into the hash table */
+	rlwinm	r3,r20,32-15,21,21	/* DSISR_STORE -> _PAGE_RW */
 	bl	hash_page
 1:	stw	r20,_DSISR(r21)
 	mr	r5,r20
@@ -344,6 +326,7 @@ DataAccess:
 	li	r20,MSR_KERNEL
 	rlwimi	r20,r23,0,16,16		/* copy EE bit from saved MSR */
 	bl	transfer_to_handler
+i0x300:
 	.long	do_page_fault
 	.long	ret_from_except
 
@@ -371,12 +354,10 @@ InstructionAccessCont:
 InstructionAccess:
 	EXCEPTION_PROLOG
 #endif /* CONFIG_PPC64BRIDGE */
-	MOL_HOOK(1)
 	andis.	r0,r23,0x4000		/* no pte found? */
 	beq	1f			/* if so, try to put a PTE */
-	mr	r3,r22			/* into the hash table */
-	rlwinm	r4,r23,32-13,30,30	/* MSR_PR -> _PAGE_USER */
-	mr	r20,r23			/* SRR1 has reason bits */
+	li	r3,0			/* into the hash table */
+	mr	r4,r22			/* SRR0 is fault address */
 	bl	hash_page
 1:	addi	r3,r1,STACK_FRAME_OVERHEAD
 	mr	r4,r22
@@ -384,6 +365,7 @@ InstructionAccess:
 	li	r20,MSR_KERNEL
 	rlwimi	r20,r23,0,16,16		/* copy EE bit from saved MSR */
 	bl	transfer_to_handler
+i0x400:
 	.long	do_page_fault
 	.long	ret_from_except
 
@@ -429,6 +411,7 @@ Alignment:
 	li	r20,MSR_KERNEL
 	rlwimi	r20,r23,0,16,16		/* copy EE bit from saved MSR */
 	bl	transfer_to_handler
+i0x600:
 	.long	AlignmentException
 	.long	ret_from_except
 
@@ -436,11 +419,11 @@ Alignment:
 	. = 0x700
 ProgramCheck:
 	EXCEPTION_PROLOG
-	MOL_HOOK(2)
 	addi	r3,r1,STACK_FRAME_OVERHEAD
 	li	r20,MSR_KERNEL
 	rlwimi	r20,r23,0,16,16		/* copy EE bit from saved MSR */
 	bl	transfer_to_handler
+i0x700:
 	.long	ProgramCheckException
 	.long	ret_from_except
 
@@ -448,17 +431,16 @@ ProgramCheck:
 	. = 0x800
 FPUnavailable:
 	EXCEPTION_PROLOG
-	MOL_HOOK_RESTORE(3)
 	bne	load_up_fpu		/* if from user, just load it up */
 	li	r20,MSR_KERNEL
 	bl	transfer_to_handler	/* if from kernel, take a trap */
+i0x800:
 	.long	KernelFP
 	.long	ret_from_except
 
 	. = 0x900
 Decrementer:
 	EXCEPTION_PROLOG
-	MOL_HOOK(4)	
 	addi	r3,r1,STACK_FRAME_OVERHEAD
 	li	r20,MSR_KERNEL
 	bl	transfer_to_handler
@@ -482,7 +464,7 @@ SystemCall:
 	.long	ret_from_except
 
 /* Single step - not used on 601 */
-	STD_MOL_EXCEPTION(0xd00, SingleStep, SingleStepException, 5)
+	STD_EXCEPTION(0xd00, SingleStep, SingleStepException)
 	STD_EXCEPTION(0xe00, Trap_0e, UnknownException)
 
 /*
@@ -512,7 +494,6 @@ Trap_0f:
  */
 	. = 0x1000
 InstructionTLBMiss:
-	MOL_HOOK_TLBMISS( 14 )
 /*
  * r0:	stored ctr
  * r1:	linux style pte ( later becomes ppc hardware pte )
@@ -525,10 +506,13 @@ InstructionTLBMiss:
 	lis	r1,KERNELBASE@h		/* check if kernel address */
 	cmplw	0,r3,r1
 	mfspr	r2,SPRG3
+	li	r1,_PAGE_USER|_PAGE_PRESENT /* low addresses tested as user */
 	lwz	r2,PGDIR(r2)
 	blt+	112f
 	lis	r2,swapper_pg_dir@ha	/* if kernel address, use */
 	addi	r2,r2,swapper_pg_dir@l	/* kernel page table */
+	mfspr	r1,SRR1			/* and MSR_PR bit from SRR1 */
+	rlwinm	r1,r1,32-12,29,29	/* shift MSR_PR to _PAGE_USER posn */
 112:	tophys(r2,r2)
 	rlwimi	r2,r3,12,20,29		/* insert top 10 bits of address */
 	lwz	r2,0(r2)		/* get pmd entry */
@@ -536,21 +520,23 @@ InstructionTLBMiss:
 	beq-	InstructionAddressInvalid	/* return if no mapping */
 	tophys(r2,r2)
 	rlwimi	r2,r3,22,20,29		/* insert next 10 bits of address */
-	lwz	r1,0(r2)		/* get linux-style pte */
-	/* setup access flags in r3 */
-	mfmsr	r3
-	rlwinm	r3,r3,32-13,30,30	/* MSR_PR -> _PAGE_USER */
-	ori	r3,r3,1			/* set _PAGE_PRESENT bit in access */
-	andc.	r3,r3,r1		/* check access & ~permission */
+	lwz	r3,0(r2)		/* get linux-style pte */
+	andc.	r1,r1,r3		/* check access & ~permission */
 	bne-	InstructionAddressInvalid /* return if access not permitted */
-	ori	r1,r1,0x100		/* set _PAGE_ACCESSED in pte */
-	stw	r1,0(r2)		/* update PTE (accessed bit) */
+	ori	r3,r3,_PAGE_ACCESSED	/* set _PAGE_ACCESSED in pte */
+	/*
+	 * NOTE! We are assuming this is not an SMP system, otherwise
+	 * we would need to update the pte atomically with lwarx/stwcx.
+	 */
+	stw	r3,0(r2)		/* update PTE (accessed bit) */
 	/* Convert linux-style PTE to low word of PPC-style PTE */
-	/* this computation could be done better -- Cort */
-	rlwinm	r3,r1,32-9,31,31	/* _PAGE_HWWRITE -> PP lsb */
-	rlwimi	r1,r1,32-1,31,31	/* _PAGE_USER -> PP (both bits now) */
-	ori	r3,r3,0xe04		/* clear out reserved bits */
-	andc	r1,r1,r3		/* PP=2 or 0, when _PAGE_HWWRITE */
+	rlwinm	r1,r3,32-10,31,31	/* _PAGE_RW -> PP lsb */
+	rlwinm	r2,r3,32-7,31,31	/* _PAGE_DIRTY -> PP lsb */
+	and	r1,r1,r2		/* writable if _RW and _DIRTY */
+	rlwimi	r3,r3,32-1,30,30	/* _PAGE_USER -> PP msb */
+	rlwimi	r3,r3,32-1,31,31	/* _PAGE_USER -> PP lsb */
+	ori	r1,r1,0xe14		/* clear out reserved bits and M */
+	andc	r1,r3,r1		/* PP = user? (rw&dirty? 2: 3): 0 */
 	mtspr	RPA,r1
 	mfspr	r3,IMISS
 	tlbli	r3
@@ -575,7 +561,6 @@ InstructionAddressInvalid:
 	mfmsr	r0		/* Restore "normal" registers */
 	xoris	r0,r0,MSR_TGPR>>16
 	mtcrf	0x80,r3		/* Restore CR0 */
-	sync			/* Some chip revs have problems here... */
 	mtmsr	r0
 	b	InstructionAccess
 
@@ -584,7 +569,6 @@ InstructionAddressInvalid:
  */
 	. = 0x1100
 DataLoadTLBMiss:
-	MOL_HOOK_TLBMISS( 15 )
 /*
  * r0:	stored ctr
  * r1:	linux style pte ( later becomes ppc hardware pte )
@@ -597,10 +581,13 @@ DataLoadTLBMiss:
 	lis	r1,KERNELBASE@h		/* check if kernel address */
 	cmplw	0,r3,r1
 	mfspr	r2,SPRG3
+	li	r1,_PAGE_USER|_PAGE_PRESENT /* low addresses tested as user */
 	lwz	r2,PGDIR(r2)
 	blt+	112f
 	lis	r2,swapper_pg_dir@ha	/* if kernel address, use */
 	addi	r2,r2,swapper_pg_dir@l	/* kernel page table */
+	mfspr	r1,SRR1			/* and MSR_PR bit from SRR1 */
+	rlwinm	r1,r1,32-12,29,29	/* shift MSR_PR to _PAGE_USER posn */
 112:	tophys(r2,r2)
 	rlwimi	r2,r3,12,20,29		/* insert top 10 bits of address */
 	lwz	r2,0(r2)		/* get pmd entry */
@@ -608,22 +595,23 @@ DataLoadTLBMiss:
 	beq-	DataAddressInvalid	/* return if no mapping */
 	tophys(r2,r2)
 	rlwimi	r2,r3,22,20,29		/* insert next 10 bits of address */
-	lwz	r1,0(r2)		/* get linux-style pte */
-	/* setup access flags in r3 */
-	mfmsr	r3
-	rlwinm	r3,r3,32-13,30,30	/* MSR_PR -> _PAGE_USER */
-	ori	r3,r3,1			/* set _PAGE_PRESENT bit in access */
-	/* save r2 and use it as scratch for the andc. */	
-	andc.	r3,r3,r1		/* check access & ~permission */
+	lwz	r3,0(r2)		/* get linux-style pte */
+	andc.	r1,r1,r3		/* check access & ~permission */
 	bne-	DataAddressInvalid	/* return if access not permitted */
-	ori	r1,r1,0x100		/* set _PAGE_ACCESSED in pte */
-	stw	r1,0(r2)		/* update PTE (accessed bit) */
+	ori	r3,r3,_PAGE_ACCESSED	/* set _PAGE_ACCESSED in pte */
+	/*
+	 * NOTE! We are assuming this is not an SMP system, otherwise
+	 * we would need to update the pte atomically with lwarx/stwcx.
+	 */
+	stw	r3,0(r2)		/* update PTE (accessed bit) */
 	/* Convert linux-style PTE to low word of PPC-style PTE */
-	/* this computation could be done better -- Cort */
-	rlwinm	r3,r1,32-9,31,31	/* _PAGE_HWWRITE -> PP lsb */
-	rlwimi	r1,r1,32-1,31,31	/* _PAGE_USER -> PP (both bits now) */
-	ori	r3,r3,0xe04		/* clear out reserved bits */
-	andc	r1,r1,r3		/* PP=2 or 0, when _PAGE_HWWRITE */
+	rlwinm	r1,r3,32-10,31,31	/* _PAGE_RW -> PP lsb */
+	rlwinm	r2,r3,32-7,31,31	/* _PAGE_DIRTY -> PP lsb */
+	and	r1,r1,r2		/* writable if _RW and _DIRTY */
+	rlwimi	r3,r3,32-1,30,30	/* _PAGE_USER -> PP msb */
+	rlwimi	r3,r3,32-1,31,31	/* _PAGE_USER -> PP lsb */
+	ori	r1,r1,0xe14		/* clear out reserved bits and M */
+	andc	r1,r3,r1		/* PP = user? (rw&dirty? 2: 3): 0 */
 	mtspr	RPA,r1
 	mfspr	r3,DMISS
 	tlbld	r3
@@ -646,7 +634,6 @@ DataAddressInvalid:
 	mfmsr	r0		/* Restore "normal" registers */
 	xoris	r0,r0,MSR_TGPR>>16
 	mtcrf	0x80,r3		/* Restore CR0 */
-	sync			/* Some chip revs have problems here... */
 	mtmsr	r0
 	b	DataAccess
 	
@@ -655,7 +642,6 @@ DataAddressInvalid:
  */
 	. = 0x1200
 DataStoreTLBMiss:
-	MOL_HOOK_TLBMISS( 16 )
 /*
  * r0:	stored ctr
  * r1:	linux style pte ( later becomes ppc hardware pte )
@@ -668,10 +654,13 @@ DataStoreTLBMiss:
 	lis	r1,KERNELBASE@h		/* check if kernel address */
 	cmplw	0,r3,r1
 	mfspr	r2,SPRG3
+	li	r1,_PAGE_RW|_PAGE_USER|_PAGE_PRESENT /* access flags */
 	lwz	r2,PGDIR(r2)
 	blt+	112f
 	lis	r2,swapper_pg_dir@ha	/* if kernel address, use */
 	addi	r2,r2,swapper_pg_dir@l	/* kernel page table */
+	mfspr	r1,SRR1			/* and MSR_PR bit from SRR1 */
+	rlwinm	r1,r1,32-12,29,29	/* shift MSR_PR to _PAGE_USER posn */
 112:	tophys(r2,r2)
 	rlwimi	r2,r3,12,20,29		/* insert top 10 bits of address */
 	lwz	r2,0(r2)		/* get pmd entry */
@@ -679,22 +668,19 @@ DataStoreTLBMiss:
 	beq-	DataAddressInvalid	/* return if no mapping */
 	tophys(r2,r2)
 	rlwimi	r2,r3,22,20,29		/* insert next 10 bits of address */
-	lwz	r1,0(r2)		/* get linux-style pte */
-	/* setup access flags in r3 */
-	mfmsr	r3
-	rlwinm	r3,r3,32-13,30,30	/* MSR_PR -> _PAGE_USER */
-	ori	r3,r3,0x5		/* _PAGE_PRESENT|_PAGE_RW */
-	/* save r2 and use it as scratch for the andc. */	
-	andc.	r3,r3,r1		/* check access & ~permission */
+	lwz	r3,0(r2)		/* get linux-style pte */
+	andc.	r1,r1,r3		/* check access & ~permission */
 	bne-	DataAddressInvalid	/* return if access not permitted */
-	ori	r1,r1,0x384		/* set _PAGE_ACCESSED|_PAGE_DIRTY|_PAGE_RW|_PAGE_HWWRITE in pte */
-	stw	r1,0(r2)		/* update PTE (accessed bit) */
+	ori	r3,r3,_PAGE_ACCESSED|_PAGE_DIRTY
+	/*
+	 * NOTE! We are assuming this is not an SMP system, otherwise
+	 * we would need to update the pte atomically with lwarx/stwcx.
+	 */
+	stw	r3,0(r2)		/* update PTE (accessed/dirty bits) */
 	/* Convert linux-style PTE to low word of PPC-style PTE */
-	/* this computation could be done better -- Cort */
-	rlwinm	r3,r1,32-9,31,31	/* _PAGE_HWWRITE -> PP lsb */
-	rlwimi	r1,r1,32-1,31,31	/* _PAGE_USER -> PP (both bits now) */
-	ori	r3,r3,0xe04		/* clear out reserved bits */
-	andc	r1,r1,r3		/* PP=2 or 0, when _PAGE_HWWRITE */
+	rlwimi	r3,r3,32-1,30,30	/* _PAGE_USER -> PP msb */
+	li	r1,0xe15		/* clear out reserved bits and M */
+	andc	r1,r3,r1		/* PP = user? 2: 0 */
 	mtspr	RPA,r1
 	mfspr	r3,DMISS
 	tlbld	r3
@@ -702,7 +688,7 @@ DataStoreTLBMiss:
 	mtcrf	0x80,r3
 	rfi
 
-	STD_MOL_EXCEPTION(0x1300, Trap_13, InstructionBreakpoint, 11)
+	STD_EXCEPTION(0x1300, Trap_13, InstructionBreakpoint)
 	STD_EXCEPTION(0x1400, SMI, SMIException)
 	STD_EXCEPTION(0x1500, Trap_15, UnknownException)
 	STD_EXCEPTION(0x1600, Trap_16, UnknownException)
@@ -715,7 +701,7 @@ DataStoreTLBMiss:
 	STD_EXCEPTION(0x1d00, Trap_1d, UnknownException)
 	STD_EXCEPTION(0x1e00, Trap_1e, UnknownException)
 	STD_EXCEPTION(0x1f00, Trap_1f, UnknownException)
-	STD_MOL_EXCEPTION(0x2000, RunMode, RunModeException, 5)
+	STD_EXCEPTION(0x2000, RunMode, RunModeException)
 	STD_EXCEPTION(0x2100, Trap_21, UnknownException)
 	STD_EXCEPTION(0x2200, Trap_22, UnknownException)
 	STD_EXCEPTION(0x2300, Trap_23, UnknownException)
@@ -737,7 +723,6 @@ DataStoreTLBMiss:
 #ifdef CONFIG_ALTIVEC
 AltiVecUnavailable:
 	EXCEPTION_PROLOG
-	MOL_HOOK_RESTORE(12)
 	bne	load_up_altivec		/* if from user, just load it up */
 	li	r20,MSR_KERNEL
 	bl	transfer_to_handler	/* if from kernel, take a trap */
@@ -778,20 +763,16 @@ transfer_to_handler:
 	addi	r24,r1,STACK_FRAME_OVERHEAD
 	stw	r24,PT_REGS(r23)
 #ifdef CONFIG_ALTIVEC
-	mfpvr	r24			/* check if we are on a G4 */
-	srwi	r24,r24,16
-	cmpwi	r24,PVR_7400@h
-	bne	2f
-	mfspr	r22,SPRN_VRSAVE		/* if so, save vrsave register value */
+BEGIN_FTR_SECTION
+	mfspr	r22,SPRN_VRSAVE		/* if G4, save vrsave register value */
 	stw	r22,THREAD_VRSAVE(r23)
+END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
 #endif /* CONFIG_ALTIVEC */
 2:	addi	r2,r23,-THREAD		/* set r2 to current */
 	tovirt(r2,r2)
 	mflr	r23
 	andi.	r24,r23,0x3f00		/* get vector offset */
 	stw	r24,TRAP(r21)
-	li	r22,RESULT
-	stwcx.	r22,r22,r21		/* to clear the reservation */
 	li	r22,0
 	stw	r22,RESULT(r21)
 	mtspr	SPRG2,r22		/* r1 is now kernel sp */
@@ -803,7 +784,6 @@ transfer_to_handler:
 	lwz	r24,0(r23)		/* virtual address of handler */
 	lwz	r23,4(r23)		/* where to go when done */
 	FIX_SRR1(r20,r22)
-	MOL_HOOK(6)
 	mtspr	SRR0,r24
 	mtspr	SRR1,r20
 	mtlr	r23
@@ -843,7 +823,7 @@ load_up_fpu:
 #endif /* CONFIG_PPC64BRIDGE */
 	SYNC
 	MTMSRD(r5)			/* enable use of fpu now */
-	SYNC
+	isync
 /*
  * For SMP, we don't do lazy FPU switching because it just gets too
  * horrendously complex, especially when a task switches from one CPU
@@ -927,9 +907,8 @@ load_up_altivec:
  */
 	mfmsr	r5
 	oris	r5,r5,MSR_VEC@h
-	SYNC
 	mtmsr	r5			/* enable use of AltiVec now */
-	SYNC
+	isync
 /*
  * For SMP, we don't do lazy AltiVec switching because it just gets too
  * horrendously complex, especially when a task switches from one CPU
@@ -1014,16 +993,11 @@ KernelAltiVec:
 
 	.globl	giveup_altivec
 giveup_altivec:
-#ifdef CONFIG_MOL
-	mflr	r4
-	MOL_HOOK_MMU(13, r5)
-	mtlr	r4
-#endif
 	mfmsr	r5
 	oris	r5,r5,MSR_VEC@h
 	SYNC
 	mtmsr	r5			/* enable use of AltiVec now */
-	SYNC
+	isync
 	cmpi	0,r3,0
 	beqlr-				/* if no previous owner, done */
 	addi	r3,r3,THREAD		/* want THREAD of task */
@@ -1055,16 +1029,12 @@ giveup_altivec:
  */
 	.globl	giveup_fpu
 giveup_fpu:
-#ifdef CONFIG_MOL
-	mflr	r4
-	MOL_HOOK_MMU(7, r5)
-	mtlr	r4
-#endif		
 	mfmsr	r5
 	ori	r5,r5,MSR_FP
 	SYNC
 	mtmsr	r5			/* enable use of fpu now */
 	SYNC
+	isync
 	cmpi	0,r3,0
 	beqlr-				/* if no previous owner, done */
 	addi	r3,r3,THREAD	        /* want THREAD of task */
@@ -1114,7 +1084,7 @@ relocate_kernel:
 copy_and_flush:
 	addi	r5,r5,-4
 	addi	r6,r6,-4
-4:	li	r0,CACHELINE_WORDS
+4:	li	r0,L1_CACHE_LINE_SIZE/4
 	mtctr	r0
 3:	addi	r6,r6,4			/* copy a cache line */
 	lwzx	r0,r6,r4
@@ -1125,6 +1095,7 @@ copy_and_flush:
 	icbi	r6,r3			/* flush the icache line */
 	cmplw	0,r6,r5
 	blt	4b
+	sync				/* additional sync needed on g4 */
 	isync
 	addi	r5,r5,4
 	addi	r6,r6,4
@@ -1133,7 +1104,7 @@ copy_and_flush:
 #ifdef CONFIG_APUS
 /*
  * On APUS the physical base address of the kernel is not known at compile
- * time, which means the __pa/__va constants used are incorect. In the
+ * time, which means the __pa/__va constants used are incorrect. In the
  * __init section is recorded the virtual addresses of instructions using
  * these constants, so all that has to be done is fix these before
  * continuing the kernel boot.
@@ -1163,6 +1134,8 @@ fix_mem_constants:
 	icbi	r0,r14			 /* flush the icache line */
 	cmpw	r12,r13
 	bne     1b
+	sync				/* additional sync needed on g4 */
+	isync
 
 /*
  * Map the memory where the exception handlers will
@@ -1196,6 +1169,7 @@ fix_mem_constants:
 	cmpw	r12,r13
 	bne     1b
 
+	sync				/* additional sync needed on g4 */
 	isync				/* No speculative loading until now */
 	blr
 	
@@ -1208,9 +1182,9 @@ apus_interrupt_entry:
 	
 	mfmsr	20
 	xori	r20,r20,MSR_DR
-	sync
+	SYNC
 	mtmsr	r20
-	sync
+	isync
 
 	lis	r4,APUS_IPL_EMU@h
 
@@ -1243,9 +1217,9 @@ apus_interrupt_entry:
 	
 	mfmsr	r20
 	xori	r20,r20,MSR_DR
-	sync
+	SYNC
 	mtmsr	r20
-	sync
+	isync
 
 	stw	r3,(_CCR+4)(r21);
 
@@ -1280,11 +1254,21 @@ __secondary_start_gemini:
 	.globl	__secondary_start_psurge
 __secondary_start_psurge:
 	li	r24,1			/* cpu # */
+	b	__secondary_start_psurge99
+	.globl	__secondary_start_psurge2
+__secondary_start_psurge2:
+	li	r24,2			/* cpu # */
+	b	__secondary_start_psurge99
+	.globl	__secondary_start_psurge3
+__secondary_start_psurge3:
+	li	r24,3			/* cpu # */
+	b	__secondary_start_psurge99
+__secondary_start_psurge99:
 	/* we come in here with IR=0 and DR=1, and DBAT 0
 	   set to map the 0xf0000000 - 0xffffffff region */
 	mfmsr	r0
 	rlwinm	r0,r0,0,28,26		/* clear DR (0x10) */
-	sync
+	SYNC
 	mtmsr	r0
 	isync
 
@@ -1293,12 +1277,15 @@ __secondary_start:
 #ifdef CONFIG_PPC64BRIDGE
 	mfmsr	r0
 	clrldi	r0,r0,1		/* make sure it's in 32-bit mode */
-	sync
+	SYNC
 	MTMSRD(r0)
 	isync
-#else
-	bl	enable_caches
 #endif
+
+	lis	r3,-KERNELBASE@h
+	mr	r4,r24
+	bl	identify_cpu
+	bl	call_setup_cpu		/* Call setup_cpu for this CPU */
 
 	/* get current */
 	lis	r2,current_set@h
@@ -1323,6 +1310,7 @@ __secondary_start:
 	mtspr	SPRG3,r4
 	li	r3,0
 	mtspr	SPRG2,r3	/* 0 => r1 has kernel sp */
+	stw	r3,PT_REGS(r4)	/* set thread.regs to 0 for kernel thread */
 
 	/* enable MMU and jump to start_secondary */
 	li	r4,MSR_KERNEL
@@ -1337,54 +1325,87 @@ __secondary_start:
 /*
  * Enable caches and 604-specific features if necessary.
  */
-enable_caches:
-	mfspr	r9,PVR
-	rlwinm	r9,r9,16,16,31
-	cmpi	0,r9,1
-	beq	6f			/* not needed for 601 */
+_GLOBAL(__setup_cpu_601)
+	blr
+_GLOBAL(__setup_cpu_603)
+	b	setup_common_caches
+_GLOBAL(__setup_cpu_604)
+	mflr	r4
+	bl	setup_common_caches
+	bl	setup_604_hid0
+	mtlr	r4
+	blr
+_GLOBAL(__setup_cpu_750)
+	mflr	r4
+	bl	setup_common_caches
+	bl	setup_750_7400_hid0
+	mtlr	r4
+	blr
+_GLOBAL(__setup_cpu_7400)
+	mflr	r4
+	bl	setup_common_caches
+	bl	setup_750_7400_hid0
+	mtlr	r4
+	blr
+_GLOBAL(__setup_cpu_7450)
+	blr
+_GLOBAL(__setup_cpu_power3)
+	blr
+_GLOBAL(__setup_cpu_power4)
+	blr
+_GLOBAL(__setup_cpu_generic)
+	blr
+
+/* Enable caches for 603's, 604, 750 & 7400 */
+setup_common_caches:
 	mfspr	r11,HID0
 	andi.	r0,r11,HID0_DCE
 	ori	r11,r11,HID0_ICE|HID0_DCE
 	ori	r8,r11,HID0_ICFI
-	bne	3f			/* don't invalidate the D-cache */
+	bne	1f			/* don't invalidate the D-cache */
 	ori	r8,r8,HID0_DCI		/* unless it wasn't enabled */
-3:
-	sync
+1:	sync
 	mtspr	HID0,r8			/* enable and invalidate caches */
 	sync
 	mtspr	HID0,r11		/* enable caches */
 	sync
 	isync
-	cmpi	0,r9,4			/* check for 604 */
-	cmpi	1,r9,9			/* or 604e */
-	cmpi	2,r9,10			/* or mach5 / 604r */
-	cmpi	3,r9,8			/* check for 750 (G3) */
-	cmpi	4,r9,12			/* or 7400 (G4) */
-	cror	2,2,6
-	cror	2,2,10
-	bne	4f
-	ori	r11,r11,HID0_SIED|HID0_BHTE /* for 604[e|r], enable */
-	bne	2,5f
-	ori	r11,r11,HID0_BTCD	/* superscalar exec & br history tbl */
-	b	5f
-4:
-	cror	14,14,18
-	bne	3,6f
-	/* for G3/G4:
-	 * enable Store Gathering (SGE), Address Brodcast (ABE),
-	 * Branch History Table (BHTE), Branch Target ICache (BTIC)
-	 */
+	blr
+
+/* 604, 604e, 604ev, ...
+ * Enable superscalar execution & branch history table
+ */
+setup_604_hid0:
+	mfspr	r11,HID0
+	ori	r11,r11,HID0_SIED|HID0_BHTE
+	ori	r8,r11,HID0_BTCD
+	sync
+	mtspr	HID0,r8		/* flush branch target address cache */
+	sync			/* on 604e/604r */
+	mtspr	HID0,r11
+	sync
+	isync
+	blr
+
+/* 740/750/7400/7410
+ * Enable Store Gathering (SGE), Address Brodcast (ABE),
+ * Branch History Table (BHTE), Branch Target ICache (BTIC)
+ * Dynamic Power Management (DPM), Speculative (SPD)
+ * Clear Instruction cache throttling (ICTC)
+ */
+setup_750_7400_hid0:
+	mfspr	r11,HID0
 	ori	r11,r11,HID0_SGE | HID0_ABE | HID0_BHTE | HID0_BTIC
 	oris	r11,r11,HID0_DPM@h	/* enable dynamic power mgmt */
 	li	r3,HID0_SPD
 	andc	r11,r11,r3		/* clear SPD: enable speculative */
  	li	r3,0
  	mtspr	ICTC,r3			/* Instruction Cache Throttling off */
-5:	isync
+	isync
 	mtspr	HID0,r11
 	sync
 	isync
-6:	blr
+	blr
 
 /*
  * Load stuff into the MMU.  Intended to be called with
@@ -1406,7 +1427,7 @@ load_up_mmu:
 	lis	r3,0x2000	/* Ku = 1, VSID = 0 */
 	li	r4,0
 3:	mtsrin	r3,r4
-	addi	r3,r3,1		/* increment VSID */
+	addi	r3,r3,0x111	/* increment VSID */
 	addis	r4,r4,0x1000	/* address of next segment */
 	bdnz	3b
 #ifndef CONFIG_POWER4
@@ -1429,9 +1450,10 @@ load_up_mmu:
  * This is where the main kernel code starts.
  */
 start_here:
-#ifndef CONFIG_PPC64BRIDGE
-	bl	enable_caches
-#endif
+	/* Call setup_cpu for CPU 0 */
+	li	r3,0		/* data offset */
+	li	r24,0		/* cpu# */
+	bl	call_setup_cpu
 
 	/* ptr to current */
 	lis	r2,init_task_union@h
@@ -1445,34 +1467,20 @@ start_here:
 	li	r3,0
 	mtspr	SPRG2,r3	/* 0 => r1 has kernel sp */
 
-	/* Clear out the BSS */
-	lis	r11,_end@ha
-	addi	r11,r11,_end@l
-	lis	r8,__bss_start@ha
-	addi	r8,r8,__bss_start@l
-	subf	r11,r8,r11
-	addi	r11,r11,3
-	rlwinm.	r11,r11,30,2,31
-	beq	2f
-	addi	r8,r8,-4
-	mtctr	r11
-	li	r0,0
-3:	stwu	r0,4(r8)
-	bdnz	3b
-2:
 	/* stack */
 	addi	r1,r2,TASK_UNION_SIZE
 	li	r0,0
 	stwu	r0,-STACK_FRAME_OVERHEAD(r1)
 /*
- * Decide what sort of machine this is and initialize the MMU.
+ * Do early bootinfo parsing, platform-specific initialization,
+ * and set up the MMU.
  */
 	mr	r3,r31
 	mr	r4,r30
 	mr	r5,r29
 	mr	r6,r28
 	mr	r7,r27
-	bl	identify_machine
+	bl	machine_init
 	bl	MMU_init
 
 #ifdef CONFIG_APUS
@@ -1504,13 +1512,11 @@ start_here:
 	RFI
 /* Load up the kernel context */
 2:
-	SYNC			/* Force all PTE updates to finish */
+	sync			/* Force all PTE updates to finish */
+	ISYNC_601
 	tlbia			/* Clear all TLB entries */
 	sync			/* wait for tlbia/tlbie to finish */
-#ifdef CONFIG_SMP
-	tlbsync			/* ... on all CPUs */
-	sync
-#endif
+	TLBSYNC			/* ... on all CPUs */
 
 	bl	load_up_mmu
 /* Now turn on the MMU for real! */
@@ -1527,9 +1533,10 @@ start_here:
  * Set up the segment registers for a new context.
  */
 _GLOBAL(set_context)
-	rlwinm	r3,r3,4,8,27	/* VSID = context << 4 */
+	mulli	r3,r3,897	/* multiply context by skew factor */
+	rlwinm	r3,r3,4,8,27	/* VSID = (context & 0xfffff) << 4 */
 	addis	r3,r3,0x6000	/* Set Ks, Ku bits */
-	li	r0,12		/* TASK_SIZE / SEGMENT_SIZE */
+	li	r0,NUM_USER_SEGMENTS
 	mtctr	r0
 	li	r4,0
 3:
@@ -1537,10 +1544,12 @@ _GLOBAL(set_context)
 	slbie	r4
 #endif /* CONFIG_PPC64BRIDGE */
 	mtsrin	r3,r4
-	addi	r3,r3,1		/* next VSID */
+	addi	r3,r3,0x111	/* next VSID */
+	rlwinm	r3,r3,0,8,3	/* clear out any overflow from VSID field */
 	addis	r4,r4,0x1000	/* address of next segment */
 	bdnz	3b
-	SYNC
+	SYNC_601
+	isync
 	blr
 
 /* 
@@ -1710,17 +1719,6 @@ m8260_gorom:
 	blr
 #endif
 
-#ifdef CONFIG_MOL
-/*
- * Mac-on-linux hook_table. Don't put this in the data section -
- * the base address must be within the first 32KB of RAM.
- */
-	.globl mol_interface
-mol_interface:
-	.long   MOL_INTERFACE_VERSION
-	.fill	24,4,0		/* space for 24 hooks */
-#endif
-
 
 /*
  * We put a few things here that have to be page-aligned.
@@ -1745,3 +1743,12 @@ swapper_pg_dir:
 	.globl	cmd_line
 cmd_line:
 	.space	512
+
+	.globl intercept_table
+intercept_table:
+	.long 0, 0, i0x200, i0x300, i0x400, 0, i0x600, i0x700
+	.long i0x800, 0, 0, 0, 0, i0xd00, 0, 0
+	.long 0, 0, 0, i0x1300, 0, 0, 0, 0
+	.long 0, 0, 0, 0, 0, 0, 0, 0
+	.long 0, 0, 0, 0, 0, 0, 0, 0
+	.long 0, 0, 0, 0, 0, 0, 0, 0

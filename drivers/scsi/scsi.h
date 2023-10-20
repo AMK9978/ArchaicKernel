@@ -61,7 +61,7 @@ extern __inline__ int scsi_to_pci_dma_dir(unsigned char scsi_dir)
 #endif
 #endif
 
-#if defined(CONFIG_SBUS) && !defined(CONFIG_SUN3)
+#if defined(CONFIG_SBUS) && !defined(CONFIG_SUN3) && !defined(CONFIG_SUN3X)
 #include <asm/sbus.h>
 #if ((SCSI_DATA_UNKNOWN == SBUS_DMA_BIDIRECTIONAL) && (SCSI_DATA_WRITE == SBUS_DMA_TODEVICE) && (SCSI_DATA_READ == SBUS_DMA_FROMDEVICE) && (SCSI_DATA_NONE == SBUS_DMA_NONE))
 #define scsi_to_sbus_dma_dir(scsi_dir)	((int)(scsi_dir))
@@ -351,7 +351,7 @@ extern const char *const scsi_device_types[MAX_SCSI_DEVICE_CODE];
 #define DRIVER_MASK         0x0f
 #define SUGGEST_MASK        0xf0
 
-#define MAX_COMMAND_SIZE    12
+#define MAX_COMMAND_SIZE    16
 #define SCSI_SENSE_BUFFERSIZE   64
 
 /*
@@ -617,6 +617,9 @@ struct scsi_device {
 	unsigned remap:1;	/* support remapping  */
 	unsigned starved:1;	/* unable to process commands because
 				   host busy */
+
+	// Flag to allow revalidate to succeed in sd_open
+	int allow_revalidate;
 };
 
 
@@ -629,6 +632,8 @@ typedef struct scsi_pointer {
 	int this_residual;	/* left in this buffer */
 	struct scatterlist *buffer;	/* which buffer */
 	int buffers_residual;	/* how many buffers left */
+
+        dma_addr_t dma_handle;
 
 	volatile int Status;
 	volatile int Message;
@@ -668,7 +673,7 @@ struct scsi_request {
 	unsigned short sr_use_sg;	/* Number of pieces of scatter-gather */
 	unsigned short sr_sglist_len;	/* size of malloc'd scatter-gather list */
 	unsigned sr_underflow;	/* Return error if less than
-				   this amount is transfered */
+				   this amount is transferred */
 };
 
 /*
@@ -742,7 +747,8 @@ struct scsi_cmnd {
 	unsigned request_bufflen;	/* Actual request size */
 
 	struct timer_list eh_timeout;	/* Used to time out the command. */
-	void *request_buffer;	/* Actual requested buffer */
+	void *request_buffer;		/* Actual requested buffer */
+        void **bounce_buffers;		/* Array of bounce buffers when using scatter-gather */
 
 	/* These elements define the operation we ultimately want to perform */
 	unsigned char data_cmnd[MAX_COMMAND_SIZE];
@@ -756,7 +762,7 @@ struct scsi_cmnd {
 	void *buffer;		/* Data buffer */
 
 	unsigned underflow;	/* Return error if less than
-				   this amount is transfered */
+				   this amount is transferred */
 	unsigned old_underflow;	/* save underflow here when reusing the
 				 * command for error handling */
 

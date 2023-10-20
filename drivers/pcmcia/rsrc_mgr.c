@@ -19,7 +19,7 @@
     are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
 
     Alternatively, the contents of this file may be used under the
-    terms of the GNU Public License version 2 (the "GPL"), in which
+    terms of the GNU General Public License version 2 (the "GPL"), in which
     case the provisions of the GPL are applicable instead of the
     above.  If you wish to allow the use of your version of this file
     only under the terms of the GPL and not to allow others to use
@@ -40,9 +40,10 @@
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/types.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/timer.h>
+#include <linux/proc_fs.h>
 #include <asm/irq.h>
 #include <asm/io.h>
 
@@ -52,7 +53,6 @@
 #include <pcmcia/bulkmem.h>
 #include <pcmcia/cistpl.h>
 #include "cs_internal.h"
-#include "rsrc_mgr.h"
 
 /*====================================================================*/
 
@@ -188,6 +188,10 @@ static void do_io_probe(ioaddr_t base, ioaddr_t num)
     
     /* First, what does a floating port look like? */
     b = kmalloc(256, GFP_KERNEL);
+    if (!b) {
+            printk(KERN_ERR "do_io_probe: unable to kmalloc 256 bytes");
+            return;
+    }   
     memset(b, 0, 256);
     for (i = base, most = 0; i < base+num; i += 8) {
 	if (check_io_resource(i, 8))
@@ -251,7 +255,7 @@ static int do_mem_probe(u_long base, u_long num,
 	   base, base+num-1);
     bad = fail = 0;
     step = (num < 0x20000) ? 0x2000 : ((num>>4) & ~0x1fff);
-    for (i = base; i < base+num; i = j + step) {
+    for (i = j = base; i < base+num; i = j + step) {
 	if (!fail) {	
 	    for (j = i; j < base+num; j += step)
 		if ((check_mem_resource(j, step) == 0) && is_valid(j))

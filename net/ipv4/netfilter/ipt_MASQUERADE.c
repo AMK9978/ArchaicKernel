@@ -1,5 +1,6 @@
 /* Masquerade.  Simple mapping which alters range to a local IP address
    (depending on route). */
+#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/ip.h>
 #include <linux/timer.h>
@@ -68,6 +69,7 @@ masquerade_target(struct sk_buff **pskb,
 	struct ip_nat_multi_range newrange;
 	u_int32_t newsrc;
 	struct rtable *rt;
+	struct rt_key key;
 
 	IP_NF_ASSERT(hooknum == NF_IP_POST_ROUTING);
 
@@ -82,10 +84,14 @@ masquerade_target(struct sk_buff **pskb,
 
 	mr = targinfo;
 
-	if (ip_route_output(&rt, (*pskb)->nh.iph->daddr,
-			    0,
-			    RT_TOS((*pskb)->nh.iph->tos)|RTO_CONN,
-			    out->ifindex) != 0) {
+	key.dst = (*pskb)->nh.iph->daddr;
+	key.src = 0; /* Unknown: that's what we're trying to establish */
+	key.tos = RT_TOS((*pskb)->nh.iph->tos)|RTO_CONN;
+	key.oif = out->ifindex;
+#ifdef CONFIG_IP_ROUTE_FWMARK
+	key.fwmark = (*pskb)->nfmark;
+#endif
+	if (ip_route_output_key(&rt, &key) != 0) {
 		/* Shouldn't happen */
 		printk("MASQUERADE: No route: Rusty's brain broke!\n");
 		return NF_DROP;
@@ -121,14 +127,32 @@ device_cmp(const struct ip_conntrack *i, void *ifindex)
 	return ret;
 }
 
-int masq_device_event(struct notifier_block *this,
-		      unsigned long event,
-		      void *ptr)
+static int masq_device_event(struct notifier_block *this,
+			     unsigned long event,
+			     void *ptr)
 {
 	struct net_device *dev = ptr;
 
-	if (event == NETDEV_DOWN || event == NETDEV_CHANGEADDR) {
-		/* Device was downed/changed (diald)  Search entire table for
+	if (event == NETDEV_DOWN) {
+		/* Device was downed.  Search entire table for
+		   conntracks which were associated with that device,
+		   and forget them. */
+		IP_NF_ASSERT(dev->ifindex != 0);
+
+		ip_ct_selective_cleanup(device_cmp, (void *)(long)dev->ifindex);
+	}
+
+	return NOTIFY_DONE;
+}
+
+static int masq_inet_event(struct notifier_block *this,
+			   unsigned long event,
+			   void *ptr)
+{
+	struct net_device *dev = ((struct in_ifaddr *)ptr)->ifa_dev->dev;
+
+	if (event == NETDEV_DOWN) {
+		/* IP address was deleted.  Search entire table for
 		   conntracks which were associated with that device,
 		   and forget them. */
 		IP_NF_ASSERT(dev->ifindex != 0);
@@ -141,6 +165,12 @@ int masq_device_event(struct notifier_block *this,
 
 static struct notifier_block masq_dev_notifier = {
 	masq_device_event,
+	NULL,
+	0
+};
+
+static struct notifier_block masq_inet_notifier = {
+	masq_inet_event,
 	NULL,
 	0
 };
@@ -158,6 +188,8 @@ static int __init init(void)
 	if (ret == 0) {
 		/* Register for device down reports */
 		register_netdevice_notifier(&masq_dev_notifier);
+		/* Register IP address change reports */
+		register_inetaddr_notifier(&masq_inet_notifier);
 	}
 
 	return ret;
@@ -167,7 +199,9 @@ static void __exit fini(void)
 {
 	ipt_unregister_target(&masquerade);
 	unregister_netdevice_notifier(&masq_dev_notifier);
+	unregister_inetaddr_notifier(&masq_inet_notifier);	
 }
 
 module_init(init);
 module_exit(fini);
+MODULE_LICENSE("GPL");

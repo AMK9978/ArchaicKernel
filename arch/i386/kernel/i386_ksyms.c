@@ -13,6 +13,7 @@
 #include <linux/apm_bios.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
+#include <linux/tty.h>
 
 #include <asm/semaphore.h>
 #include <asm/processor.h>
@@ -26,6 +27,7 @@
 #include <asm/mmx.h>
 #include <asm/desc.h>
 #include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 
 extern void dump_thread(struct pt_regs *, struct user *);
 extern spinlock_t rtc_lock;
@@ -59,7 +61,6 @@ EXPORT_SYMBOL(dump_fpu);
 EXPORT_SYMBOL(dump_extended_fpu);
 EXPORT_SYMBOL(__ioremap);
 EXPORT_SYMBOL(iounmap);
-EXPORT_SYMBOL(__io_virt_debug);
 EXPORT_SYMBOL(enable_irq);
 EXPORT_SYMBOL(disable_irq);
 EXPORT_SYMBOL(disable_irq_nosync);
@@ -71,13 +72,14 @@ EXPORT_SYMBOL(get_cmos_time);
 EXPORT_SYMBOL(apm_info);
 EXPORT_SYMBOL(gdt);
 
+#ifdef CONFIG_DEBUG_IOVIRT
+EXPORT_SYMBOL(__io_virt_debug);
+#endif
+
 EXPORT_SYMBOL_NOVERS(__down_failed);
 EXPORT_SYMBOL_NOVERS(__down_failed_interruptible);
 EXPORT_SYMBOL_NOVERS(__down_failed_trylock);
 EXPORT_SYMBOL_NOVERS(__up_wakeup);
-EXPORT_SYMBOL_NOVERS(__down_write_failed);
-EXPORT_SYMBOL_NOVERS(__down_read_failed);
-EXPORT_SYMBOL_NOVERS(__rwsem_wake);
 /* Networking helper routines. */
 EXPORT_SYMBOL(csum_partial_copy_generic);
 /* Delay loops */
@@ -88,13 +90,11 @@ EXPORT_SYMBOL(__const_udelay);
 EXPORT_SYMBOL_NOVERS(__get_user_1);
 EXPORT_SYMBOL_NOVERS(__get_user_2);
 EXPORT_SYMBOL_NOVERS(__get_user_4);
-EXPORT_SYMBOL_NOVERS(__put_user_1);
-EXPORT_SYMBOL_NOVERS(__put_user_2);
-EXPORT_SYMBOL_NOVERS(__put_user_4);
 
 EXPORT_SYMBOL(strtok);
 EXPORT_SYMBOL(strpbrk);
 EXPORT_SYMBOL(simple_strtol);
+EXPORT_SYMBOL(strstr);
 
 EXPORT_SYMBOL(strncpy_from_user);
 EXPORT_SYMBOL(__strncpy_from_user);
@@ -109,6 +109,12 @@ EXPORT_SYMBOL(pci_free_consistent);
 
 #ifdef CONFIG_PCI
 EXPORT_SYMBOL(pcibios_penalize_isa_irq);
+EXPORT_SYMBOL(pci_mem_start);
+#endif
+
+#ifdef CONFIG_PCI_BIOS
+EXPORT_SYMBOL(pcibios_set_irq_routing);
+EXPORT_SYMBOL(pcibios_get_irq_routing_table);
 #endif
 
 #ifdef CONFIG_X86_USE_3DNOW
@@ -133,6 +139,9 @@ EXPORT_SYMBOL(__global_sti);
 EXPORT_SYMBOL(__global_save_flags);
 EXPORT_SYMBOL(__global_restore_flags);
 EXPORT_SYMBOL(smp_call_function);
+
+/* TLB flushing */
+EXPORT_SYMBOL(flush_tlb_page);
 #endif
 
 #ifdef CONFIG_MCA
@@ -154,6 +163,13 @@ extern void * memcpy(void *,const void *,__kernel_size_t);
 EXPORT_SYMBOL_NOVERS(memcpy);
 EXPORT_SYMBOL_NOVERS(memset);
 
-#ifdef CONFIG_X86_PAE
-EXPORT_SYMBOL(empty_zero_page);
+#ifdef CONFIG_HAVE_DEC_LOCK
+EXPORT_SYMBOL(atomic_dec_and_lock);
 #endif
+
+#ifdef CONFIG_DEBUG_BUGVERBOSE
+EXPORT_SYMBOL(do_BUG);
+#endif
+
+extern int is_sony_vaio_laptop;
+EXPORT_SYMBOL(is_sony_vaio_laptop);

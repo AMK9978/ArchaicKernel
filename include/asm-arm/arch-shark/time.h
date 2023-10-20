@@ -1,7 +1,7 @@
 /*
  * linux/include/asm-arm/arch-shark/time.h
  *
- * by Alexander.Schulz@stud.uni-karlsruhe.de
+ * by Alexander Schulz
  *
  * Uses the real time clock because you can't run
  * the timer with level triggered interrupts and
@@ -46,7 +46,7 @@ static void timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 /*
  * Set up timer interrupt, and return the current time in seconds.
  */
-extern __inline__ void setup_timer(void)
+static inline void setup_timer(void)
 {
         struct rtc_time r_time;
         unsigned long flags;

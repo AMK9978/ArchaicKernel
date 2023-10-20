@@ -27,6 +27,7 @@
 
 #include <linux/config.h>
 #include <linux/proc_fs.h>
+#include <linux/pci.h>
 
 /* It is senseless to set SG_ALL any higher than this - the performance
  *  does not get any better, and it wastes memory
@@ -242,6 +243,11 @@ typedef struct	SHT
     short unsigned int sg_tablesize;
 
     /*
+     * if the host adapter has limitations beside segment count
+     */
+    short unsigned int max_sectors;
+
+    /*
      * True if this host adapter can make good use of linked commands.
      * This will allow more than one command to be queued to a given
      * unit on a given host.  Set this to the maximum number of command
@@ -379,6 +385,7 @@ struct Scsi_Host
     int can_queue;
     short cmd_per_lun;
     short unsigned int sg_tablesize;
+    short unsigned int max_sectors;
 
     unsigned in_recovery:1;
     unsigned unchecked_isa_dma:1;
@@ -412,6 +419,12 @@ struct Scsi_Host
     unsigned some_device_starved:1;
    
     void (*select_queue_depths)(struct Scsi_Host *, Scsi_Device *);
+
+    /*
+     * For SCSI hosts which are PCI devices, set pci_dev so that
+     * we can do BIOS EDD 3.0 mappings
+     */
+    struct pci_dev *pci_dev;
 
     /*
      * We should ensure that this is aligned, both for better performance
@@ -466,6 +479,13 @@ extern void scsi_unregister(struct Scsi_Host * i);
 extern void scsi_register_blocked_host(struct Scsi_Host * SHpnt);
 extern void scsi_deregister_blocked_host(struct Scsi_Host * SHpnt);
 
+static inline void scsi_set_pci_device(struct Scsi_Host *SHpnt,
+                                       struct pci_dev *pdev)
+{
+	SHpnt->pci_dev = pdev;
+}
+
+
 /*
  * Prototypes for functions/data in scsi_scan.c
  */
@@ -509,7 +529,7 @@ int scsi_register_device(struct Scsi_Device_Template * sdpnt);
 
 /* These are used by loadable modules */
 extern int scsi_register_module(int, void *);
-extern void scsi_unregister_module(int, void *);
+extern int scsi_unregister_module(int, void *);
 
 /* The different types of modules that we can load and unload */
 #define MODULE_SCSI_HA 1

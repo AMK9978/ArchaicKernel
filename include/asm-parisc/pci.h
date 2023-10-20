@@ -113,7 +113,7 @@ extern void pcibios_size_bridge(struct pci_bus *, struct pbus_set_ranges_data *)
 ** See Documentation/DMA-mapping.txt
 */
 struct pci_dma_ops {
-	int  (*dma_supported)(struct pci_dev *dev, dma_addr_t mask);
+	int  (*dma_supported)(struct pci_dev *dev, u64 mask);
 	void *(*alloc_consistent)(struct pci_dev *dev, size_t size, dma_addr_t *iova);
 	void (*free_consistent)(struct pci_dev *dev, size_t size, void *vaddr, dma_addr_t iova);
 	dma_addr_t (*map_single)(struct pci_dev *dev, void *addr, size_t size, int direction);
@@ -211,5 +211,8 @@ extern int pdc_pat;  /* arch/parisc/kernel/inventory.c */
 
 #define PCIBIOS_MIN_IO          0x10
 #define PCIBIOS_MIN_MEM         0x1000 /* NBPG - but pci/setup-res.c dies */
+
+/* Return the index of the PCI controller for device PDEV. */
+#define pci_controller_num(PDEV)	(0)
 
 #endif /* __ASM_PARISC_PCI_H */

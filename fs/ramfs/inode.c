@@ -4,6 +4,7 @@
  * Copyright (C) 2000 Linus Torvalds.
  *               2000 Transmeta Corp.
  *
+ * Usage limits added by David Gibson, Linuxcare Australia.
  * This file is released under the GPL.
  */
 
@@ -74,16 +75,6 @@ static int ramfs_readpage(struct file *file, struct page * page)
 	return 0;
 }
 
-/*
- * Writing: just make sure the page gets marked dirty, so that
- * the page stealer won't grab it.
- */
-static int ramfs_writepage(struct page *page)
-{
-	SetPageDirty(page);
-	return 0;
-}
-
 static int ramfs_prepare_write(struct file *file, struct page *page, unsigned offset, unsigned to)
 {
 	void *addr = kmap(page);
@@ -117,7 +108,7 @@ struct inode *ramfs_get_inode(struct super_block *sb, int mode, int dev)
 		inode->i_gid = current->fsgid;
 		inode->i_blksize = PAGE_CACHE_SIZE;
 		inode->i_blocks = 0;
-		inode->i_rdev = to_kdev_t(dev);
+		inode->i_rdev = NODEV;
 		inode->i_mapping->a_ops = &ramfs_aops;
 		inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 		switch (mode & S_IFMT) {
@@ -276,7 +267,7 @@ static int ramfs_sync_file(struct file * file, struct dentry *dentry, int datasy
 
 static struct address_space_operations ramfs_aops = {
 	readpage:	ramfs_readpage,
-	writepage:	ramfs_writepage,
+	writepage:	fail_writepage,
 	prepare_write:	ramfs_prepare_write,
 	commit_write:	ramfs_commit_write
 };
@@ -347,3 +338,5 @@ static void __exit exit_ramfs_fs(void)
 
 module_init(init_ramfs_fs)
 module_exit(exit_ramfs_fs)
+MODULE_LICENSE("GPL");
+

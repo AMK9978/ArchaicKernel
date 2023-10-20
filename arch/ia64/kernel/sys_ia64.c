@@ -19,37 +19,44 @@
 #include <asm/shmparam.h>
 #include <asm/uaccess.h>
 
-#define COLOR_ALIGN(addr)	(((addr) + SHMLBA - 1) & ~(SHMLBA - 1))
-
 unsigned long
-get_unmapped_area (unsigned long addr, unsigned long len)
+arch_get_unmapped_area (struct file *filp, unsigned long addr, unsigned long len,
+			unsigned long pgoff, unsigned long flags)
 {
+	long map_shared = (flags & MAP_SHARED);
+	unsigned long align_mask = PAGE_SIZE - 1;
 	struct vm_area_struct * vmm;
 
 	if (len > RGN_MAP_LIMIT)
-		return 0;
+		return -ENOMEM;
 	if (!addr)
 		addr = TASK_UNMAPPED_BASE;
 
-	if (current->thread.flags & IA64_THREAD_MAP_SHARED)
-		addr = COLOR_ALIGN(addr);
-	else
-		addr = PAGE_ALIGN(addr);
+	if (map_shared && (TASK_SIZE > 0xfffffffful))
+		/*
+		 * For 64-bit tasks, align shared segments to 1MB to avoid potential
+		 * performance penalty due to virtual aliasing (see ASDM).  For 32-bit
+		 * tasks, we prefer to avoid exhausting the address space too quickly by
+		 * limiting alignment to a single page.
+		 */
+		align_mask = SHMLBA - 1;
+
+	addr = (addr + align_mask) & ~align_mask;
 
 	for (vmm = find_vma(current->mm, addr); ; vmm = vmm->vm_next) {
 		/* At this point:  (!vmm || addr < vmm->vm_end). */
 		if (TASK_SIZE - len < addr)
-			return 0;
+			return -ENOMEM;
 		if (rgn_offset(addr) + len > RGN_MAP_LIMIT)	/* no risk of overflow here... */
-			return 0;
+			return -ENOMEM;
 		if (!vmm || addr + len <= vmm->vm_start)
 			return addr;
-		addr = vmm->vm_end;
+		addr = (vmm->vm_end + align_mask) & ~align_mask;
 	}
 }
 
 asmlinkage long
-ia64_getpriority (int which, int who, long arg2, long arg3, long arg4, long arg5, long arg6, 
+ia64_getpriority (int which, int who, long arg2, long arg3, long arg4, long arg5, long arg6,
 		  long arg7, long stack)
 {
 	struct pt_regs *regs = (struct pt_regs *) &stack;
@@ -102,7 +109,7 @@ ia64_brk (unsigned long brk, long arg1, long arg2, long arg3,
 	 * check and the clearing of r8.  However, we can't call sys_brk() because we need
 	 * to acquire the mmap_sem before we can do the test...
 	 */
-	down(&mm->mmap_sem);
+	down_write(&mm->mmap_sem);
 
 	if (brk < mm->end_code)
 		goto out;
@@ -142,7 +149,7 @@ set_brk:
 	mm->brk = brk;
 out:
 	retval = mm->brk;
-	up(&mm->mmap_sem);
+	up_write(&mm->mmap_sem);
 	regs->r8 = 0;		/* ensure large retval isn't mistaken as error code */
 	return retval;
 }
@@ -174,39 +181,44 @@ do_mmap2 (unsigned long addr, unsigned long len, int prot, int flags, int fd, un
 	unsigned long roff;
 	struct file *file = 0;
 
-	/*
-	 * A zero mmap always succeeds in Linux, independent of
-	 * whether or not the remaining arguments are valid.
-	 */
-	if (PAGE_ALIGN(len) == 0)
-		return addr;
-
-	/* don't permit mappings into unmapped space or the virtual page table of a region: */
-	roff = rgn_offset(addr);
-	if ((len | roff | (roff + len)) >= RGN_MAP_LIMIT)
-		return -EINVAL;
-
-	/* don't permit mappings that would cross a region boundary: */
-	if (rgn_index(addr) != rgn_index(addr + len))
-		return -EINVAL;
-
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 	if (!(flags & MAP_ANONYMOUS)) {
 		file = fget(fd);
 		if (!file)
 			return -EBADF;
+
+		if (!file->f_op || !file->f_op->mmap) {
+			addr = -ENODEV;
+			goto out;
+		}
 	}
 
-	if (flags & MAP_SHARED)
-		current->thread.flags |= IA64_THREAD_MAP_SHARED;
+	/*
+	 * A zero mmap always succeeds in Linux, independent of whether or not the
+	 * remaining arguments are valid.
+	 */
+	len = PAGE_ALIGN(len);
+	if (len == 0)
+		goto out;
 
-	down(&current->mm->mmap_sem);
+	/* don't permit mappings into unmapped space or the virtual page table of a region: */
+	roff = rgn_offset(addr);
+	if ((len | roff | (roff + len)) >= RGN_MAP_LIMIT) {
+		addr = -EINVAL;
+		goto out;
+	}
+
+	/* don't permit mappings that would cross a region boundary: */
+	if (rgn_index(addr) != rgn_index(addr + len)) {
+		addr = -EINVAL;
+		goto out;
+	}
+
+	down_write(&current->mm->mmap_sem);
 	addr = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 
-	current->thread.flags &= ~IA64_THREAD_MAP_SHARED;
-
-	if (file)
+out:	if (file)
 		fput(file);
 	return addr;
 }
@@ -246,15 +258,8 @@ sys_mmap (unsigned long addr, unsigned long len, int prot, int flags,
 asmlinkage long
 sys_vm86 (long arg0, long arg1, long arg2, long arg3)
 {
-        printk(KERN_ERR "sys_vm86(%lx, %lx, %lx, %lx)!\n", arg0, arg1, arg2, arg3);
-        return -ENOSYS;
-}
-
-asmlinkage long
-sys_modify_ldt (long arg0, long arg1, long arg2, long arg3)
-{
-        printk(KERN_ERR "sys_modify_ldt(%lx, %lx, %lx, %lx)!\n", arg0, arg1, arg2, arg3);
-        return -ENOSYS;
+	printk(KERN_ERR "sys_vm86(%lx, %lx, %lx, %lx)!\n", arg0, arg1, arg2, arg3);
+	return -ENOSYS;
 }
 
 asmlinkage unsigned long
@@ -392,7 +397,7 @@ ia64_oldfstat (unsigned int fd, struct ia64_oldstat *statbuf)
 	}
 	return err;
 }
- 
+
 #endif
 
 #ifndef CONFIG_PCI

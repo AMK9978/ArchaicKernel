@@ -5,7 +5,8 @@
  * deadlocks sometimes - you can not swap over TCP in general.
  * 
  * Copyright 1997-2000 Pavel Machek <pavel@ucw.cz>
- * 
+ * Parts copyright 2001 Steven Whitehouse <steve@chygwyn.com>
+ *
  * (part of code stolen from loop.c)
  *
  * 97-3-25 compiled 0-th version, not yet tested it 
@@ -18,18 +19,22 @@
  * 97-9-13 Cosmetic changes
  * 98-5-13 Attempt to make 64-bit-clean on 64-bit machines
  * 99-1-11 Attempt to make 64-bit-clean on 32-bit machines <ankry@mif.pg.gda.pl>
+ * 01-2-27 Fix to store proper blockcount for kernel (calculated using
+ *   BLOCK_SIZE_BITS, not device blocksize) <aga@permonline.ru>
+ * 01-3-11 Make nbd work with new Linux block layer code. It now supports
+ *   plugging like all the other block devices. Also added in MSG_MORE to
+ *   reduce number of partial TCP segments sent. <steve@chygwyn.com>
  *
  * possible FIXME: make set_sock / set_blksize / set_size / do_it one syscall
  * why not: would need verify_area and friends, would share yet another 
  *          structure with userland
  */
 
-#undef	NBD_PLUGGABLE
 #define PARANOIA
 #include <linux/major.h>
 
 #include <linux/module.h>
-
+#include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
 #include <linux/stat.h>
@@ -66,8 +71,6 @@ static int requests_in;
 static int requests_out;
 #endif
 
-static void nbd_plug_device(request_queue_t *q, kdev_t dev) { }
-
 static int nbd_open(struct inode *inode, struct file *file)
 {
 	int dev;
@@ -79,14 +82,13 @@ static int nbd_open(struct inode *inode, struct file *file)
 		return -ENODEV;
 
 	nbd_dev[dev].refcnt++;
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 /*
  *  Send or receive packet.
  */
-static int nbd_xmit(int send, struct socket *sock, char *buf, int size)
+static int nbd_xmit(int send, struct socket *sock, char *buf, int size, int msg_flags)
 {
 	mm_segment_t oldfs;
 	int result;
@@ -106,7 +108,7 @@ static int nbd_xmit(int send, struct socket *sock, char *buf, int size)
 
 
 	do {
-		sock->sk->allocation = GFP_BUFFER;
+		sock->sk->allocation = GFP_NOIO;
 		iov.iov_base = buf;
 		iov.iov_len = size;
 		msg.msg_name = NULL;
@@ -116,7 +118,7 @@ static int nbd_xmit(int send, struct socket *sock, char *buf, int size)
 		msg.msg_control = NULL;
 		msg.msg_controllen = 0;
 		msg.msg_namelen = 0;
-		msg.msg_flags = 0;
+		msg.msg_flags = msg_flags | MSG_NOSIGNAL;
 
 		if (send)
 			result = sock_sendmsg(sock, &msg, size);
@@ -149,23 +151,28 @@ void nbd_send_req(struct socket *sock, struct request *req)
 {
 	int result;
 	struct nbd_request request;
+	unsigned long size = req->nr_sectors << 9;
 
 	DEBUG("NBD: sending control, ");
 	request.magic = htonl(NBD_REQUEST_MAGIC);
 	request.type = htonl(req->cmd);
 	request.from = cpu_to_be64( (u64) req->sector << 9);
-	request.len = htonl(req->current_nr_sectors << 9);
+	request.len = htonl(size);
 	memcpy(request.handle, &req, sizeof(req));
 
-	result = nbd_xmit(1, sock, (char *) &request, sizeof(request));
+	result = nbd_xmit(1, sock, (char *) &request, sizeof(request), req->cmd == WRITE ? MSG_MORE : 0);
 	if (result <= 0)
 		FAIL("Sendmsg failed for control.");
 
 	if (req->cmd == WRITE) {
+		struct buffer_head *bh = req->bh;
 		DEBUG("data, ");
-		result = nbd_xmit(1, sock, req->buffer, req->current_nr_sectors << 9);
-		if (result <= 0)
-			FAIL("Send data failed.");
+		do {
+			result = nbd_xmit(1, sock, bh->b_data, bh->b_size, bh->b_reqnext == NULL ? 0 : MSG_MORE);
+			if (result <= 0)
+				FAIL("Send data failed.");
+			bh = bh->b_reqnext;
+		} while(bh);
 	}
 	return;
 
@@ -183,7 +190,7 @@ struct request *nbd_read_stat(struct nbd_device *lo)
 
 	DEBUG("reading control, ");
 	reply.magic = 0;
-	result = nbd_xmit(0, lo->sock, (char *) &reply, sizeof(reply));
+	result = nbd_xmit(0, lo->sock, (char *) &reply, sizeof(reply), MSG_WAITALL);
 	if (result <= 0)
 		HARDFAIL("Recv control failed.");
 	memcpy(&xreq, reply.handle, sizeof(xreq));
@@ -198,10 +205,14 @@ struct request *nbd_read_stat(struct nbd_device *lo)
 	if (ntohl(reply.error))
 		FAIL("Other side returned error.");
 	if (req->cmd == READ) {
+		struct buffer_head *bh = req->bh;
 		DEBUG("data, ");
-		result = nbd_xmit(0, lo->sock, req->buffer, req->current_nr_sectors << 9);
-		if (result <= 0)
-			HARDFAIL("Recv data failed.");
+		do {
+			result = nbd_xmit(0, lo->sock, bh->b_data, bh->b_size, MSG_WAITALL);
+			if (result <= 0)
+				HARDFAIL("Recv data failed.");
+			bh = bh->b_reqnext;
+		} while(bh);
 	}
 	DEBUG("done.\n");
 	return req;
@@ -215,7 +226,6 @@ struct request *nbd_read_stat(struct nbd_device *lo)
 void nbd_do_it(struct nbd_device *lo)
 {
 	struct request *req;
-	int dequeued;
 
 	down (&lo->queue_lock);
 	while (1) {
@@ -243,11 +253,9 @@ void nbd_do_it(struct nbd_device *lo)
 		list_del(&req->queue);
 		up (&lo->queue_lock);
 		
-		dequeued = nbd_end_request(req);
+		nbd_end_request(req);
 
 		down (&lo->queue_lock);
-		if (!dequeued)
-			list_add(&req->queue, &lo->queue_head);
 	}
  out:
 	up (&lo->queue_lock);
@@ -256,7 +264,6 @@ void nbd_do_it(struct nbd_device *lo)
 void nbd_clear_que(struct nbd_device *lo)
 {
 	struct request *req;
-	int dequeued;
 
 #ifdef PARANOIA
 	if (lo->magic != LO_MAGIC) {
@@ -281,11 +288,9 @@ void nbd_clear_que(struct nbd_device *lo)
 		list_del(&req->queue);
 		up(&lo->queue_lock);
 
-		dequeued = nbd_end_request(req);
+		nbd_end_request(req);
 
 		down(&lo->queue_lock);
-		if (!dequeued)
-			list_add(&req->queue, &lo->queue_head);
 	}
 }
 
@@ -413,16 +418,16 @@ static int nbd_ioctl(struct inode *inode, struct file *file,
 			nbd_blksize_bits[dev]++;
 			temp >>= 1;
 		}
-		nbd_sizes[dev] = nbd_bytesizes[dev] >> nbd_blksize_bits[dev];
-		nbd_bytesizes[dev] = nbd_sizes[dev] << nbd_blksize_bits[dev];
+		nbd_bytesizes[dev] &= ~(nbd_blksizes[dev]-1); 
+		nbd_sizes[dev] = nbd_bytesizes[dev] >> BLOCK_SIZE_BITS;
 		return 0;
 	case NBD_SET_SIZE:
-		nbd_sizes[dev] = arg >> nbd_blksize_bits[dev];
-		nbd_bytesizes[dev] = nbd_sizes[dev] << nbd_blksize_bits[dev];
+		nbd_bytesizes[dev] = arg & ~(nbd_blksizes[dev]-1); 
+		nbd_sizes[dev] = nbd_bytesizes[dev] >> BLOCK_SIZE_BITS;
 		return 0;
 	case NBD_SET_SIZE_BLOCKS:
-		nbd_sizes[dev] = arg;
-		nbd_bytesizes[dev] = ((u64) arg) << nbd_blksize_bits[dev];
+		nbd_bytesizes[dev] = ((u64) arg) << nbd_blksize_bits[dev]; 
+		nbd_sizes[dev] = nbd_bytesizes[dev] >> BLOCK_SIZE_BITS;
 		return 0;
 	case NBD_DO_IT:
 		if (!lo->file)
@@ -439,7 +444,9 @@ static int nbd_ioctl(struct inode *inode, struct file *file,
 		return 0;
 #endif
 	case BLKGETSIZE:
-		return put_user(nbd_bytesizes[dev] >> 9, (long *) arg);
+		return put_user(nbd_bytesizes[dev] >> 9, (unsigned long *) arg);
+	case BLKGETSIZE64:
+		return put_user((u64)nbd_bytesizes[dev], (u64 *) arg);
 	}
 	return -EINVAL;
 }
@@ -459,12 +466,12 @@ static int nbd_release(struct inode *inode, struct file *file)
 		printk(KERN_ALERT "nbd_release: refcount(%d) <= 0\n", lo->refcnt);
 	lo->refcnt--;
 	/* N.B. Doesn't lo->file need an fput?? */
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
 static struct block_device_operations nbd_fops =
 {
+	owner:		THIS_MODULE,
 	open:		nbd_open,
 	release:	nbd_release,
 	ioctl:		nbd_ioctl,
@@ -475,11 +482,7 @@ static struct block_device_operations nbd_fops =
  *  (Just smiley confuses emacs :-)
  */
 
-#ifdef MODULE
-#define nbd_init init_module
-#endif
-
-int nbd_init(void)
+static int __init nbd_init(void)
 {
 	int i;
 
@@ -499,9 +502,6 @@ int nbd_init(void)
 	blksize_size[MAJOR_NR] = nbd_blksizes;
 	blk_size[MAJOR_NR] = nbd_sizes;
 	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), do_nbd_request);
-#ifndef NBD_PLUGGABLE
-	blk_queue_pluggable(BLK_DEFAULT_QUEUE(MAJOR_NR), nbd_plug_device);
-#endif
 	blk_queue_headactive(BLK_DEFAULT_QUEUE(MAJOR_NR), 0);
 	for (i = 0; i < MAX_NBD; i++) {
 		nbd_dev[i].refcnt = 0;
@@ -513,7 +513,7 @@ int nbd_init(void)
 		nbd_blksizes[i] = 1024;
 		nbd_blksize_bits[i] = 10;
 		nbd_bytesizes[i] = 0x7ffffc00; /* 2GB */
-		nbd_sizes[i] = nbd_bytesizes[i] >> nbd_blksize_bits[i];
+		nbd_sizes[i] = nbd_bytesizes[i] >> BLOCK_SIZE_BITS;
 		register_disk(NULL, MKDEV(MAJOR_NR,i), 1, &nbd_fops,
 				nbd_bytesizes[i]>>9);
 	}
@@ -526,8 +526,7 @@ int nbd_init(void)
 	return 0;
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit nbd_cleanup(void)
 {
 	devfs_unregister (devfs_handle);
 	blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
@@ -537,4 +536,11 @@ void cleanup_module(void)
 	else
 		printk("nbd: module cleaned up.\n");
 }
-#endif
+
+module_init(nbd_init);
+module_exit(nbd_cleanup);
+
+MODULE_DESCRIPTION("Network Block Device");
+MODULE_LICENSE("GPL");
+
+

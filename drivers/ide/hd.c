@@ -22,6 +22,9 @@
  *  This is now a lightweight ST-506 driver. (Paul Gortmaker)
  *
  *  Modified 1995 Russell King for ARM processor.
+ *
+ *  Bugfix: max_sectors must be <= 255 or the wheels tend to come
+ *  off in a hurry once you queue things up - Paul G. 02/2001
  */
   
 /* Uncomment the following if you want verbose error reports. */
@@ -36,7 +39,7 @@
 #include <linux/kernel.h>
 #include <linux/hdreg.h>
 #include <linux/genhd.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
 #include <linux/mc146818rtc.h> /* CMOS defines */
@@ -104,6 +107,7 @@ static struct hd_struct hd[MAX_HD<<6];
 static int hd_sizes[MAX_HD<<6];
 static int hd_blocksizes[MAX_HD<<6];
 static int hd_hardsectsizes[MAX_HD<<6];
+static int hd_maxsect[MAX_HD<<6];
 
 static struct timer_list device_timer;
 
@@ -635,9 +639,11 @@ static int hd_ioctl(struct inode * inode, struct file * file,
 		}
 
          	case BLKGETSIZE:   /* Return device size */
-			if (!arg)  return -EINVAL;
 			return put_user(hd[MINOR(inode->i_rdev)].nr_sects, 
-					(long *) arg);
+					(unsigned long *) arg);
+         	case BLKGETSIZE64:
+			return put_user((u64)hd[MINOR(inode->i_rdev)].nr_sects << 9, 
+					(u64 *) arg);
 
 		case BLKRRPART: /* Re-read partition tables */
 			if (!capable(CAP_SYS_ADMIN))
@@ -684,16 +690,13 @@ static int hd_release(struct inode * inode, struct file * file)
 extern struct block_device_operations hd_fops;
 
 static struct gendisk hd_gendisk = {
-	MAJOR_NR,	/* Major number */	
-	"hd",		/* Major name */
-	6,		/* Bits to shift to get real from partition */
-	1 << 6,		/* Number of partitions per real */
-	hd,		/* hd struct */
-	hd_sizes,	/* block sizes */
-	0,		/* number */
-	NULL,		/* internal use, not presently used */
-	NULL,		/* next */
-	&hd_fops,       /* file operations */
+	major:		MAJOR_NR,
+	major_name:	"hd",
+	minor_shift:	6,
+	max_p:		1 << 6,
+	part:		hd,
+	sizes:		hd_sizes,
+	fops:		&hd_fops,
 };
 	
 static void hd_interrupt(int irq, void *dev_id, struct pt_regs *regs)
@@ -730,9 +733,11 @@ static void __init hd_geninit(void)
 	for(drive=0; drive < (MAX_HD << 6); drive++) {
 		hd_blocksizes[drive] = 1024;
 		hd_hardsectsizes[drive] = 512;
+		hd_maxsect[drive]=255;
 	}
 	blksize_size[MAJOR_NR] = hd_blocksizes;
 	hardsect_size[MAJOR_NR] = hd_hardsectsizes;
+	max_sectors[MAJOR_NR] = hd_maxsect;
 
 #ifdef __i386__
 	if (!NR_HD) {
@@ -836,8 +841,7 @@ int __init hd_init(void)
 	}
 	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
 	read_ahead[MAJOR_NR] = 8;		/* 8 sector (4kB) read-ahead */
-	hd_gendisk.next = gendisk_head;
-	gendisk_head = &hd_gendisk;
+	add_gendisk(&hd_gendisk);
 	init_timer(&device_timer);
 	device_timer.function = hd_times_out;
 	hd_geninit();
@@ -886,13 +890,7 @@ static int revalidate_hddisk(kdev_t dev, int maxusage)
 
 	for (i=max_p - 1; i >=0 ; i--) {
 		int minor = start + i;
-		kdev_t devi = MKDEV(MAJOR_NR, minor);
-		struct super_block *sb = get_super(devi); 
-
-		sync_dev(devi);
-		if (sb)
-			invalidate_inodes(sb);
-		invalidate_buffers(devi);
+		invalidate_device(MKDEV(MAJOR_NR, minor), 1);
 		gdev->part[minor].start_sect = 0;
 		gdev->part[minor].nr_sects = 0;
 	}

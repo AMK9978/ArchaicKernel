@@ -1,21 +1,25 @@
-/* $Id: keyboard.h,v 1.14 1999/08/19 22:56:33 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1994 - 1999 Ralf Baechle
+ * Copyright (C) 1994 - 1999, 2001 Ralf Baechle
+ * Copyright (C) 2001 MIPS Technologies, Inc.
  */
 #ifndef _ASM_KEYBOARD_H
 #define _ASM_KEYBOARD_H
 
 #ifdef __KERNEL__
 
+#include <linux/config.h>
 #include <linux/delay.h>
 #include <linux/ioport.h>
+#include <linux/kd.h>
 #include <asm/bootinfo.h>
 
 #define DISABLE_KBD_DURING_INTERRUPTS 0
+
+#ifdef CONFIG_PC_KEYB
 
 extern int pckbd_setkeycode(unsigned int scancode, unsigned int keycode);
 extern int pckbd_getkeycode(unsigned int scancode);
@@ -23,6 +27,7 @@ extern int pckbd_translate(unsigned char scancode, unsigned char *keycode,
 			   char raw_mode);
 extern char pckbd_unexpected_up(unsigned char keycode);
 extern void pckbd_leds(unsigned char leds);
+extern int pckbd_rate(struct kbd_repeat *rep);
 extern void pckbd_init_hw(void);
 extern unsigned char pckbd_sysrq_xlate[128];
 extern void kbd_forward_char (int ch);
@@ -32,8 +37,22 @@ extern void kbd_forward_char (int ch);
 #define kbd_translate		pckbd_translate
 #define kbd_unexpected_up	pckbd_unexpected_up
 #define kbd_leds		pckbd_leds
+#define kbd_rate		pckbd_rate
 #define kbd_init_hw		pckbd_init_hw
 #define kbd_sysrq_xlate         pckbd_sysrq_xlate
+
+#else
+
+extern int kbd_setkeycode(unsigned int scancode, unsigned int keycode);
+extern int kbd_getkeycode(unsigned int scancode);
+extern int kbd_translate(unsigned char scancode, unsigned char *keycode,
+	char raw_mode);
+extern char kbd_unexpected_up(unsigned char keycode);
+extern void kbd_leds(unsigned char leds);
+extern void kbd_init_hw(void);
+extern unsigned char *kbd_sysrq_xlate;
+
+#endif
 
 #define SYSRQ_KEY 0x54
 
@@ -45,7 +64,7 @@ struct kbd_ops {
 	void (*kbd_request_region)(void);
 	int (*kbd_request_irq)(void (*handler)(int, void *, struct pt_regs *));
 
-	/* PSaux driver resource managment  */
+	/* PSaux driver resource management  */
 	int (*aux_request_irq)(void (*handler)(int, void *, struct pt_regs *));
 	void (*aux_free_irq)(void);
 

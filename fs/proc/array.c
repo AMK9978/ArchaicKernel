@@ -151,13 +151,14 @@ static inline char * task_state(struct task_struct *p, char *buffer)
 	read_lock(&tasklist_lock);
 	buffer += sprintf(buffer,
 		"State:\t%s\n"
+		"Tgid:\t%d\n"
 		"Pid:\t%d\n"
 		"PPid:\t%d\n"
 		"TracerPid:\t%d\n"
 		"Uid:\t%d\t%d\t%d\t%d\n"
 		"Gid:\t%d\t%d\t%d\t%d\n",
-		get_task_state(p),
-		p->pid, p->p_opptr->pid, p->p_pptr->pid != p->p_opptr->pid ? p->p_pptr->pid : 0,
+		get_task_state(p), p->tgid,
+		p->pid, p->pid ? p->p_opptr->pid : 0, 0,
 		p->uid, p->euid, p->suid, p->fsuid,
 		p->gid, p->egid, p->sgid, p->fsgid);
 	read_unlock(&tasklist_lock);	
@@ -181,7 +182,7 @@ static inline char * task_mem(struct mm_struct *mm, char *buffer)
 	unsigned long data = 0, stack = 0;
 	unsigned long exec = 0, lib = 0;
 
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 	for (vma = mm->mmap; vma; vma = vma->vm_next) {
 		unsigned long len = (vma->vm_end - vma->vm_start) >> 10;
 		if (!vma->vm_file) {
@@ -212,7 +213,7 @@ static inline char * task_mem(struct mm_struct *mm, char *buffer)
 		mm->rss << (PAGE_SHIFT-10),
 		data - stack, stack,
 		exec - lib, lib);
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	return buffer;
 }
 
@@ -258,7 +259,7 @@ static inline char * task_sig(struct task_struct *p, char *buffer)
 	return buffer;
 }
 
-extern inline char *task_cap(struct task_struct *p, char *buffer)
+static inline char *task_cap(struct task_struct *p, char *buffer)
 {
     return buffer + sprintf(buffer, "CapInh:\t%016x\n"
 			    "CapPrm:\t%016x\n"
@@ -273,9 +274,6 @@ int proc_pid_status(struct task_struct *task, char * buffer)
 {
 	char * orig = buffer;
 	struct mm_struct *mm;
-#if defined(CONFIG_ARCH_S390)
-	int line,len;
-#endif
 
 	buffer = task_name(task, buffer);
 	buffer = task_state(task, buffer);
@@ -291,8 +289,7 @@ int proc_pid_status(struct task_struct *task, char * buffer)
 	buffer = task_sig(task, buffer);
 	buffer = task_cap(task, buffer);
 #if defined(CONFIG_ARCH_S390)
-	for(line=0;(len=sprintf_regs(line,buffer,task,NULL,NULL))!=0;line++)
-		buffer+=len;
+	buffer = task_show_regs(task, buffer);
 #endif
 	return buffer - orig;
 }
@@ -321,7 +318,7 @@ int proc_pid_stat(struct task_struct *task, char * buffer)
 	task_unlock(task);
 	if (mm) {
 		struct vm_area_struct *vma;
-		down(&mm->mmap_sem);
+		down_read(&mm->mmap_sem);
 		vma = mm->mmap;
 		while (vma) {
 			vsize += vma->vm_end - vma->vm_start;
@@ -329,7 +326,7 @@ int proc_pid_stat(struct task_struct *task, char * buffer)
 		}
 		eip = KSTK_EIP(task);
 		esp = KSTK_ESP(task);
-		up(&mm->mmap_sem);
+		up_read(&mm->mmap_sem);
 	}
 
 	wchan = get_wchan(task);
@@ -343,7 +340,7 @@ int proc_pid_stat(struct task_struct *task, char * buffer)
 	nice = task->nice;
 
 	read_lock(&tasklist_lock);
-	ppid = task->p_opptr->pid;
+	ppid = task->pid ? task->p_opptr->pid : 0;
 	read_unlock(&tasklist_lock);
 	res = sprintf(buffer,"%d (%s) %c %d %d %d %d %d %lu %lu \
 %lu %lu %lu %lu %lu %ld %ld %ld %ld %ld %ld %lu %lu %ld %lu %lu %lu %lu %lu \
@@ -425,13 +422,12 @@ static inline void statm_pte_range(pmd_t * pmd, unsigned long address, unsigned 
 		++*total;
 		if (!pte_present(page))
 			continue;
+		ptpage = pte_page(page);
+		if ((!VALID_PAGE(ptpage)) || PageReserved(ptpage))
+			continue;
 		++*pages;
 		if (pte_dirty(page))
 			++*dirty;
-		ptpage = pte_page(page);
-		if ((!VALID_PAGE(ptpage)) || 
-					PageReserved(ptpage))
-			continue;
 		if (page_count(pte_page(page)) > 1)
 			++*shared;
 	} while (address < end);
@@ -484,7 +480,7 @@ int proc_pid_statm(struct task_struct *task, char * buffer)
 	task_unlock(task);
 	if (mm) {
 		struct vm_area_struct * vma;
-		down(&mm->mmap_sem);
+		down_read(&mm->mmap_sem);
 		vma = mm->mmap;
 		while (vma) {
 			pgd_t *pgd = pgd_offset(mm, vma->vm_start);
@@ -505,7 +501,7 @@ int proc_pid_statm(struct task_struct *task, char * buffer)
 				drs += pages;
 			vma = vma->vm_next;
 		}
-		up(&mm->mmap_sem);
+		up_read(&mm->mmap_sem);
 		mmput(mm);
 	}
 	return sprintf(buffer,"%d %d %d %d %d %d %d\n",
@@ -527,11 +523,8 @@ int proc_pid_statm(struct task_struct *task, char * buffer)
 /*
  * For the /proc/<pid>/maps file, we use fixed length records, each containing
  * a single line.
- */
-#define MAPS_LINE_LENGTH	4096
-#define MAPS_LINE_SHIFT		12
-/*
- * f_pos = (number of the vma in the task->mm->mmap list) * MAPS_LINE_LENGTH
+ *
+ * f_pos = (number of the vma in the task->mm->mmap list) * PAGE_SIZE
  *         + (index into the line)
  */
 /* for systems with sizeof(void*) == 4: */
@@ -542,138 +535,142 @@ int proc_pid_statm(struct task_struct *task, char * buffer)
 #define MAPS_LINE_FORMAT8	  "%016lx-%016lx %s %016lx %s %lu"
 #define MAPS_LINE_MAX8	73 /* sum of 16  1  16  1 4 1 16 1 5 1 10 1 */
 
-#define MAPS_LINE_MAX	MAPS_LINE_MAX8
+#define MAPS_LINE_FORMAT	(sizeof(void*) == 4 ? MAPS_LINE_FORMAT4 : MAPS_LINE_FORMAT8)
+#define MAPS_LINE_MAX	(sizeof(void*) == 4 ?  MAPS_LINE_MAX4 :  MAPS_LINE_MAX8)
 
+static int proc_pid_maps_get_line (char *buf, struct vm_area_struct *map)
+{
+	/* produce the next line */
+	char *line;
+	char str[5];
+	int flags;
+	kdev_t dev;
+	unsigned long ino;
+	int len;
+
+	flags = map->vm_flags;
+
+	str[0] = flags & VM_READ ? 'r' : '-';
+	str[1] = flags & VM_WRITE ? 'w' : '-';
+	str[2] = flags & VM_EXEC ? 'x' : '-';
+	str[3] = flags & VM_MAYSHARE ? 's' : 'p';
+	str[4] = 0;
+
+	dev = 0;
+	ino = 0;
+	if (map->vm_file != NULL) {
+		dev = map->vm_file->f_dentry->d_inode->i_dev;
+		ino = map->vm_file->f_dentry->d_inode->i_ino;
+		line = d_path(map->vm_file->f_dentry,
+			      map->vm_file->f_vfsmnt,
+			      buf, PAGE_SIZE);
+		buf[PAGE_SIZE-1] = '\n';
+		line -= MAPS_LINE_MAX;
+		if(line < buf)
+			line = buf;
+	} else
+		line = buf;
+
+	len = sprintf(line,
+		      MAPS_LINE_FORMAT,
+		      map->vm_start, map->vm_end, str, map->vm_pgoff << PAGE_SHIFT,
+		      kdevname(dev), ino);
+
+	if(map->vm_file) {
+		int i;
+		for(i = len; i < MAPS_LINE_MAX; i++)
+			line[i] = ' ';
+		len = buf + PAGE_SIZE - line;
+		memmove(buf, line, len);
+	} else
+		line[len++] = '\n';
+	return len;
+}
 
 ssize_t proc_pid_read_maps (struct task_struct *task, struct file * file, char * buf,
 			  size_t count, loff_t *ppos)
 {
 	struct mm_struct *mm;
-	struct vm_area_struct * map, * next;
-	char * destptr = buf, * buffer;
-	loff_t lineno;
-	ssize_t column, i;
-	int volatile_task;
+	struct vm_area_struct * map;
+	char *tmp, *kbuf;
 	long retval;
+	int off, lineno, loff;
 
+	/* reject calls with out of range parameters immediately */
+	retval = 0;
+	if (*ppos > LONG_MAX)
+		goto out;
+	if (count == 0)
+		goto out;
+	off = (long)*ppos;
 	/*
 	 * We might sleep getting the page, so get it first.
 	 */
 	retval = -ENOMEM;
-	buffer = (char*)__get_free_page(GFP_KERNEL);
-	if (!buffer)
+	kbuf = (char*)__get_free_page(GFP_KERNEL);
+	if (!kbuf)
 		goto out;
 
-	if (count == 0)
-		goto getlen_out;
+	tmp = (char*)__get_free_page(GFP_KERNEL);
+	if (!tmp)
+		goto out_free1;
+
 	task_lock(task);
 	mm = task->mm;
 	if (mm)
 		atomic_inc(&mm->mm_users);
 	task_unlock(task);
+	retval = 0;
 	if (!mm)
-		goto getlen_out;
+		goto out_free2;
 
-	/* Check whether the mmaps could change if we sleep */
-	volatile_task = (task != current || atomic_read(&mm->mm_users) > 2);
-
-	/* decode f_pos */
-	lineno = *ppos >> MAPS_LINE_SHIFT;
-	column = *ppos & (MAPS_LINE_LENGTH-1);
-
-	/* quickly go to line lineno */
-	down(&mm->mmap_sem);
-	for (map = mm->mmap, i = 0; map && (i < lineno); map = map->vm_next, i++)
-		continue;
-
-	for ( ; map ; map = next ) {
-		/* produce the next line */
-		char *line;
-		char str[5], *cp = str;
-		int flags;
-		kdev_t dev;
-		unsigned long ino;
-		int maxlen = (sizeof(void*) == 4) ?
-			MAPS_LINE_MAX4 :  MAPS_LINE_MAX8;
+	down_read(&mm->mmap_sem);
+	map = mm->mmap;
+	lineno = 0;
+	loff = 0;
+	if (count > PAGE_SIZE)
+		count = PAGE_SIZE;
+	while (map) {
 		int len;
-
-		/*
-		 * Get the next vma now (but it won't be used if we sleep).
-		 */
-		next = map->vm_next;
-		flags = map->vm_flags;
-
-		*cp++ = flags & VM_READ ? 'r' : '-';
-		*cp++ = flags & VM_WRITE ? 'w' : '-';
-		*cp++ = flags & VM_EXEC ? 'x' : '-';
-		*cp++ = flags & VM_MAYSHARE ? 's' : 'p';
-		*cp++ = 0;
-
-		dev = 0;
-		ino = 0;
-		if (map->vm_file != NULL) {
-			dev = map->vm_file->f_dentry->d_inode->i_dev;
-			ino = map->vm_file->f_dentry->d_inode->i_ino;
-			line = d_path(map->vm_file->f_dentry,
-				      map->vm_file->f_vfsmnt,
-				      buffer, PAGE_SIZE);
-			buffer[PAGE_SIZE-1] = '\n';
-			line -= maxlen;
-			if(line < buffer)
-				line = buffer;
-		} else
-			line = buffer;
-
-		len = sprintf(line,
-			      sizeof(void*) == 4 ? MAPS_LINE_FORMAT4 : MAPS_LINE_FORMAT8,
-			      map->vm_start, map->vm_end, str, map->vm_pgoff << PAGE_SHIFT,
-			      kdevname(dev), ino);
-
-		if(map->vm_file) {
-			for(i = len; i < maxlen; i++)
-				line[i] = ' ';
-			len = buffer + PAGE_SIZE - line;
-		} else
-			line[len++] = '\n';
-		if (column >= len) {
-			column = 0; /* continue with next line at column 0 */
-			lineno++;
-			continue; /* we haven't slept */
+		if (off > PAGE_SIZE) {
+			off -= PAGE_SIZE;
+			goto next;
 		}
-
-		i = len-column;
-		if (i > count)
-			i = count;
-		up(&mm->mmap_sem);
-		copy_to_user(destptr, line+column, i); /* may have slept */
-		down(&mm->mmap_sem);
-		destptr += i;
-		count   -= i;
-		column  += i;
-		if (column >= len) {
-			column = 0; /* next time: next line at column 0 */
-			lineno++;
+		len = proc_pid_maps_get_line(tmp, map);
+		len -= off;
+		if (len > 0) {
+			if (retval+len > count) {
+				/* only partial line transfer possible */
+				len = count - retval;
+				/* save the offset where the next read
+				 * must start */
+				loff = len+off;
+			}
+			memcpy(kbuf+retval, tmp+off, len);
+			retval += len;
 		}
-
-		/* done? */
-		if (count == 0)
+		off = 0;
+next:
+		if (!loff)
+			lineno++;
+		if (retval >= count)
 			break;
-
-		/* By writing to user space, we might have slept.
-		 * Stop the loop, to avoid a race condition.
-		 */
-		if (volatile_task)
-			break;
+		if (loff) BUG();
+		map = map->vm_next;
 	}
-	up(&mm->mmap_sem);
-
-	/* encode f_pos */
-	*ppos = (lineno << MAPS_LINE_SHIFT) + column;
+	up_read(&mm->mmap_sem);
 	mmput(mm);
 
-getlen_out:
-	retval = destptr - buf;
-	free_page((unsigned long)buffer);
+	if (retval > count) BUG();
+	if (copy_to_user(buf, kbuf, retval))
+		retval = -EFAULT;
+	else
+		*ppos = (lineno << PAGE_SHIFT) + loff;
+
+out_free2:
+	free_page((unsigned long)tmp);
+out_free1:
+	free_page((unsigned long)kbuf);
 out:
 	return retval;
 }

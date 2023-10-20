@@ -181,8 +181,10 @@ static int i810tco_release (struct inode *inode, struct file *file)
 	/*
 	 *      Shut off the timer.
 	 */
+#ifdef CONFIG_WATCHDOG_NOWAYOUT
 	tco_timer_stop ();
 	timer_alive = 0;
+#endif	
 	return 0;
 }
 
@@ -213,7 +215,7 @@ static int i810tco_ioctl (struct inode *inode, struct file *file,
 	};
 	switch (cmd) {
 	default:
-		return -ENOIOCTLCMD;
+		return -ENOTTY;
 	case WDIOC_GETSUPPORT:
 		if (copy_to_user
 		    ((struct watchdog_info *) arg, &ident, sizeof (ident)))
@@ -230,18 +232,41 @@ static int i810tco_ioctl (struct inode *inode, struct file *file,
 	}
 }
 
+/*
+ * Data for PCI driver interface
+ *
+ * This data only exists for exporting the supported
+ * PCI ids via MODULE_DEVICE_TABLE.  We do not actually
+ * register a pci_driver, because someone else might one day
+ * want to register another driver on the same PCI id.
+ */
+static struct pci_device_id i810tco_pci_tbl[] __initdata = {
+	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801AA_0,	PCI_ANY_ID, PCI_ANY_ID, },
+	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801AB_0,	PCI_ANY_ID, PCI_ANY_ID, },
+	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801BA_0,	PCI_ANY_ID, PCI_ANY_ID, },
+	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801BA_10,	PCI_ANY_ID, PCI_ANY_ID, },
+	{ 0, },
+};
+MODULE_DEVICE_TABLE (pci, i810tco_pci_tbl);
+
 static struct pci_dev *i810tco_pci;
 
 static unsigned char i810tco_getdevice (void)
 {
+	struct pci_dev *dev;
 	u8 val1, val2;
 	u16 badr;
 	/*
-	 *      Find the PCI device which has vendor id 0x8086
-	 *      and device ID 0x2410
+	 *      Find the PCI device
 	 */
-	i810tco_pci = pci_find_device (PCI_VENDOR_ID_INTEL,
-				       PCI_DEVICE_ID_INTEL_82801AA_0, NULL);
+
+	pci_for_each_dev(dev) {
+		if (pci_match_device(i810tco_pci_tbl, dev)) {
+			i810tco_pci = dev;
+			break;
+		}
+	}
+
 	if (i810tco_pci) {
 		/*
 		 *      Find the ACPI base I/O address which is the base
@@ -266,7 +291,7 @@ static unsigned char i810tco_getdevice (void)
 			pci_write_config_byte (i810tco_pci, 0xd4, val1);
 			pci_read_config_byte (i810tco_pci, 0xd4, &val1);
 			if (val1 & 0x02) {
-				printk (KERN_ERR "i810tco init: failed to reset NO_REBOOT flag\n");
+				printk (KERN_ERR "i810tco init: failed to reset NO_REBOOT flag, reboot disabled by hardware\n");
 				return 0;	/* Cannot reset NO_REBOOT bit */
 			}
 		}
@@ -338,3 +363,5 @@ static void __exit watchdog_cleanup (void)
 
 module_init(watchdog_init);
 module_exit(watchdog_cleanup);
+
+MODULE_LICENSE("GPL");

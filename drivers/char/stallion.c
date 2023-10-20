@@ -29,8 +29,9 @@
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/version.h> /* for linux/stallion.h */
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
+#include <linux/tty.h>
 #include <linux/tty_flip.h>
 #include <linux/serial.h>
 #include <linux/cd1400.h>
@@ -138,8 +139,13 @@ static int	stl_nrbrds = sizeof(stl_brdconf) / sizeof(stlconf_t);
 static char	*stl_drvtitle = "Stallion Multiport Serial Driver";
 static char	*stl_drvname = "stallion";
 static char	*stl_drvversion = "5.6.0";
+#ifdef CONFIG_DEVFS_FS
+static char	*stl_serialname = "tts/E%d";
+static char	*stl_calloutname = "cua/E%d";
+#else
 static char	*stl_serialname = "ttyE";
 static char	*stl_calloutname = "cue";
+#endif
 
 static struct tty_driver	stl_serial;
 static struct tty_driver	stl_callout;
@@ -164,12 +170,8 @@ static DECLARE_MUTEX(stl_tmpwritesem);
  *	at 9600, 8 data bits, 1 stop bit.
  */
 static struct termios		stl_deftermios = {
-	0,
-	0,
-	(B9600 | CS8 | CREAD | HUPCL | CLOCAL),
-	0,
-	0,
-	INIT_C_CC
+	c_cflag:	(B9600 | CS8 | CREAD | HUPCL | CLOCAL),
+	c_cc:		INIT_C_CC,
 };
 
 /*
@@ -317,6 +319,7 @@ static stlbrdtype_t	stl_brdstr[] = {
  */
 MODULE_AUTHOR("Greg Ungerer");
 MODULE_DESCRIPTION("Stallion Multiport Serial Driver");
+MODULE_LICENSE("GPL");
 
 MODULE_PARM(board0, "1-4s");
 MODULE_PARM_DESC(board0, "Board 0 config -> name[,ioaddr[,ioaddr2][,irq]]");

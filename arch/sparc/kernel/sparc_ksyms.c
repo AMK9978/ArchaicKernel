@@ -1,4 +1,4 @@
-/* $Id: sparc_ksyms.c,v 1.105 2000/12/11 05:24:25 anton Exp $
+/* $Id: sparc_ksyms.c,v 1.107 2001/07/17 16:17:33 anton Exp $
  * arch/sparc/kernel/ksyms.c: Sparc specific ksyms support.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -116,11 +116,6 @@ EXPORT_SYMBOL(__up);
 EXPORT_SYMBOL(__down);
 EXPORT_SYMBOL(__down_trylock);
 EXPORT_SYMBOL(__down_interruptible);
-/* rw semaphores */
-EXPORT_SYMBOL_NOVERS(___down_read);
-EXPORT_SYMBOL_NOVERS(___down_write);
-EXPORT_SYMBOL_NOVERS(___up_read);
-EXPORT_SYMBOL_NOVERS(___up_write);
 
 EXPORT_SYMBOL(sparc_valid_addr_bitmap);
 
@@ -132,8 +127,6 @@ EXPORT_SYMBOL_PRIVATE(_atomic_sub);
 EXPORT_SYMBOL_PRIVATE(_set_bit);
 EXPORT_SYMBOL_PRIVATE(_clear_bit);
 EXPORT_SYMBOL_PRIVATE(_change_bit);
-EXPORT_SYMBOL_PRIVATE(_set_le_bit);
-EXPORT_SYMBOL_PRIVATE(_clear_le_bit);
 
 #ifdef CONFIG_SMP
 /* Kernel wide locking */
@@ -154,6 +147,7 @@ EXPORT_SYMBOL(__cpu_logical_map);
 #endif
 
 EXPORT_SYMBOL(udelay);
+EXPORT_SYMBOL(mostek_lock);
 EXPORT_SYMBOL(mstk48t02_regs);
 #if CONFIG_SUN_AUXIO
 EXPORT_SYMBOL(auxio_register);

@@ -20,7 +20,7 @@ ip_nf_nat-objs		:= ip_nat_core.o ip_nat_proto_unknown.o ip_nat_proto_tcp.o ip_na
 
 # objects for the standalone - connection tracking / NAT
 ip_conntrack-objs	:= ip_conntrack_standalone.o $(ip_nf_conntrack-objs)
-iptable_nat-objs	:= ip_nat_standalone.o ip_nat_rule.o $(ip_nf_nat-objs)
+iptable_nat-objs	:= ip_nat_standalone.o ip_nat_rule.o ip_nat_helper.o $(ip_nf_nat-objs)
 
 # objects for backwards compatibility mode
 ip_nf_compat-objs	:= ip_fw_compat.o ip_fw_compat_redir.o ip_fw_compat_masq.o $(ip_nf_conntrack-objs) $(ip_nf_nat-objs)
@@ -31,11 +31,15 @@ ipchains-objs		:= $(ip_nf_compat-objs) ipchains_core.o
 # connection tracking
 obj-$(CONFIG_IP_NF_CONNTRACK) += ip_conntrack.o
 
+# IRC support
+obj-$(CONFIG_IP_NF_IRC) += ip_conntrack_irc.o
+obj-$(CONFIG_IP_NF_NAT_IRC) += ip_nat_irc.o
+
 # connection tracking helpers
 obj-$(CONFIG_IP_NF_FTP) += ip_conntrack_ftp.o
 
 # NAT helpers 
-obj-$(CONFIG_IP_NF_FTP) += ip_nat_ftp.o
+obj-$(CONFIG_IP_NF_NAT_FTP) += ip_nat_ftp.o
 
 # generic IP tables 
 obj-$(CONFIG_IP_NF_IPTABLES) += ip_tables.o
@@ -52,8 +56,13 @@ obj-$(CONFIG_IP_NF_MATCH_MAC) += ipt_mac.o
 obj-$(CONFIG_IP_NF_MATCH_MULTIPORT) += ipt_multiport.o
 obj-$(CONFIG_IP_NF_MATCH_OWNER) += ipt_owner.o
 obj-$(CONFIG_IP_NF_MATCH_TOS) += ipt_tos.o
+
+obj-$(CONFIG_IP_NF_MATCH_LENGTH) += ipt_length.o
+
+obj-$(CONFIG_IP_NF_MATCH_TTL) += ipt_ttl.o
 obj-$(CONFIG_IP_NF_MATCH_STATE) += ipt_state.o
 obj-$(CONFIG_IP_NF_MATCH_UNCLEAN) += ipt_unclean.o
+obj-$(CONFIG_IP_NF_MATCH_TCPMSS) += ipt_tcpmss.o
 
 # targets
 obj-$(CONFIG_IP_NF_TARGET_REJECT) += ipt_REJECT.o
@@ -62,7 +71,9 @@ obj-$(CONFIG_IP_NF_TARGET_TOS) += ipt_TOS.o
 obj-$(CONFIG_IP_NF_TARGET_MARK) += ipt_MARK.o
 obj-$(CONFIG_IP_NF_TARGET_MASQUERADE) += ipt_MASQUERADE.o
 obj-$(CONFIG_IP_NF_TARGET_REDIRECT) += ipt_REDIRECT.o
+obj-$(CONFIG_IP_NF_NAT_SNMP_BASIC) += ip_nat_snmp_basic.o
 obj-$(CONFIG_IP_NF_TARGET_LOG) += ipt_LOG.o
+obj-$(CONFIG_IP_NF_TARGET_TCPMSS) += ipt_TCPMSS.o
 
 # backwards compatibility 
 obj-$(CONFIG_IP_NF_COMPAT_IPCHAINS) += ipchains.o

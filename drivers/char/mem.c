@@ -13,12 +13,13 @@
 #include <linux/miscdevice.h>
 #include <linux/tpqic02.h>
 #include <linux/ftape.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/mman.h>
 #include <linux/random.h>
 #include <linux/init.h>
 #include <linux/raw.h>
+#include <linux/tty.h>
 #include <linux/capability.h>
 
 #include <asm/uaccess.h>
@@ -27,12 +28,6 @@
 
 #ifdef CONFIG_I2C
 extern int i2c_init_all(void);
-#endif
-#ifdef CONFIG_ISDN
-int isdn_init(void);
-#endif
-#ifdef CONFIG_VIDEO_DEV
-extern int videodev_init(void);
 #endif
 #ifdef CONFIG_FB
 extern void fbmem_init(void);
@@ -43,8 +38,8 @@ extern void prom_con_init(void);
 #ifdef CONFIG_MDA_CONSOLE
 extern void mda_console_init(void);
 #endif
-#if defined(CONFIG_ADB)
-extern void adbdev_init(void);
+#if defined(CONFIG_S390_TAPE) && defined(CONFIG_S390_TAPE_CHAR)
+extern void tapechar_init(void);
 #endif
      
 static ssize_t do_write_mem(struct file * file, void *p, unsigned long realp,
@@ -136,7 +131,7 @@ static inline pgprot_t pgprot_noncached(pgprot_t _prot)
 {
 	unsigned long prot = pgprot_val(_prot);
 
-#if defined(__i386__)
+#if defined(__i386__) || defined(__x86_64__)
 	/* On PPro and successors, PCD alone doesn't always mean 
 	    uncached because of interactions with the MTRRs. PCD | PWT
 	    means definitely uncached. */ 
@@ -155,11 +150,6 @@ static inline pgprot_t pgprot_noncached(pgprot_t _prot)
 	/* Use no-cache mode, serialized */
 	else if (MMU_IS_040 || MMU_IS_060)
 		prot = (prot & _CACHEMASK040) | _PAGE_NOCACHE_S;
-#elif defined(__mips__)
-	prot = (prot & ~_CACHE_MASK) | _CACHE_UNCACHED;
-#elif defined(__arm__) && defined(CONFIG_CPU_32)
-	/* Turn off caching for all I/O areas */
-	prot &= ~(L_PTE_CACHEABLE | L_PTE_BUFFERABLE);
 #endif
 
 	return __pgprot(prot);
@@ -265,7 +255,9 @@ static ssize_t read_kmem(struct file *file, char *buf,
 			if (len > PAGE_SIZE)
 				len = PAGE_SIZE;
 			len = vread(kbuf, (char *)p, len);
-			if (len && copy_to_user(buf, kbuf, len)) {
+			if (!len)
+				break;
+			if (copy_to_user(buf, kbuf, len)) {
 				free_page((unsigned long)kbuf);
 				return -EFAULT;
 			}
@@ -358,7 +350,7 @@ static inline size_t read_zero_pagealigned(char * buf, size_t size)
 
 	mm = current->mm;
 	/* Oops, this was forgotten before. -ben */
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 
 	/* For private mappings, just map in zero pages. */
 	for (vma = find_vma(mm, addr); vma; vma = vma->vm_next) {
@@ -372,10 +364,8 @@ static inline size_t read_zero_pagealigned(char * buf, size_t size)
 		if (count > size)
 			count = size;
 
-		flush_cache_range(mm, addr, addr + count);
 		zap_page_range(mm, addr, count);
         	zeromap_page_range(addr, count, PAGE_COPY);
-        	flush_tlb_range(mm, addr, addr + count);
 
 		size -= count;
 		buf += count;
@@ -384,7 +374,7 @@ static inline size_t read_zero_pagealigned(char * buf, size_t size)
 			goto out_up;
 	}
 
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	
 	/* The shared case is hard. Let's do the conventional zeroing. */ 
 	do {
@@ -399,7 +389,7 @@ static inline size_t read_zero_pagealigned(char * buf, size_t size)
 
 	return size;
 out_up:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	return size;
 }
 
@@ -620,7 +610,6 @@ int __init chr_dev_init(void)
 		printk("unable to get major %d for memory devs\n", MEM_MAJOR);
 	memory_devfs_register();
 	rand_initialize();
-	raw_init();
 #ifdef CONFIG_I2C
 	i2c_init_all();
 #endif
@@ -634,9 +623,6 @@ int __init chr_dev_init(void)
 	mda_console_init();
 #endif
 	tty_init();
-#ifdef CONFIG_PRINTER
-	lp_init();
-#endif
 #ifdef CONFIG_M68K_PRINTER
 	lp_m68k_init();
 #endif
@@ -644,17 +630,13 @@ int __init chr_dev_init(void)
 #if CONFIG_QIC02_TAPE
 	qic02_tape_init();
 #endif
-#if CONFIG_ISDN
-	isdn_init();
-#endif
 #ifdef CONFIG_FTAPE
 	ftape_init();
 #endif
-#if defined(CONFIG_ADB)
-	adbdev_init();
-#endif
-#ifdef CONFIG_VIDEO_DEV
-	videodev_init();
+#if defined(CONFIG_S390_TAPE) && defined(CONFIG_S390_TAPE_CHAR)
+	tapechar_init();
 #endif
 	return 0;
 }
+
+__initcall(chr_dev_init);

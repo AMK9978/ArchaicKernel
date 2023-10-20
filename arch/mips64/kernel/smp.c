@@ -12,6 +12,7 @@
 #include <asm/hardirq.h>
 #include <asm/softirq.h>
 #include <asm/mmu_context.h>
+#include <asm/irq.h>
 
 #ifdef CONFIG_SGI_IP27
 
@@ -23,8 +24,6 @@
 
 #define DORESCHED	0xab
 #define DOCALL		0xbc
-
-#define IRQ_TO_SWLEVEL(i)	i + 7	/* Delete this from here */
 
 static void sendintr(int destid, unsigned char status)
 {
@@ -44,7 +43,7 @@ static void sendintr(int destid, unsigned char status)
 	 * with the CPU we want to send the interrupt to.
 	 */
 	REMOTE_HUB_SEND_INTR(COMPACT_TO_NASID_NODEID(cputocnode(destid)),
-			IRQ_TO_SWLEVEL(irq));
+			FAST_IRQ_TO_LEVEL(irq));
 #else
 	<< Bomb!  Must redefine this for more than 2 CPUS. >>
 #endif
@@ -57,7 +56,7 @@ spinlock_t kernel_flag = SPIN_LOCK_UNLOCKED;
 int smp_threads_ready;	/* Not used */
 atomic_t smp_commenced = ATOMIC_INIT(0);
 struct cpuinfo_mips cpu_data[NR_CPUS];
-int smp_num_cpus;		/* Number that came online.  */
+int smp_num_cpus = 1;		/* Number that came online.  */
 int __cpu_number_map[NR_CPUS];
 int __cpu_logical_map[NR_CPUS];
 cycles_t cacheflush_time;

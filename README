@@ -40,6 +40,12 @@ DOCUMENTATION:
    contains information about the problems, which may result by upgrading
    your kernel.
 
+ - The Documentation/DocBook/ subdirectory contains several guides for
+   kernel developers and users.  These guides can be rendered in a
+   number of formats:  PostScript (.ps), PDF, and HTML, among others.
+   After installation, "make psdocs", "make pdfdocs", or "make htmldocs"
+   will render the documentation in the requested format.
+
 INSTALLING the kernel:
 
  - If you install the full sources, put the kernel tarball in a
@@ -186,11 +192,7 @@ COMPILING the kernel:
    to the place where your regular bootable kernel is found. 
 
    For some, this is on a floppy disk, in which case you can copy the
-   kernel bzImage file to /dev/fd0 to make a bootable floppy. Please note
-   that you can not boot a kernel by directly dumping it to a 720k
-   double-density 3.5" floppy.  In this case, it is highly recommended
-   that you install LILO on your double-density boot floppy or switch to
-   high-density floppies.
+   kernel bzImage file to /dev/fd0 to make a bootable floppy.
 
    If you boot Linux from the hard drive, chances are you use LILO which
    uses the kernel image as specified in the file /etc/lilo.conf.  The

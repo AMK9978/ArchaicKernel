@@ -52,7 +52,7 @@
 #include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/kernel.h>
 #include <linux/stat.h>
@@ -223,7 +223,8 @@ static void scsi_request_sense(Scsi_Cmnd * SCpnt)
 	memset((void *) SCpnt->sense_buffer, 0,
 	       sizeof(SCpnt->sense_buffer));
 
-	SCpnt->cmnd[1] = SCpnt->lun << 5;
+	if (SCpnt->device->scsi_level <= SCSI_2)
+		SCpnt->cmnd[1] = SCpnt->lun << 5;
 	SCpnt->cmnd[4] = sizeof(SCpnt->sense_buffer);
 
 	SCpnt->request_buffer = &SCpnt->sense_buffer;

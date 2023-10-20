@@ -12,7 +12,39 @@
 
 /*
  * Debugging stuff
+ *
+ * Note that these macros must not contain any code which is not
+ * 100% relocatable.  Any attempt to do so will result in a crash.
+ * Please select one of the following when turning on debugging.
  */
+#ifdef DEBUG
+#if 0 /* DC21285-type */
+		.macro	loadsp,	rb
+		mov	\rb, #0x7c000000
+		.endm
+		.macro	writeb,	rb
+		strb	\rb, [r3, #0x3f8]
+		.endm
+#elif 0 /* RiscPC-type */
+		.macro	loadsp,	rb
+		mov	\rb, #0x03000000
+		orr	\rb, \rb, #0x00010000
+		.endm
+		.macro	writeb,	rb
+		strb	\rb, [r3, #0x3f8 << 2]
+		.endm
+#elif 0 /* integrator-type */
+		.macro	loadsp, rb
+		mov	\rb, #0x16000000
+		.endm
+		.macro	writeb, rb
+		strb	\rb, [r3, #0]
+		.endm
+#else
+#error no serial architecture defined
+#endif
+#endif
+
 		.macro	kputc,val
 		mov	r0, \val
 		bl	putc
@@ -27,52 +59,30 @@
 		.macro	debug_reloc_start
 #ifdef DEBUG
 		kputc	#'\n'
-		kphex	r6, 8
+		kphex	r6, 8		/* processor id */
 		kputc	#':'
-		kphex	r5, 8
+		kphex	r7, 8		/* architecture id */
+		kputc	#':'
+		mrc	p15, 0, r0, c1, c0
+		kphex	r0, 8		/* control reg
+		kputc	#'\n'
+		kphex	r5, 8		/* decompressed kernel start */
 		kputc	#'-'
-		kphex	r8, 8
+		kphex	r8, 8		/* decompressed kernel end  */
 		kputc	#'>'
-		kphex	r4, 8
+		kphex	r4, 8		/* kernel execution address */
 		kputc	#'\n'
 #endif
 		.endm
 
 		.macro	debug_reloc_end
 #ifdef DEBUG
-		mov	r8, r0
-		kphex	r5, 8
-		kputc	#'-'
-		kphex	r8, 8
+		kphex	r5, 8		/* end of kernel */
 		kputc	#'\n'
 		mov	r0, r4
-		bl	memdump
+		bl	memdump		/* dump 256 bytes at start of kernel */
 #endif
 		.endm
-
-/*
- * Note that these macros must not contain any code which is not
- * 100% relocatable.  Any attempt to do so will result in a crash.
- */
-#if 0
-		.macro	loadsp,	rb
-		mov	\rb, #0x7c000000
-		.endm
-
-		.macro	writeb,	rb
-		strb	\rb, [r3, #0x3f8]
-		.endm
-#else
-		.macro	loadsp,	rb
-		mov	\rb, #0x03000000
-		orr	\rb, \rb, #0x00010000
-		.endm
-
-		.macro	writeb,	rb
-		strb	\rb, [r3, #0x3f8 << 2]
-		.endm
-#endif
-
 
 		.section ".start", #alloc, #execinstr
 /*
@@ -87,33 +97,42 @@ start:
 
 		b	1f
 		.word	0x016f2818		@ Magic numbers to help the loader
-		.word	start	
+		.word	start			@ absolute load/run zImage address
+		.word	_edata			@ zImage end address
 1:		mov	r7, r1			@ save architecture ID
 		mov	r8, #0			@ save r0
-#ifdef CONFIG_ANGELBOOT
+
+#ifndef __ARM_ARCH_2__
 		/*
 		 * Booting from Angel - need to enter SVC mode and disable
-		 * FIQs/IRQs (numeric definitions from angel arm.h source)
+		 * FIQs/IRQs (numeric definitions from angel arm.h source).
+		 * We only do this if we were in user mode on entry.
 		 */
+		mrs	r2, cpsr		@ get current mode
+		tst	r2, #3			@ not user?
+		bne	not_angel
 		mov	r0, #0x17		@ angel_SWIreason_EnterSVC
 		swi	0x123456		@ angel_SWI_ARM
-		mrs	r0, cpsr		@ turn off interrupts to
-		orr	r0, r0, #0xc0		@ prevent angel from running
-		msr	cpsr_c, r0
+not_angel:
+		mrs	r2, cpsr		@ turn off interrupts to
+		orr	r2, r2, #0xc0		@ prevent angel from running
+		msr	cpsr_c, r2
+#else
+		teqp	pc, #0x0c000003		@ turn off interrupts
+#endif
 
 		/*
 		 * Note that some cache flushing and other stuff may
 		 * be needed here - is there an Angel SWI call for this?
 		 */
-#endif
+
 		/*
 		 * some architecture specific code can be inserted
 		 * by the linker here, but it should preserve r7 and r8.
 		 */
 
 		.text
-1:		mrc	p15, 0, r6, c0, c0	@ get processor ID
-		adr	r2, LC0
+1:		adr	r2, LC0
 		ldmia	r2, {r2, r3, r4, r5, sp}
 
 		mov	r0, #0
@@ -124,14 +143,15 @@ start:
 		cmp	r2, r3
 		blt	1b
 
+		mrc	p15, 0, r6, c0, c0	@ get processor ID
 		bl	cache_on
 
 		mov	r1, sp			@ malloc space above stack
 		add	r2, sp, #0x10000	@ 64k max
 
 		teq	r4, r5			@ will we overwrite ourselves?
-		moveq	r5, r2
-		movne	r5, r4
+		moveq	r5, r2			@ decompress after image
+		movne	r5, r4			@ decompress to final location
 
 		mov	r0, r5
 		mov	r3, r7
@@ -210,7 +230,7 @@ cache_on:	ldr	r1, proc_sa110_type
 		mov	r0, r3
 		mov	r8, r0, lsr #18
 		mov	r8, r8, lsl #18		@ start of RAM
-		add	r9, r8, #0x20000000	@ the maximum RAM size
+		add	r9, r8, #0x10000000	@ a reasonable RAM size
 		mov	r1, #0x12
 		orr	r1, r1, #3 << 10
 		add	r2, r3, #16384
@@ -299,30 +319,46 @@ proc_sa1110_type:
 		.size	proc_sa1110_type, . - proc_sa1110_type
 
 /*
- * Turn off StrongARM cache and MMU.  It is safe to
- * leave the I-cache on.
+ * Turn off the Cache and MMU.  ARMv3 does not support
+ * reading the control register, but ARMv4 does.
  *
- * On entry,
- *  r6 = processor ID
- * On exit,
- *  r0, r1 corrupted
- * This routine must preserve:
- *  r4, r6, r7
+ * On entry,  r6 = processor ID
+ * On exit,   r0, r1 corrupted
+ * This routine must preserve: r4, r6, r7
  */
 		.align	5
-cache_off:	ldr	r1, proc_sa110_type
-		eor	r1, r1, r6
-		movs	r1, r1, lsr #5		@ catch SA110 and SA1100
-		beq	1f
-		ldr	r1, proc_sa1110_type
-		eor	r1, r1, r6
-		movs	r1, r1, lsr #4
-		movne	pc, lr
-1:
+cache_off:
+#ifdef CONFIG_CPU_ARM610
+		eor	r1, r6, #0x41000000
+		eor	r1, r1, #0x00560000
+		bic	r1, r1, #0x0000001f
+		teq	r1, #0x00000600
+		mov	r0, #0x00000060		@ ARM6 control reg.
+		beq	__armv3_cache_off
+#endif
+#ifdef CONFIG_CPU_ARM710
+		eor	r1, r6, #0x41000000
+		bic	r1, r1, #0x00070000
+		bic	r1, r1, #0x000000ff
+		teq	r1, #0x00007000		@ ARM7
+		teqne	r1, #0x00007100		@ ARM710
+		mov	r0, #0x00000070		@ ARM7 control reg.
+		beq	__armv3_cache_off
+#endif
 		mrc	p15, 0, r0, c1, c0
 		bic	r0, r0, #0x000d
-		mcr	p15, 0, r0, c1, c0
-		mov	pc, lr		
+		mcr	p15, 0, r0, c1, c0	@ turn MMU and cache off
+		mov	r0, #0
+		mcr	p15, 0, r0, c7, c7	@ invalidate whole cache v4
+		mcr	p15, 0, r0, c8, c7	@ invalidate whole TLB v4
+		mov	pc, lr
+
+__armv3_cache_off:
+		mcr	p15, 0, r0, c1, c0	@ turn MMU and cache off
+		mov	r0, #0
+		mcr	p15, 0, r0, c7, c0	@ invalidate whole cache v3
+		mcr	p15, 0, r0, c5, c0	@ invalidate whole TLB v3
+		mov	pc, lr
 
 /*
  * Clean and flush the cache to maintain consistency.
@@ -400,13 +436,10 @@ putc:
 
 memdump:	mov	r12, r0
 		mov	r10, lr
-		mov	r1, #8
-		bl	phex
-		mov	r0, #'\n'
-		bl	putc
 		mov	r11, #0
 2:		mov	r0, r11, lsl #2
-		mov	r1, #4
+		add	r0, r0, r12
+		mov	r1, #8
 		bl	phex
 		mov	r0, #':'
 		bl	putc

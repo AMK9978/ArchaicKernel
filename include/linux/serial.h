@@ -139,8 +139,10 @@ struct serial_uart_config {
 #define ASYNC_CHECK_CD		0x02000000 /* i.e., CLOCAL */
 #define ASYNC_SHARE_IRQ		0x01000000 /* for multifunction cards
 					     --- no longer used */
+#define ASYNC_CONS_FLOW		0x00800000 /* flow control for console  */
 
-#define ASYNC_INTERNAL_FLAGS	0xFF000000 /* Internal flags */
+#define ASYNC_BOOT_ONLYMCA	0x00400000 /* Probe only if MCA bus */
+#define ASYNC_INTERNAL_FLAGS	0xFFC00000 /* Internal flags */
 
 /*
  * Multiport serial configuration structure --- external structure
@@ -176,6 +178,15 @@ struct serial_icounter_struct {
 /* Export to allow PCMCIA to use this - Dave Hinds */
 extern int register_serial(struct serial_struct *req);
 extern void unregister_serial(int line);
+
+/* Allow complicated architectures to specify rs_table[] at run time */
+extern int early_serial_setup(struct serial_struct *req);
+
+#ifdef CONFIG_ACPI
+/* tty ports reserved for the ACPI serial console port and debug port */
+#define ACPI_SERIAL_CONSOLE_PORT        4
+#define ACPI_SERIAL_DEBUG_PORT          5
+#endif
 
 #endif /* __KERNEL__ */
 #endif /* _LINUX_SERIAL_H */

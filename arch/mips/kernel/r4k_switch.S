@@ -1,5 +1,4 @@
-/* $Id: r4k_switch.S,v 1.9 1999/08/18 23:37:44 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -8,7 +7,10 @@
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
  * Copyright (C) 1994, 1995, 1996, by Andreas Busse
  * Copyright (C) 1999 Silicon Graphics, Inc.
+ * Copyright (C) 2000 MIPS Technologies, Inc.
+ *    written by Carsten Langgaard, carstenl@mips.com
  */
+#include <linux/config.h>
 #include <asm/asm.h>
 #include <asm/bootinfo.h>
 #include <asm/cachectl.h>
@@ -24,14 +26,15 @@
 
 #include <asm/asmmacro.h>
 
-	.set	mips3
-
 /*
  * task_struct *r4xx0_resume(task_struct *prev, task_struct *next)
  */
 	.set	noreorder
 	.align	5
 	LEAF(resume)
+#ifndef CONFIG_CPU_HAS_LLSC
+	sw      zero, ll_bit
+#endif
 	mfc0	t1, CP0_STATUS
 	sw	t1, THREAD_STATUS(a0)
 	CPU_SAVE_NONSCRATCH(a0)
@@ -44,7 +47,16 @@
 	move	$28, a1
 	CPU_RESTORE_NONSCRATCH($28)
 	addiu	t0, $28, KERNEL_STACK_SIZE-32
+#ifdef CONFIG_SMP	 
+	mfc0	a3, CP0_CONTEXT
+	la	t1, kernelsp
+	srl	a3, 23
+	sll	a3, 2
+	addu	t1, a3, t1
+	sw	t0, (t1)	
+#else
 	sw	t0, kernelsp
+#endif 
 	mfc0	t1, CP0_STATUS		/* Do we really need this? */
 	li	a3, 0xff00
 	and	t1, a3
@@ -95,6 +107,14 @@ LEAF(save_fp)
 	END(save_fp)
 
 /*
+ * Restore a thread's fp context.
+ */
+LEAF(restore_fp)
+	FPU_RESTORE_DOUBLE(a0, t1)		# clobbers t1
+	jr	ra
+	END(restore_fp)
+
+/*
  * Load the FPU with signalling NANS.  This bit pattern we're using has
  * the property that no matter whether considered as single or as double
  * precision represents signaling NANS.
@@ -105,6 +125,7 @@ LEAF(save_fp)
 #define FPU_DEFAULT  0x00000000
 
 LEAF(init_fpu)
+	.set	mips3
 	mfc0	t0, CP0_STATUS
 	li	t1, 0x20000000
 	or	t0, t1
@@ -135,3 +156,4 @@ LEAF(init_fpu)
 	 dmtc1	t0, $f30
 	.set	reorder
 	END(init_fpu)
+

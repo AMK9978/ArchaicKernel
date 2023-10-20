@@ -4,16 +4,16 @@
     
     Copyright (C) 1999 David A. Hinds -- dahinds@users.sourceforge.net
 
-    3c589_cs.c 1.154 2000/09/30 17:39:04
+    3c589_cs.c 1.162 2001/10/13 00:08:50
 
     The network driver code is based on Donald Becker's 3c589 code:
     
     Written 1994 by Donald Becker.
     Copyright 1993 United States Government as represented by the
     Director, National Security Agency.  This software may be used and
-    distributed according to the terms of the GNU Public License,
+    distributed according to the terms of the GNU General Public License,
     incorporated herein by reference.
-    Donald Becker may be reached at becker@cesdis1.gsfc.nasa.gov
+    Donald Becker may be reached at becker@scyld.com
 
 ======================================================================*/
 
@@ -22,7 +22,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/interrupt.h>
@@ -112,30 +112,32 @@ struct el3_private {
 
 static char *if_names[] = { "auto", "10baseT", "10base2", "AUI" };
 
+/*====================================================================*/
+
+/* Module parameters */
+
+MODULE_AUTHOR("David Hinds <dahinds@users.sourceforge.net>");
+MODULE_DESCRIPTION("3Com 3c589 series PCMCIA ethernet driver");
+MODULE_LICENSE("GPL");
+
+#define INT_MODULE_PARM(n, v) static int n = v; MODULE_PARM(n, "i")
+
+/* Special hook for setting if_port when module is loaded */
+INT_MODULE_PARM(if_port, 0);
+
+/* Bit map of interrupts to choose from */
+INT_MODULE_PARM(irq_mask, 0xdeb8);
+static int irq_list[4] = { -1 };
+MODULE_PARM(irq_list, "1-4i");
+
 #ifdef PCMCIA_DEBUG
-static int pc_debug = PCMCIA_DEBUG;
-MODULE_PARM(pc_debug, "i");
+INT_MODULE_PARM(pc_debug, PCMCIA_DEBUG);
 #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
 static char *version =
-"3c589_cs.c 1.154 2000/09/30 17:39:04 (David Hinds)";
+"3c589_cs.c 1.162 2001/10/13 00:08:50 (David Hinds)";
 #else
 #define DEBUG(n, args...)
 #endif
-
-/*====================================================================*/
-
-/* Parameters that can be set with 'insmod' */
-
-/* Special hook for setting if_port when module is loaded */
-static int if_port = 0;
-
-/* Bit map of interrupts to choose from */
-static u_int irq_mask = 0xdeb8;
-static int irq_list[4] = { -1 };
-
-MODULE_PARM(if_port, "i");
-MODULE_PARM(irq_mask, "i");
-MODULE_PARM(irq_list, "1-4i");
 
 /*====================================================================*/
 
@@ -163,7 +165,7 @@ static dev_info_t dev_info = "3c589_cs";
 static dev_link_t *tc589_attach(void);
 static void tc589_detach(dev_link_t *);
 
-static dev_link_t *dev_list = NULL;
+static dev_link_t *dev_list;
 
 /*======================================================================
 
@@ -243,8 +245,10 @@ static dev_link_t *tc589_attach(void)
     ether_setup(dev);
     dev->open = &el3_open;
     dev->stop = &el3_close;
+#ifdef HAVE_TX_TIMEOUT
     dev->tx_timeout = el3_tx_timeout;
     dev->watchdog_timeo = TX_TIMEOUT;
+#endif
     
     /* Register with Card Services */
     link->next = dev_list;
@@ -526,7 +530,7 @@ static int tc589_event(event_t event, int priority,
 /*
   Use this for commands that may take time to finish
 */
-static void wait_for_completion(struct net_device *dev, int cmd)
+static void tc589_wait_for_completion(struct net_device *dev, int cmd)
 {
     int i = 100;
     outw(cmd, dev->base_addr + EL3_CMD);
@@ -684,9 +688,9 @@ static void el3_tx_timeout(struct net_device *dev)
     lp->stats.tx_errors++;
     dev->trans_start = jiffies;
     /* Issue TX_RESET and TX_START commands. */
-    wait_for_completion(dev, TxReset);
+    tc589_wait_for_completion(dev, TxReset);
     outw(TxEnable, ioaddr + EL3_CMD);
-    netif_start_queue(dev);
+    netif_wake_queue(dev);
 }
 
 static void pop_tx_status(struct net_device *dev)
@@ -701,7 +705,7 @@ static void pop_tx_status(struct net_device *dev)
 	if (!(tx_status & 0x84)) break;
 	/* reset transmitter on jabber error or underrun */
 	if (tx_status & 0x30)
-	    wait_for_completion(dev, TxReset);
+	    tc589_wait_for_completion(dev, TxReset);
 	if (tx_status & 0x38) {
 	    DEBUG(1, "%s: transmit error: status 0x%02x\n",
 		  dev->name, tx_status);
@@ -794,12 +798,12 @@ static void el3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		       " register %04x.\n", dev->name, fifo_diag);
 		if (fifo_diag & 0x0400) {
 		    /* Tx overrun */
-		    wait_for_completion(dev, TxReset);
+		    tc589_wait_for_completion(dev, TxReset);
 		    outw(TxEnable, ioaddr + EL3_CMD);
 		}
 		if (fifo_diag & 0x2000) {
 		    /* Rx underrun */
-		    wait_for_completion(dev, RxReset);
+		    tc589_wait_for_completion(dev, RxReset);
 		    set_multicast_list(dev);
 		    outw(RxEnable, ioaddr + EL3_CMD);
 		}
@@ -984,15 +988,14 @@ static int el3_rx(struct net_device *dev)
 		  pkt_len, rx_status);
 	    if (skb != NULL) {
 		skb->dev = dev;
-		
 		skb_reserve(skb, 2);
 		insl(ioaddr+RX_FIFO, skb_put(skb, pkt_len),
 			(pkt_len+3)>>2);
 		skb->protocol = eth_type_trans(skb, dev);
-		
 		netif_rx(skb);
+		dev->last_rx = jiffies;
 		lp->stats.rx_packets++;
-		lp->stats.rx_bytes += skb->len;
+		lp->stats.rx_bytes += pkt_len;
 	    } else {
 		DEBUG(1, "%s: couldn't allocate a sk_buff of"
 		      " size %d.\n", dev->name, pkt_len);
@@ -1000,7 +1003,7 @@ static int el3_rx(struct net_device *dev)
 	    }
 	}
 	/* Pop the top of the Rx FIFO */
-	wait_for_completion(dev, RxDiscard);
+	tc589_wait_for_completion(dev, RxDiscard);
     }
     if (worklimit == 0)
 	printk(KERN_NOTICE "%s: too much work in el3_rx!\n", dev->name);

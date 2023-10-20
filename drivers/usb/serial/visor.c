@@ -1,7 +1,8 @@
 /*
- * USB HandSpring Visor driver
+ * USB HandSpring Visor, Palm m50x, and Sony Clie driver
+ * (supports all of the Palm OS USB devices)
  *
- *	Copyright (C) 1999, 2000
+ *	Copyright (C) 1999 - 2001
  *	    Greg Kroah-Hartman (greg@kroah.com)
  *
  *	This program is free software; you can redistribute it and/or modify
@@ -10,6 +11,37 @@
  *	(at your option) any later version.
  *
  * See Documentation/usb/usb-serial.txt for more information on using this driver
+ * 
+ * (11/11/2001) gkh
+ *	Added support for the m125 devices, and added check to prevent oopses
+ *	for Clié devices that lie about the number of ports they have.
+ *
+ * (08/30/2001) gkh
+ *	Added support for the Clie devices, both the 3.5 and 4.0 os versions.
+ *	Many thanks to Daniel Burke, and Bryan Payne for helping with this.
+ *
+ * (08/23/2001) gkh
+ *	fixed a few potential bugs pointed out by Oliver Neukum.
+ *
+ * (05/30/2001) gkh
+ *	switched from using spinlock to a semaphore, which fixes lots of problems.
+ *
+ * (05/28/2000) gkh
+ *	Added initial support for the Palm m500 and Palm m505 devices.
+ *
+ * (04/08/2001) gb
+ *	Identify version on module load.
+ *
+ * (01/21/2000) gkh
+ *	Added write_room and chars_in_buffer, as they were previously using the
+ *	generic driver versions which is all wrong now that we are using an urb
+ *	pool.  Thanks to Wolfgang Grandegger for pointing this out to me.
+ *	Removed count assignment in the write function, which was not needed anymore
+ *	either.  Thanks to Al Borchers for pointing this out.
+ *
+ * (12/12/2000) gkh
+ *	Moved MOD_DEC to end of visor_close to be nicer, as the final write 
+ *	message can sleep.
  * 
  * (11/12/2000) gkh
  *	Fixed bug with data being dropped on the floor by forcing tty->low_latency
@@ -74,31 +106,37 @@
 #include <linux/errno.h>
 #include <linux/poll.h>
 #include <linux/init.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/fcntl.h>
+#include <linux/tty.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
-#include <linux/tty.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
-
-#ifdef CONFIG_USB_SERIAL_DEBUG
-	#define DEBUG
-#else
-	#undef DEBUG
-#endif
 #include <linux/usb.h>
 
-#include "usb-serial.h"
+#ifdef CONFIG_USB_SERIAL_DEBUG
+	static int debug = 1;
+#else
+	static int debug;
+#endif
 
+#include "usb-serial.h"
 #include "visor.h"
 
-#define MIN(a,b)                (((a)<(b))?(a):(b))
+/*
+ * Version Information
+ */
+#define DRIVER_VERSION "v1.5"
+#define DRIVER_AUTHOR "Greg Kroah-Hartman <greg@kroah.com>"
+#define DRIVER_DESC "USB HandSpring Visor, Palm m50x, Sony Clié driver"
 
 /* function prototypes for a handspring visor */
 static int  visor_open		(struct usb_serial_port *port, struct file *filp);
 static void visor_close		(struct usb_serial_port *port, struct file *filp);
 static int  visor_write		(struct usb_serial_port *port, int from_user, const unsigned char *buf, int count);
+static int  visor_write_room		(struct usb_serial_port *port);
+static int  visor_chars_in_buffer	(struct usb_serial_port *port);
 static void visor_throttle	(struct usb_serial_port *port);
 static void visor_unthrottle	(struct usb_serial_port *port);
 static int  visor_startup	(struct usb_serial *serial);
@@ -109,8 +147,35 @@ static void visor_write_bulk_callback	(struct urb *urb);
 static void visor_read_bulk_callback	(struct urb *urb);
 
 
+static __devinitdata struct usb_device_id visor_id_table [] = {
+	{ USB_DEVICE(HANDSPRING_VENDOR_ID, HANDSPRING_VISOR_ID) },
+	{ }					/* Terminating entry */
+};
+
+static __devinitdata struct usb_device_id palm_4_0_id_table [] = {
+	{ USB_DEVICE(PALM_VENDOR_ID, PALM_M500_ID) },
+	{ USB_DEVICE(PALM_VENDOR_ID, PALM_M505_ID) },
+	{ USB_DEVICE(PALM_VENDOR_ID, PALM_M125_ID) },
+	{ }					/* Terminating entry */
+};
+
+static __devinitdata struct usb_device_id clie_id_3_5_table [] = {
+	{ USB_DEVICE(SONY_VENDOR_ID, SONY_CLIE_3_5_ID) },
+	{ }					/* Terminating entry */
+};
+
+static __devinitdata struct usb_device_id clie_id_4_0_table [] = {
+	{ USB_DEVICE(SONY_VENDOR_ID, SONY_CLIE_4_0_ID) },
+	{ }					/* Terminating entry */
+};
+
 static __devinitdata struct usb_device_id id_table [] = {
 	{ USB_DEVICE(HANDSPRING_VENDOR_ID, HANDSPRING_VISOR_ID) },
+	{ USB_DEVICE(PALM_VENDOR_ID, PALM_M500_ID) },
+	{ USB_DEVICE(PALM_VENDOR_ID, PALM_M505_ID) },
+	{ USB_DEVICE(PALM_VENDOR_ID, PALM_M125_ID) },
+	{ USB_DEVICE(SONY_VENDOR_ID, SONY_CLIE_3_5_ID) },
+	{ USB_DEVICE(SONY_VENDOR_ID, SONY_CLIE_4_0_ID) },
 	{ }					/* Terminating entry */
 };
 
@@ -121,7 +186,7 @@ MODULE_DEVICE_TABLE (usb, id_table);
 /* All of the device info needed for the Handspring Visor */
 struct usb_serial_device_type handspring_device = {
 	name:			"Handspring Visor",
-	id_table:		id_table,
+	id_table:		visor_id_table,
 	needs_interrupt_in:	MUST_HAVE_NOT,		/* this device must not have an interrupt in endpoint */
 	needs_bulk_in:		MUST_HAVE,		/* this device must have a bulk in endpoint */
 	needs_bulk_out:		MUST_HAVE,		/* this device must have a bulk out endpoint */
@@ -138,13 +203,91 @@ struct usb_serial_device_type handspring_device = {
 	ioctl:			visor_ioctl,
 	set_termios:		visor_set_termios,
 	write:			visor_write,
+	write_room:		visor_write_room,
+	chars_in_buffer:	visor_chars_in_buffer,
+	write_bulk_callback:	visor_write_bulk_callback,
+	read_bulk_callback:	visor_read_bulk_callback,
+};
+
+/* device info for the Palm 4.0 devices */
+struct usb_serial_device_type palm_4_0_device = {
+	name:			"Palm 4.0",
+	id_table:		palm_4_0_id_table,
+	needs_interrupt_in:	MUST_HAVE_NOT,		/* this device must not have an interrupt in endpoint */
+	needs_bulk_in:		MUST_HAVE,		/* this device must have a bulk in endpoint */
+	needs_bulk_out:		MUST_HAVE,		/* this device must have a bulk out endpoint */
+	num_interrupt_in:	0,
+	num_bulk_in:		2,
+	num_bulk_out:		2,
+	num_ports:		2,
+	open:			visor_open,
+	close:			visor_close,
+	throttle:		visor_throttle,
+	unthrottle:		visor_unthrottle,
+	startup:		visor_startup,
+	shutdown:		visor_shutdown,
+	ioctl:			visor_ioctl,
+	set_termios:		visor_set_termios,
+	write:			visor_write,
+	write_room:		visor_write_room,
+	chars_in_buffer:	visor_chars_in_buffer,
 	write_bulk_callback:	visor_write_bulk_callback,
 	read_bulk_callback:	visor_read_bulk_callback,
 };
 
 
+/* device info for the Sony Clie OS version 3.5 */
+static struct usb_serial_device_type clie_3_5_device = {
+	name:			"Sony Clié 3.5",
+	id_table:		clie_id_3_5_table,
+	needs_interrupt_in:	MUST_HAVE_NOT,		/* this device must not have an interrupt in endpoint */
+	needs_bulk_in:		MUST_HAVE,		/* this device must have a bulk in endpoint */
+	needs_bulk_out:		MUST_HAVE,		/* this device must have a bulk out endpoint */
+	num_interrupt_in:	0,
+	num_bulk_in:		1,
+	num_bulk_out:		1,
+	num_ports:		1,
+	open:			visor_open,
+	close:			visor_close,
+	throttle:		visor_throttle,
+	unthrottle:		visor_unthrottle,
+	ioctl:			visor_ioctl,
+	set_termios:		visor_set_termios,
+	write:			visor_write,
+	write_room:		visor_write_room,
+	chars_in_buffer:	visor_chars_in_buffer,
+	write_bulk_callback:	visor_write_bulk_callback,
+	read_bulk_callback:	visor_read_bulk_callback,
+};
+
+/* device info for the Sony Clie OS version 4.0 */
+static struct usb_serial_device_type clie_4_0_device = {
+	name:			"Sony Clié 4.0",
+	id_table:		clie_id_4_0_table,
+	needs_interrupt_in:	MUST_HAVE_NOT,		/* this device must not have an interrupt in endpoint */
+	needs_bulk_in:		MUST_HAVE,		/* this device must have a bulk in endpoint */
+	needs_bulk_out:		MUST_HAVE,		/* this device must have a bulk out endpoint */
+	num_interrupt_in:	0,
+	num_bulk_in:		2,
+	num_bulk_out:		2,
+	num_ports:		2,
+	open:			visor_open,
+	close:			visor_close,
+	throttle:		visor_throttle,
+	unthrottle:		visor_unthrottle,
+	startup:		visor_startup,
+	shutdown:		visor_shutdown,
+	ioctl:			visor_ioctl,
+	set_termios:		visor_set_termios,
+	write:			visor_write,
+	write_room:		visor_write_room,
+	chars_in_buffer:	visor_chars_in_buffer,
+	write_bulk_callback:	visor_write_bulk_callback,
+	read_bulk_callback:	visor_read_bulk_callback,
+};
+
 #define NUM_URBS			24
-#define URB_TRANSFER_BUFFER_SIZE	64
+#define URB_TRANSFER_BUFFER_SIZE	768
 static struct urb	*write_urb_pool[NUM_URBS];
 static spinlock_t	write_urb_pool_lock;
 static int		bytes_in;
@@ -157,15 +300,19 @@ static int		bytes_out;
 static int visor_open (struct usb_serial_port *port, struct file *filp)
 {
 	struct usb_serial *serial = port->serial;
-	unsigned long flags;
-	int result;
+	int result = 0;
 
 	if (port_paranoia_check (port, __FUNCTION__))
 		return -ENODEV;
 	
 	dbg(__FUNCTION__ " - port %d", port->number);
 
-	spin_lock_irqsave (&port->port_lock, flags);
+	if (!port->read_urb) {
+		err ("Device lied about number of ports, please use a lower one.");
+		return -ENODEV;
+	}
+
+	down (&port->sem);
 	
 	++port->open_count;
 	MOD_INC_USE_COUNT;
@@ -190,9 +337,9 @@ static int visor_open (struct usb_serial_port *port, struct file *filp)
 			err(__FUNCTION__ " - failed submitting read urb, error %d", result);
 	}
 	
-	spin_unlock_irqrestore (&port->port_lock, flags);
+	up (&port->sem);
 	
-	return 0;
+	return result;
 }
 
 
@@ -200,7 +347,6 @@ static void visor_close (struct usb_serial_port *port, struct file * filp)
 {
 	struct usb_serial *serial;
 	unsigned char *transfer_buffer;
-	unsigned long flags;
 
 	if (port_paranoia_check (port, __FUNCTION__))
 		return;
@@ -211,32 +357,38 @@ static void visor_close (struct usb_serial_port *port, struct file * filp)
 	if (!serial)
 		return;
 	
-	spin_lock_irqsave (&port->port_lock, flags);
+	down (&port->sem);
 
 	--port->open_count;
-	MOD_DEC_USE_COUNT;
 
 	if (port->open_count <= 0) {
-		transfer_buffer =  kmalloc (0x12, GFP_KERNEL);
-		if (!transfer_buffer) {
-			err(__FUNCTION__ " - kmalloc(%d) failed.", 0x12);
-		} else {
-			/* send a shutdown message to the device */
-			usb_control_msg (serial->dev, usb_rcvctrlpipe(serial->dev, 0), VISOR_CLOSE_NOTIFICATION,
-					0xc2, 0x0000, 0x0000, transfer_buffer, 0x12, 300);
-			kfree (transfer_buffer);
+		if (serial->dev) {
+			/* only send a shutdown message if the 
+			 * device is still here */
+			transfer_buffer =  kmalloc (0x12, GFP_KERNEL);
+			if (!transfer_buffer) {
+				err(__FUNCTION__ " - kmalloc(%d) failed.", 0x12);
+			} else {
+				/* send a shutdown message to the device */
+				usb_control_msg (serial->dev,
+						 usb_rcvctrlpipe(serial->dev, 0),
+						 VISOR_CLOSE_NOTIFICATION, 0xc2,
+						 0x0000, 0x0000, 
+						 transfer_buffer, 0x12, 300);
+				kfree (transfer_buffer);
+			}
+			/* shutdown our bulk read */
+			usb_unlink_urb (port->read_urb);
 		}
-
-		/* shutdown our bulk read */
-		usb_unlink_urb (port->read_urb);
 		port->active = 0;
 		port->open_count = 0;
-
 	}
-	spin_unlock_irqrestore (&port->port_lock, flags);
+	up (&port->sem);
 
 	/* Uncomment the following line if you want to see some statistics in your syslog */
 	/* info ("Bytes In = %d  Bytes Out = %d", bytes_in, bytes_out); */
+
+	MOD_DEC_USE_COUNT;
 }
 
 
@@ -253,8 +405,6 @@ static int visor_write (struct usb_serial_port *port, int from_user, const unsig
 
 	dbg(__FUNCTION__ " - port %d", port->number);
 
-	usb_serial_debug_data (__FILE__, __FUNCTION__, count, buf);
-	
 	while (count > 0) {
 		/* try to find a free urb in our list of them */
 		urb = NULL;
@@ -278,13 +428,17 @@ static int visor_write (struct usb_serial_port *port, int from_user, const unsig
 			}
 		}
 		
-		transfer_size = MIN (count, URB_TRANSFER_BUFFER_SIZE);
-		if (from_user)
-			copy_from_user (urb->transfer_buffer, current_position, transfer_size);
-		else
+		transfer_size = min (count, URB_TRANSFER_BUFFER_SIZE);
+		if (from_user) {
+			if (copy_from_user (urb->transfer_buffer, current_position, transfer_size)) {
+				bytes_sent = -EFAULT;
+				break;
+			}
+		} else {
 			memcpy (urb->transfer_buffer, current_position, transfer_size);
-		
-		count = (count > port->bulk_out_size) ? port->bulk_out_size : count;
+		}
+
+		usb_serial_debug_data (__FILE__, __FUNCTION__, transfer_size, urb->transfer_buffer);
 
 		/* build up our urb */
 		FILL_BULK_URB (urb, serial->dev, usb_sndbulkpipe(serial->dev, port->bulk_out_endpointAddress), 
@@ -293,8 +447,11 @@ static int visor_write (struct usb_serial_port *port, int from_user, const unsig
 
 		/* send it down the pipe */
 		status = usb_submit_urb(urb);
-		if (status)
-			dbg(__FUNCTION__ " - usb_submit_urb(write bulk) failed with status = %d", status);
+		if (status) {
+			err(__FUNCTION__ " - usb_submit_urb(write bulk) failed with status = %d", status);
+			bytes_sent = status;
+			break;
+		}
 
 		current_position += transfer_size;
 		bytes_sent += transfer_size;
@@ -305,6 +462,52 @@ static int visor_write (struct usb_serial_port *port, int from_user, const unsig
 exit:
 	return bytes_sent;
 } 
+
+
+static int visor_write_room (struct usb_serial_port *port)
+{
+	unsigned long flags;
+	int i;
+	int room = 0;
+
+	dbg(__FUNCTION__ " - port %d", port->number);
+	
+	spin_lock_irqsave (&write_urb_pool_lock, flags);
+
+	for (i = 0; i < NUM_URBS; ++i) {
+		if (write_urb_pool[i]->status != -EINPROGRESS) {
+			room += URB_TRANSFER_BUFFER_SIZE;
+		}
+	}
+	
+	spin_unlock_irqrestore (&write_urb_pool_lock, flags);
+	
+	dbg(__FUNCTION__ " - returns %d", room);
+	return (room);
+}
+
+
+static int visor_chars_in_buffer (struct usb_serial_port *port)
+{
+	unsigned long flags;
+	int i;
+	int chars = 0;
+
+	dbg(__FUNCTION__ " - port %d", port->number);
+	
+	spin_lock_irqsave (&write_urb_pool_lock, flags);
+
+	for (i = 0; i < NUM_URBS; ++i) {
+		if (write_urb_pool[i]->status == -EINPROGRESS) {
+			chars += URB_TRANSFER_BUFFER_SIZE;
+		}
+	}
+	
+	spin_unlock_irqrestore (&write_urb_pool_lock, flags);
+
+	dbg (__FUNCTION__ " - returns %d", chars);
+	return (chars);
+}
 
 
 static void visor_write_bulk_callback (struct urb *urb)
@@ -382,15 +585,14 @@ static void visor_read_bulk_callback (struct urb *urb)
 
 static void visor_throttle (struct usb_serial_port *port)
 {
-	unsigned long flags;
 
 	dbg(__FUNCTION__ " - port %d", port->number);
 
-	spin_lock_irqsave (&port->port_lock, flags);
+	down (&port->sem);
 
 	usb_unlink_urb (port->read_urb);
 
-	spin_unlock_irqrestore (&port->port_lock, flags);
+	up (&port->sem);
 
 	return;
 }
@@ -398,19 +600,18 @@ static void visor_throttle (struct usb_serial_port *port)
 
 static void visor_unthrottle (struct usb_serial_port *port)
 {
-	unsigned long flags;
 	int result;
 
 	dbg(__FUNCTION__ " - port %d", port->number);
 
-	spin_lock_irqsave (&port->port_lock, flags);
+	down (&port->sem);
 
 	port->read_urb->dev = port->serial->dev;
 	result = usb_submit_urb(port->read_urb);
 	if (result)
 		err(__FUNCTION__ " - failed submitting read urb, error %d", result);
 
-	spin_unlock_irqrestore (&port->port_lock, flags);
+	up (&port->sem);
 
 	return;
 }
@@ -468,6 +669,29 @@ static int  visor_startup (struct usb_serial *serial)
 		}
 	}
 
+	if ((serial->dev->descriptor.idVendor == PALM_VENDOR_ID) ||
+	    (serial->dev->descriptor.idVendor == SONY_VENDOR_ID)) {
+		/* Palm OS 4.0 Hack */
+		response = usb_control_msg (serial->dev, usb_rcvctrlpipe(serial->dev, 0), 
+					    PALM_GET_SOME_UNKNOWN_INFORMATION,
+					    0xc2, 0x0000, 0x0000, transfer_buffer, 
+					    0x14, 300);
+		if (response < 0) {
+			err(__FUNCTION__ " - error getting first unknown palm command");
+		} else {
+			usb_serial_debug_data (__FILE__, __FUNCTION__, 0x14, transfer_buffer);
+		}
+		response = usb_control_msg (serial->dev, usb_rcvctrlpipe(serial->dev, 0), 
+					    PALM_GET_SOME_UNKNOWN_INFORMATION,
+					    0xc2, 0x0000, 0x0000, transfer_buffer, 
+					    0x14, 300);
+		if (response < 0) {
+			err(__FUNCTION__ " - error getting second unknown palm command");
+		} else {
+			usb_serial_debug_data (__FILE__, __FUNCTION__, 0x14, transfer_buffer);
+		}
+	}
+
 	/* ask for the number of bytes available, but ignore the response as it is broken */
 	response = usb_control_msg (serial->dev, usb_rcvctrlpipe(serial->dev, 0), VISOR_REQUEST_BYTES_AVAILABLE,
 					0xc2, 0x0000, 0x0005, transfer_buffer, 0x02, 300);
@@ -508,10 +732,16 @@ static int visor_ioctl (struct usb_serial_port *port, struct file * file, unsign
 /* This function is all nice and good, but we don't change anything based on it :) */
 static void visor_set_termios (struct usb_serial_port *port, struct termios *old_termios)
 {
-	unsigned int cflag = port->tty->termios->c_cflag;
+	unsigned int cflag;
 
 	dbg(__FUNCTION__ " - port %d", port->number);
 
+	if ((!port->tty) || (!port->tty->termios)) {
+		dbg(__FUNCTION__" - no tty structures");
+		return;
+	}
+
+	cflag = port->tty->termios->c_cflag;
 	/* check that they really want us to change something */
 	if (old_termios) {
 		if ((cflag == old_termios->c_cflag) &&
@@ -519,11 +749,6 @@ static void visor_set_termios (struct usb_serial_port *port, struct termios *old
 			dbg(__FUNCTION__ " - nothing to change...");
 			return;
 		}
-	}
-
-	if ((!port->tty) || (!port->tty->termios)) {
-		dbg(__FUNCTION__" - no tty structures");
-		return;
 	}
 
 	/* get the byte size */
@@ -576,6 +801,9 @@ static int __init visor_init (void)
 	int i;
 
 	usb_serial_register (&handspring_device);
+	usb_serial_register (&palm_4_0_device);
+	usb_serial_register (&clie_3_5_device);
+	usb_serial_register (&clie_4_0_device);
 	
 	/* create our write urb pool and transfer buffers */ 
 	spin_lock_init (&write_urb_pool_lock);
@@ -594,7 +822,9 @@ static int __init visor_init (void)
 			continue;
 		}
 	}
-	
+
+	info(DRIVER_DESC " " DRIVER_VERSION);
+
 	return 0;
 }
 
@@ -605,6 +835,9 @@ static void __exit visor_exit (void)
 	unsigned long flags;
 
 	usb_serial_deregister (&handspring_device);
+	usb_serial_deregister (&palm_4_0_device);
+	usb_serial_deregister (&clie_3_5_device);
+	usb_serial_deregister (&clie_4_0_device);
 
 	spin_lock_irqsave (&write_urb_pool_lock, flags);
 
@@ -627,5 +860,10 @@ static void __exit visor_exit (void)
 module_init(visor_init);
 module_exit(visor_exit);
 
-MODULE_AUTHOR("Greg Kroah-Hartman <greg@kroah.com>");
-MODULE_DESCRIPTION("USB HandSpring Visor driver");
+MODULE_AUTHOR( DRIVER_AUTHOR );
+MODULE_DESCRIPTION( DRIVER_DESC );
+MODULE_LICENSE("GPL");
+
+MODULE_PARM(debug, "i");
+MODULE_PARM_DESC(debug, "Debug enabled or not");
+
