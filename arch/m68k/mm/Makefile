@@ -2,10 +2,8 @@
 # Makefile for the linux m68k-specific parts of the memory manager.
 #
 
-obj-y		:= init.o fault.o extable.o hwtest.o
+obj-y	:= init.o
 
-ifndef CONFIG_SUN3
-obj-y		+= kmap.o memory.o motorola.o
-else
-obj-y		+= sun3kmap.o sun3mmu.o
-endif
+obj-$(CONFIG_MMU)		+= cache.o fault.o hwtest.o
+obj-$(CONFIG_MMU_MOTOROLA)	+= kmap.o memory.o motorola.o
+obj-$(CONFIG_MMU_SUN3)		+= sun3kmap.o sun3mmu.o

@@ -1,6 +1,4 @@
 /*
- * $Id: rpxlite.c,v 1.19 2003/05/21 12:45:19 dwmw2 Exp $
- *
  * Handle mapping of the flash on the RPX Lite and CLLF boards
  */
 
@@ -21,14 +19,14 @@ static struct mtd_info *mymtd;
 static struct map_info rpxlite_map = {
 	.name = "RPX",
 	.size = WINDOW_SIZE,
-	.buswidth = 4,
+	.bankwidth = 4,
 	.phys = WINDOW_ADDR,
 };
 
-int __init init_rpxlite(void)
+static int __init init_rpxlite(void)
 {
 	printk(KERN_NOTICE "RPX Lite or CLLF flash device: %x at %x\n", WINDOW_SIZE*4, WINDOW_ADDR);
-	rpxlite_map.virt = (unsigned long)ioremap(WINDOW_ADDR, WINDOW_SIZE * 4);
+	rpxlite_map.virt = ioremap(WINDOW_ADDR, WINDOW_SIZE * 4);
 
 	if (!rpxlite_map.virt) {
 		printk("Failed to ioremap\n");
@@ -38,7 +36,7 @@ int __init init_rpxlite(void)
 	mymtd = do_map_probe("cfi_probe", &rpxlite_map);
 	if (mymtd) {
 		mymtd->owner = THIS_MODULE;
-		add_mtd_device(mymtd);
+		mtd_device_register(mymtd, NULL, 0);
 		return 0;
 	}
 
@@ -49,7 +47,7 @@ int __init init_rpxlite(void)
 static void __exit cleanup_rpxlite(void)
 {
 	if (mymtd) {
-		del_mtd_device(mymtd);
+		mtd_device_unregister(mymtd);
 		map_destroy(mymtd);
 	}
 	if (rpxlite_map.virt) {

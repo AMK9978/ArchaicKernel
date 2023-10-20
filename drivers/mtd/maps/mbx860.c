@@ -1,11 +1,9 @@
 /*
- * $Id: mbx860.c,v 1.5 2003/05/21 12:45:19 dwmw2 Exp $
- *
  * Handle mapping of the flash on MBX860 boards
  *
  * Author:	Anton Todorov
  * Copyright:	(C) 2001 Emness Technology
- * 
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
@@ -46,7 +44,7 @@ static struct mtd_partition partition_info[]={
 	{ .name = "MBX flash APPLICATION partition",
 	.offset = (BOOT_PARTITION_SIZE_KiB+KERNEL_PARTITION_SIZE_KiB)*1024 }
 };
-				   
+
 
 static struct mtd_info *mymtd;
 
@@ -54,13 +52,13 @@ struct map_info mbx_map = {
 	.name = "MBX flash",
 	.size = WINDOW_SIZE,
 	.phys = WINDOW_ADDR,
-	.buswidth = 4,
+	.bankwidth = 4,
 };
 
-int __init init_mbx(void)
+static int __init init_mbx(void)
 {
 	printk(KERN_NOTICE "Motorola MBX flash device: 0x%x at 0x%x\n", WINDOW_SIZE*4, WINDOW_ADDR);
-	mbx_map.virt = (unsigned long)ioremap(WINDOW_ADDR, WINDOW_SIZE * 4);
+	mbx_map.virt = ioremap(WINDOW_ADDR, WINDOW_SIZE * 4);
 
 	if (!mbx_map.virt) {
 		printk("Failed to ioremap\n");
@@ -71,8 +69,8 @@ int __init init_mbx(void)
 	mymtd = do_map_probe("jedec_probe", &mbx_map);
 	if (mymtd) {
 		mymtd->owner = THIS_MODULE;
-		add_mtd_device(mymtd);
-                add_mtd_partitions(mymtd, partition_info, NUM_PARTITIONS);
+		mtd_device_register(mymtd, NULL, 0);
+		mtd_device_register(mymtd, partition_info, NUM_PARTITIONS);
 		return 0;
 	}
 
@@ -83,7 +81,7 @@ int __init init_mbx(void)
 static void __exit cleanup_mbx(void)
 {
 	if (mymtd) {
-		del_mtd_device(mymtd);
+		mtd_device_unregister(mymtd);
 		map_destroy(mymtd);
 	}
 	if (mbx_map.virt) {

@@ -1,8 +1,14 @@
+
 #
 # Makefile for m68k-specific library files..
 #
 
-EXTRA_AFLAGS := -traditional
+lib-y	:= ashldi3.o ashrdi3.o lshrdi3.o muldi3.o \
+	   memcpy.o memset.o memmove.o
 
-lib-y		:= ashldi3.o ashrdi3.o lshrdi3.o muldi3.o \
-			checksum.o memcmp.o memcpy.o memset.o semaphore.o
+ifdef CONFIG_MMU
+lib-y	+= string.o uaccess.o checksum_mm.o
+else
+lib-y	+= mulsi3.o divsi3.o udivsi3.o modsi3.o umodsi3.o delay.o checksum_no.o
+endif
+

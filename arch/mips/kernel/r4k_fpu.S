@@ -6,7 +6,7 @@
  * Copyright (C) 1996, 98, 99, 2000, 01 Ralf Baechle
  *
  * Multi-arch abstraction and asm macros for easier reading:
- * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
  *
  * Carsten Langgaard, carstenl@mips.com
  * Copyright (C) 2000 MIPS Technologies, Inc.
@@ -16,7 +16,7 @@
 #include <asm/errno.h>
 #include <asm/fpregdef.h>
 #include <asm/mipsregs.h>
-#include <asm/offset.h>
+#include <asm/asm-offsets.h>
 #include <asm/regdef.h>
 
 	.macro	EX insn, reg, src
@@ -31,11 +31,11 @@
 
 	.set	noreorder
 	.set	mips3
-	/* Save floating point context */
+
 LEAF(_save_fp_context)
 	cfc1	t1, fcr31
 
-#ifdef CONFIG_MIPS64
+#ifdef CONFIG_64BIT
 	/* Store the 16 odd double precision registers */
 	EX	sdc1 $f1, SC_FPREGS+8(a0)
 	EX	sdc1 $f3, SC_FPREGS+24(a0)
@@ -73,14 +73,11 @@ LEAF(_save_fp_context)
 	EX	sdc1 $f28, SC_FPREGS+224(a0)
 	EX	sdc1 $f30, SC_FPREGS+240(a0)
 	EX	sw t1, SC_FPC_CSR(a0)
-	cfc1	t0, $0				# implementation/version
-	EX	sw t0, SC_FPC_EIR(a0)
-
 	jr	ra
 	 li	v0, 0					# success
 	END(_save_fp_context)
 
-#ifdef CONFIG_MIPS64
+#ifdef CONFIG_MIPS32_COMPAT
 	/* Save 32-bit process floating point context */
 LEAF(_save_fp_context32)
 	cfc1	t1, fcr31
@@ -117,7 +114,7 @@ LEAF(_save_fp_context32)
  */
 LEAF(_restore_fp_context)
 	EX	lw t0, SC_FPC_CSR(a0)
-#ifdef CONFIG_MIPS64
+#ifdef CONFIG_64BIT
 	EX	ldc1 $f1, SC_FPREGS+8(a0)
 	EX	ldc1 $f3, SC_FPREGS+24(a0)
 	EX	ldc1 $f5, SC_FPREGS+40(a0)
@@ -156,7 +153,7 @@ LEAF(_restore_fp_context)
 	 li	v0, 0					# success
 	END(_restore_fp_context)
 
-#ifdef CONFIG_MIPS64
+#ifdef CONFIG_MIPS32_COMPAT
 LEAF(_restore_fp_context32)
 	/* Restore an o32 sigcontext.  */
 	EX	lw t0, SC32_FPC_CSR(a0)
@@ -180,8 +177,9 @@ LEAF(_restore_fp_context32)
 	jr	ra
 	 li	v0, 0					# success
 	END(_restore_fp_context32)
-	.set	reorder
 #endif
+
+	.set	reorder
 
 	.type	fault@function
 	.ent	fault

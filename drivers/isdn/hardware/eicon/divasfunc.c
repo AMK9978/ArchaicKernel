@@ -1,4 +1,4 @@
-/* $Id: divasfunc.c,v 1.22 2003/09/09 06:46:29 schindler Exp $
+/* $Id: divasfunc.c,v 1.23.4.2 2004/08/28 20:03:53 armin Exp $
  *
  * Low level driver for Eicon DIVA Server ISDN cards.
  *
@@ -27,9 +27,6 @@ extern void DIVA_DIDD_Read(void *, int);
 
 extern PISDN_ADAPTER IoAdapters[MAX_ADAPTER];
 
-#define MAX_DESCRIPTORS  32
-
-extern void diva_run_trap_script(PISDN_ADAPTER IoAdapter, dword ANum);
 extern char *DRIVERRELEASE_DIVAS;
 
 static dword notify_handle;
@@ -77,20 +74,18 @@ void diva_xdi_didd_register_adapter(int card)
 		d.features = IoAdapters[card - 1]->Properties.Features;
 		DBG_TRC(("DIDD register A(%d) channels=%d", card,
 			 d.channels))
-		/* workaround for different Name in structure */
-		strlcpy(IoAdapters[card - 1]->Name,
-			IoAdapters[card - 1]->Properties.Name,
-			sizeof(IoAdapters[card - 1]->Name));
+		    /* workaround for different Name in structure */
+		    strlcpy(IoAdapters[card - 1]->Name,
+			    IoAdapters[card - 1]->Properties.Name,
+			    sizeof(IoAdapters[card - 1]->Name));
 		req.didd_remove_adapter.e.Req = 0;
 		req.didd_add_adapter.e.Rc = IDI_SYNC_REQ_DIDD_ADD_ADAPTER;
 		req.didd_add_adapter.info.descriptor = (void *) &d;
 		DAdapter.request((ENTITY *) & req);
 		if (req.didd_add_adapter.e.Rc != 0xff) {
 			DBG_ERR(("DIDD register A(%d) failed !", card))
-		} else {
-			IoAdapters[card - 1]->os_trap_nfy_Fnc =
-			    diva_run_trap_script;
 		}
+		IoAdapters[card - 1]->os_trap_nfy_Fnc = NULL;
 	}
 }
 
@@ -118,9 +113,8 @@ void diva_xdi_didd_remove_adapter(int card)
 static void start_dbg(void)
 {
 	DbgRegister("DIVAS", DRIVERRELEASE_DIVAS, (debugmask) ? debugmask : DBG_DEFAULT);
-	DBG_LOG(("DIVA ISDNXDI BUILD (%s[%s]-%s-%s)",
-		 DIVA_BUILD, diva_xdi_common_code_build, __DATE__,
-		 __TIME__))
+	DBG_LOG(("DIVA ISDNXDI BUILD (%s[%s])",
+		 DIVA_BUILD, diva_xdi_common_code_build))
 }
 
 /*
@@ -176,7 +170,7 @@ static int DIVA_INIT_FUNCTION connect_didd(void)
 			req.didd_notify.e.Rc =
 			    IDI_SYNC_REQ_DIDD_REGISTER_ADAPTER_NOTIFY;
 			req.didd_notify.info.callback = (void *)didd_callback;
-			req.didd_notify.info.context = 0;
+			req.didd_notify.info.context = NULL;
 			DAdapter.request((ENTITY *) & req);
 			if (req.didd_notify.e.Rc != 0xff) {
 				stop_dbg();
@@ -200,7 +194,7 @@ static int DIVA_INIT_FUNCTION connect_didd(void)
 /*
  * disconnect from didd
  */
-static void DIVA_EXIT_FUNCTION disconnect_didd(void)
+static void disconnect_didd(void)
 {
 	IDI_SYNC_REQ req;
 
@@ -236,7 +230,7 @@ int DIVA_INIT_FUNCTION divasfunc_init(int dbgmask)
 /*
  * exit
  */
-void DIVA_EXIT_FUNCTION divasfunc_exit(void)
+void divasfunc_exit(void)
 {
 	divasa_xdi_driver_unload();
 	disconnect_didd();

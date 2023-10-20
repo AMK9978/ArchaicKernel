@@ -2,7 +2,7 @@
  * sc-ip22.c: Indy cache management functions.
  *
  * Copyright (C) 1997, 2001 Ralf Baechle (ralf@gnu.org),
- * derived from r4xx0.c by David S. Miller (dm@engr.sgi.com).
+ * derived from r4xx0.c by David S. Miller (davem@davemloft.net).
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -65,8 +65,8 @@ static void indy_sc_wback_invalidate(unsigned long addr, unsigned long size)
 	printk("indy_sc_wback_invalidate[%08lx,%08lx]", addr, size);
 #endif
 
-	if (!size)
-		return;
+	/* Catch bad driver code */
+	BUG_ON(size == 0);
 
 	/* Which lines to flush?  */
 	first_line = SC_INDEX(addr);
@@ -161,14 +161,14 @@ static inline int __init indy_sc_probe(void)
 
 /* XXX Check with wje if the Indy caches can differenciate between
    writeback + invalidate and just invalidate.  */
-struct bcache_ops indy_sc_ops = {
+static struct bcache_ops indy_sc_ops = {
 	.bc_enable = indy_sc_enable,
 	.bc_disable = indy_sc_disable,
 	.bc_wback_inv = indy_sc_wback_invalidate,
 	.bc_inv = indy_sc_wback_invalidate
 };
 
-void __init indy_sc_init(void)
+void __cpuinit indy_sc_init(void)
 {
 	if (indy_sc_probe()) {
 		indy_sc_enable();
