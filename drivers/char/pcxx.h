@@ -49,7 +49,9 @@ struct board_info	{
 	ushort numports;
 	ushort port;
 	ulong  membase;
+	ulong  memsize;
 	ushort first_minor;
+	void *region;
 };
 
 
@@ -87,8 +89,8 @@ struct channel {
 	int							blocked_open;
 	int							close_delay;
 	int							event;
-	struct wait_queue			*open_wait;
-	struct wait_queue			*close_wait;
+	wait_queue_head_t			open_wait;
+	wait_queue_head_t			close_wait;
 	struct tq_struct			tqueue;
 							/* ------------ Async control data ------------- */
 	unchar						modemfake;      /* Modem values to be forced */

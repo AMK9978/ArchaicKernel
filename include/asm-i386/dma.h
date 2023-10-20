@@ -8,7 +8,10 @@
 #ifndef _ASM_DMA_H
 #define _ASM_DMA_H
 
+#include <linux/config.h>
+#include <linux/spinlock.h>	/* And spinlocks */
 #include <asm/io.h>		/* need byte IO */
+#include <linux/delay.h>
 
 
 #ifdef HAVE_REALLY_SLOW_DMA_CONTROLLER
@@ -70,7 +73,7 @@
 #define MAX_DMA_CHANNELS	8
 
 /* The maximum address that we can perform a DMA transfer to on this platform */
-#define MAX_DMA_ADDRESS      0x1000000
+#define MAX_DMA_ADDRESS      (PAGE_OFFSET+0x1000000)
 
 /* 8237 DMA controllers */
 #define IO_DMA1_BASE	0x00	/* 8 bit slave DMA, channels 0..3 */
@@ -129,6 +132,23 @@
 #define DMA_MODE_WRITE	0x48	/* memory to I/O, no autoinit, increment, single mode */
 #define DMA_MODE_CASCADE 0xC0   /* pass thru DREQ->HRQ, DACK<-HLDA only */
 
+#define DMA_AUTOINIT	0x10
+
+
+extern spinlock_t  dma_spin_lock;
+
+static __inline__ unsigned long claim_dma_lock(void)
+{
+	unsigned long flags;
+	spin_lock_irqsave(&dma_spin_lock, flags);
+	return flags;
+}
+
+static __inline__ void release_dma_lock(unsigned long flags)
+{
+	spin_unlock_irqrestore(&dma_spin_lock, flags);
+}
+
 /* enable/disable a specific DMA channel */
 static __inline__ void enable_dma(unsigned int dmanr)
 {
@@ -151,7 +171,7 @@ static __inline__ void disable_dma(unsigned int dmanr)
  * Use this once to initialize the FF to a known state.
  * After that, keep track of it. :-)
  * --- In order to do that, the DMA routines below should ---
- * --- only be used while interrupts are disabled! ---
+ * --- only be used while holding the DMA lock ! ---
  */
 static __inline__ void clear_dma_ff(unsigned int dmanr)
 {
@@ -267,5 +287,12 @@ static __inline__ int get_dma_residue(unsigned int dmanr)
 extern int request_dma(unsigned int dmanr, const char * device_id);	/* reserve a DMA channel */
 extern void free_dma(unsigned int dmanr);	/* release it again */
 
+/* From PCI */
+
+#ifdef CONFIG_PCI
+extern int isa_dma_bridge_buggy;
+#else
+#define isa_dma_bridge_buggy 	(0)
+#endif
 
 #endif /* _ASM_DMA_H */

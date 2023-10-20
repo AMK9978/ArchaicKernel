@@ -21,7 +21,7 @@
 #define fd_free_dma()           free_dma(FLOPPY_DMA)
 #define fd_clear_dma_ff()       clear_dma_ff(FLOPPY_DMA)
 #define fd_set_dma_mode(mode)   set_dma_mode(FLOPPY_DMA,mode)
-#define fd_set_dma_addr(addr)   set_dma_addr(FLOPPY_DMA,addr)
+#define fd_set_dma_addr(addr)   set_dma_addr(FLOPPY_DMA,virt_to_bus(addr))
 #define fd_set_dma_count(count) set_dma_count(FLOPPY_DMA,count)
 #define fd_enable_irq()         enable_irq(FLOPPY_IRQ)
 #define fd_disable_irq()        disable_irq(FLOPPY_IRQ)
@@ -30,6 +30,51 @@
 					    SA_INTERRUPT|SA_SAMPLE_RANDOM, \
 				            "floppy", NULL)
 #define fd_free_irq()           free_irq(FLOPPY_IRQ, NULL);
+
+#ifdef CONFIG_PCI
+
+#include <linux/pci.h>
+
+#define fd_dma_setup(addr,size,mode,io) alpha_fd_dma_setup(addr,size,mode,io)
+
+static __inline__ int 
+alpha_fd_dma_setup(char *addr, unsigned long size, int mode, int io)
+{
+	static unsigned long prev_size;
+	static dma_addr_t bus_addr = 0;
+	static char *prev_addr;
+	static int prev_dir;
+	int dir;
+
+	dir = (mode != DMA_MODE_READ) ? PCI_DMA_FROMDEVICE : PCI_DMA_TODEVICE;
+
+	if (bus_addr 
+	    && (addr != prev_addr || size != prev_size || dir != prev_dir)) {
+		/* different from last time -- unmap prev */
+		pci_unmap_single(NULL, bus_addr, prev_size, prev_dir);
+		bus_addr = 0;
+	}
+
+	if (!bus_addr)	/* need to map it */
+		bus_addr = pci_map_single(NULL, addr, size, dir);
+
+	/* remember this one as prev */
+	prev_addr = addr;
+	prev_size = size;
+	prev_dir = dir;
+
+	fd_clear_dma_ff();
+	fd_cacheflush(addr, size);
+	fd_set_dma_mode(mode);
+	set_dma_addr(FLOPPY_DMA, bus_addr);
+	fd_set_dma_count(size);
+	virtual_dma_port = io;
+	fd_enable_dma();
+
+	return 0;
+}
+
+#endif /* CONFIG_PCI */
 
 __inline__ void virtual_dma_init(void)
 {
@@ -48,14 +93,27 @@ static int FDC2 = -1;
 #define N_FDC 2
 #define N_DRIVE 8
 
+#define FLOPPY_MOTOR_MASK 0xf0
+
 /*
- * Most Alphas have no problems with floppy DMA crossing 64k borders. Sigh...
+ * Most Alphas have no problems with floppy DMA crossing 64k borders,
+ * except for XL and RUFFIAN.  They are also the only one with DMA
+ * limits, so we use that to test in the generic kernel.
  */
-#ifdef CONFIG_ALPHA_XL
-#define CROSS_64KB(a,s) \
-    ((unsigned long)(a)/0x10000 != ((unsigned long)(a) + (s) - 1) / 0x10000)
-#else /* CONFIG_ALPHA_XL */
-#define CROSS_64KB(a,s) (0)
-#endif /* CONFIG_ALPHA_XL */
+
+#define __CROSS_64KB(a,s)					\
+({ unsigned long __s64 = (unsigned long)(a);			\
+   unsigned long __e64 = __s64 + (unsigned long)(s) - 1;	\
+   (__s64 ^ __e64) & ~0xfffful; })
+
+#ifdef CONFIG_ALPHA_GENERIC
+# define CROSS_64KB(a,s)   (__CROSS_64KB(a,s) && ~alpha_mv.max_dma_address)
+#else
+# if defined(CONFIG_ALPHA_XL) || defined(CONFIG_ALPHA_RUFFIAN) || defined(CONFIG_ALPHA_NAUTILUS)
+#  define CROSS_64KB(a,s)  __CROSS_64KB(a,s)
+# else
+#  define CROSS_64KB(a,s)  (0)
+# endif
+#endif
 
 #endif /* __ASM_ALPHA_FLOPPY_H */

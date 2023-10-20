@@ -45,12 +45,14 @@
 #include <linux/interrupt.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
+#include <linux/init.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <asm/bitops.h>
 #include <asm/irq.h>
 
 #include <linux/blk.h>
+#include <linux/spinlock.h>
 #include "scsi.h"
 #include "hosts.h"
 #include "sd.h"
@@ -170,6 +172,7 @@ enum Phase {
 
 /* Static function prototypes */
 static  void NCR53c406a_intr(int, void *, struct pt_regs *);
+static  void do_NCR53c406a_intr(int, void *, struct pt_regs *);
 static  void internal_done(Scsi_Cmnd *);
 static  void wait_intr(void);
 static  void chip_init(void);
@@ -209,10 +212,6 @@ static volatile int internal_done_flag = 0;
 static volatile int internal_done_errcode = 0;
 static char info_msg[256];
 
-struct proc_dir_entry proc_scsi_NCR53c406a = {
-    PROC_SCSI_NCR53C406A, 7, "NCR53c406a",
-    S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
 /* ================================================================= */
 
 /* possible BIOS locations */
@@ -225,7 +224,8 @@ static void *addresses[] = {
 #endif USE_BIOS
 		       
 /* possible i/o port addresses */
-static unsigned short ports[] = { 0x230, 0x330 };
+static unsigned short ports[] =
+  { 0x230, 0x330, 0x280, 0x290, 0x330, 0x340, 0x300, 0x310, 0x348, 0x350 };
 #define PORT_COUNT (sizeof( ports ) / sizeof( unsigned short ))
 
 /* possible interrupt channels */
@@ -238,7 +238,7 @@ struct signature {
     char *signature;
     int  sig_offset;
     int  sig_length;
-} signatures[] = {
+} signatures[] __initdata = {
     /*          1         2         3         4         5         6 */
     /* 123456789012345678901234567890123456789012345678901234567890 */
     { "Copyright (C) Acculogic, Inc.\r\n2.8M Diskette Extension Bios ver 4.04.03 03/01/1993", 61, 82 },
@@ -313,15 +313,14 @@ NCR53c406a_dma_setup (unsigned char *ptr,
     if ((count & 1) || (((unsigned) ptr) & 1))
         panic ("NCR53c406a: attempted unaligned DMA transfer\n"); 
     
-    save_flags(flags);
-    cli();
+    flags=claim_dma_lock();
     disable_dma(dma_chan);
     clear_dma_ff(dma_chan);
     set_dma_addr(dma_chan, (long) ptr);
     set_dma_count(dma_chan, count);
     set_dma_mode(dma_chan, mode);
     enable_dma(dma_chan);
-    restore_flags(flags);
+    release_dma_lock(flags);    
     
     return count;
 }
@@ -339,12 +338,12 @@ NCR53c406a_dma_read(unsigned char *src, unsigned int count) {
 static __inline__ int 
 NCR53c406a_dma_residual (void) {
     register int tmp;
-    unsigned long flags = 0;
-    save_flags(flags);
-    cli();
+    unsigned long flags;
+
+    flags=claim_dma_lock();
     clear_dma_ff(dma_chan);
     tmp = get_dma_residue(dma_chan);
-    restore_flags(flags);
+    release_dma_lock(flags);
     
     return tmp;
 }
@@ -458,7 +457,7 @@ static __inline__ int NCR53c406a_pio_write(unsigned char *request,
 }
 #endif USE_PIO
 
-int 
+int  __init 
 NCR53c406a_detect(Scsi_Host_Template * tpnt){
     struct Scsi_Host *shpnt;
 #ifndef PORT_BASE
@@ -537,7 +536,7 @@ NCR53c406a_detect(Scsi_Host_Template * tpnt){
     request_region(port_base, 0x10, "NCR53c406a");
     
     if(irq_level > 0) {
-        if(request_irq(irq_level, NCR53c406a_intr, 0, "NCR53c406a", NULL)){
+        if(request_irq(irq_level, do_NCR53c406a_intr, 0, "NCR53c406a", NULL)){
             printk("NCR53c406a: unable to allocate IRQ %d\n", irq_level);
             return 0;
         }
@@ -568,7 +567,7 @@ NCR53c406a_detect(Scsi_Host_Template * tpnt){
 #endif USE_DMA 
     
     tpnt->present = 1;
-    tpnt->proc_dir = &proc_scsi_NCR53c406a;
+    tpnt->proc_name = "NCR53c406a";
     
     shpnt = scsi_register(tpnt, 0);
     shpnt->irq = irq_level;
@@ -590,7 +589,7 @@ NCR53c406a_detect(Scsi_Host_Template * tpnt){
 }
 
 /* called from init/main.c */
-void NCR53c406a_setup(char *str, int *ints)
+void __init NCR53c406a_setup(char *str, int *ints)
 {
     static size_t setup_idx = 0;
     size_t i;
@@ -653,10 +652,10 @@ static void internal_done(Scsi_Cmnd *SCpnt) {
 static void wait_intr() {
     int i = jiffies + WATCHDOG;
     
-    while(i>jiffies && !(inb(STAT_REG)&0xe0)) /* wait for a pseudo-interrupt */
+    while(time_after(i,jiffies) && !(inb(STAT_REG)&0xe0)) /* wait for a pseudo-interrupt */
         barrier();
     
-    if (i <= jiffies) {		/* Timed out */
+    if (time_before_eq(i,jiffies)) {		/* Timed out */
         rtrc(0);
         current_SC->result = DID_TIME_OUT << 16;
         current_SC->SCp.phase = idle;
@@ -729,7 +728,7 @@ NCR53c406a_abort(Scsi_Cmnd *SCpnt){
 }
 
 int 
-NCR53c406a_reset(Scsi_Cmnd *SCpnt){
+NCR53c406a_reset(Scsi_Cmnd *SCpnt, unsigned int ignored){
     DEB(printk("NCR53c406a_reset called\n"));
     outb(C4_IMG, CONFIG4);      /* Select reg set 0 */
     outb(CHIP_RESET, CMD_REG);
@@ -762,6 +761,15 @@ NCR53c406a_biosparm(Scsi_Disk *disk, kdev_t dev, int* info_array){
     return 0;
   }
      
+     static void
+do_NCR53c406a_intr(int unused, void *dev_id, struct pt_regs *regs){
+    unsigned long flags;
+
+    spin_lock_irqsave(&io_request_lock, flags);
+    NCR53c406a_intr(0, dev_id, regs);
+    spin_unlock_irqrestore(&io_request_lock, flags);
+}
+
      static void
 NCR53c406a_intr(int unused, void *dev_id, struct pt_regs *regs){
     DEB(unsigned char fifo_size;)
@@ -963,7 +971,6 @@ static int irq_probe()
     int i;
     
     inb(INT_REG);               /* clear the interrupt register */
-    sti();
     irqs = probe_irq_on();
     
     /* Invalid command will cause an interrupt */
@@ -972,9 +979,9 @@ static int irq_probe()
     
     /* Wait for the interrupt to occur */
     i = jiffies + WATCHDOG;
-    while(i > jiffies && !(inb(STAT_REG) & 0x80))
+    while(time_after(i, jiffies) && !(inb(STAT_REG) & 0x80))
         barrier();
-    if (i <= jiffies) {		/* Timed out, must be hardware trouble */
+    if (time_before_eq(i, jiffies)) {		/* Timed out, must be hardware trouble */
         probe_irq_off(irqs);
         return -1;
     }
@@ -1011,7 +1018,7 @@ static void chip_init()
     outb(SYNC_MODE, SYNCOFF);   /* synchronous mode */  
 }
 
-void calc_port_addr()
+void __init calc_port_addr(void)
 {
     /* Control Register Set 0 */
     TC_LSB		= (port_base+0x00);
@@ -1052,12 +1059,10 @@ void calc_port_addr()
     /* CONFIG6		= (port_base+0x0F);*/
 }
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = NCR53c406a;
+static Scsi_Host_Template driver_template = NCR53c406a;
 
 #include "scsi_module.c"
-#endif
 
 /*
  * Overrides for Emacs so that we get a uniform tabbing style.

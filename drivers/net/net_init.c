@@ -1,4 +1,4 @@
-/* netdrv_init.c: Initialization for network devices. */
+/* net_init.c: Initialization for network devices. */
 /*
 	Written 1993,1994,1995 by Donald Becker.
 
@@ -22,6 +22,13 @@
 	Changed 29/10/95, Alan Cox to pass sockaddr's around for mac addresses.
 	
 	14/06/96 - Paul Gortmaker:	Add generic eth_change_mtu() function. 
+	24/09/96 - Paul Norton: Add token-ring variants of the netdev functions. 
+	
+	08/11/99 - Alan Cox: Got fed up of the mess in this file and cleaned it
+			up. We now share common code and have regularised name
+			allocation setups. Abolished the 16 card limits.
+	03/19/2000 - jgarzik and Urban Widmark: init_etherdev 32-byte align
+
 */
 
 #include <linux/config.h>
@@ -34,11 +41,14 @@
 #include <linux/string.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
+#include <linux/fddidevice.h>
+#include <linux/hippidevice.h>
 #include <linux/trdevice.h>
+#include <linux/fcdevice.h>
 #include <linux/if_arp.h>
-#ifdef CONFIG_NET_ALIAS
-#include <linux/net_alias.h>
-#endif
+#include <linux/if_ltalk.h>
+#include <linux/rtnetlink.h>
+#include <net/neighbour.h>
 
 /* The network devices currently exist only in the socket namespace, so these
    entries are unused.  The only ones that make sense are
@@ -57,96 +67,114 @@
 	and a space waste]
 */
 
-/* The list of used and available "eth" slots (for "eth0", "eth1", etc.) */
-#define MAX_ETH_CARDS 16 /* same as the number if irq's in irq2dev[] */
-static struct device *ethdev_index[MAX_ETH_CARDS];
 
+static struct net_device *init_alloc_dev(int sizeof_priv)
+{
+	struct net_device *dev;
+	int alloc_size;
 
-/* Fill in the fields of the device structure with ethernet-generic values.
+	/* ensure 32-byte alignment of the private area */
+	alloc_size = sizeof (*dev) + sizeof_priv + 31;
 
-   If no device structure is passed, a new one is constructed, complete with
-   a SIZEOF_PRIVATE private data area.
+	dev = (struct net_device *) kmalloc (alloc_size, GFP_KERNEL);
+	if (dev == NULL)
+	{
+		printk(KERN_ERR "alloc_dev: Unable to allocate device memory.\n");
+		return NULL;
+	}
 
-   If an empty string area is passed as dev->name, or a new structure is made,
-   a new name string is constructed.  The passed string area should be 8 bytes
-   long.
+	memset(dev, 0, alloc_size);
+
+	if (sizeof_priv)
+		dev->priv = (void *) (((long)(dev + 1) + 31) & ~31);
+
+	return dev;
+}
+
+/* 
+ *	Create and name a device from a prototype, then perform any needed
+ *	setup.
  */
 
-struct device *
-init_etherdev(struct device *dev, int sizeof_priv)
+static struct net_device *init_netdev(struct net_device *dev, int sizeof_priv,
+				      char *mask, void (*setup)(struct net_device *))
 {
 	int new_device = 0;
-	int i;
 
-	/* Use an existing correctly named device in Space.c:dev_base. */
+	/*
+	 *	Allocate a device if one is not provided.
+	 */
+	 
 	if (dev == NULL) {
-		int alloc_size = sizeof(struct device) + sizeof("eth%d  ")
-			+ sizeof_priv + 3;
-		struct device *cur_dev;
-		char pname[8];		/* Putative name for the device.  */
-
-		for (i = 0; i < MAX_ETH_CARDS; ++i)
-			if (ethdev_index[i] == NULL) {
-				sprintf(pname, "eth%d", i);
-				for (cur_dev = dev_base; cur_dev; cur_dev = cur_dev->next)
-					if (strcmp(pname, cur_dev->name) == 0) {
-						dev = cur_dev;
-						dev->init = NULL;
-						sizeof_priv = (sizeof_priv + 3) & ~3;
-						dev->priv = sizeof_priv
-							  ? kmalloc(sizeof_priv, GFP_KERNEL)
-							  :	NULL;
-						if (dev->priv) memset(dev->priv, 0, sizeof_priv);
-						goto found;
-					}
-			}
-
-		alloc_size &= ~3;		/* Round to dword boundary. */
-
-		dev = (struct device *)kmalloc(alloc_size, GFP_KERNEL);
-		memset(dev, 0, alloc_size);
-		if (sizeof_priv)
-			dev->priv = (void *) (dev + 1);
-		dev->name = sizeof_priv + (char *)(dev + 1);
+		dev=init_alloc_dev(sizeof_priv);
+		if(dev==NULL)
+			return NULL;
 		new_device = 1;
 	}
 
-	found:						/* From the double loop above. */
-
-	if (dev->name &&
-		((dev->name[0] == '\0') || (dev->name[0] == ' '))) {
-		for (i = 0; i < MAX_ETH_CARDS; ++i)
-			if (ethdev_index[i] == NULL) {
-				sprintf(dev->name, "eth%d", i);
-				ethdev_index[i] = dev;
-				break;
-			}
+	/*
+	 *	Allocate a name
+	 */
+	 
+	if (dev->name[0] == '\0' || dev->name[0] == ' ') {
+		strcpy(dev->name, mask);
+		if (dev_alloc_name(dev, mask)<0) {
+			if (new_device)
+				kfree(dev);
+			return NULL;
+		}
 	}
 
-	ether_setup(dev); 	/* Hmmm, should this be called here? */
+	netdev_boot_setup_check(dev);
+	
+	/*
+	 *	Configure via the caller provided setup function then
+	 *	register if needed.
+	 */
+	
+	setup(dev);
 	
 	if (new_device) {
-		/* Append the device to the device queue. */
-		struct device **old_devp = &dev_base;
-		while ((*old_devp)->next)
-			old_devp = & (*old_devp)->next;
-		(*old_devp)->next = dev;
-		dev->next = 0;
+		rtnl_lock();
+		register_netdevice(dev);
+		rtnl_unlock();
 	}
 	return dev;
 }
 
+/**
+ * init_etherdev - Register ethernet device
+ * @dev: An ethernet device structure to be filled in, or %NULL if a new
+ *	struct should be allocated.
+ * @sizeof_priv: Size of additional driver-private structure to be allocated
+ *	for this ethernet device
+ *
+ * Fill in the fields of the device structure with ethernet-generic values.
+ *
+ * If no device structure is passed, a new one is constructed, complete with
+ * a private data area of size @sizeof_priv.  A 32-byte (not bit)
+ * alignment is enforced for this private data area.
+ *
+ * If an empty string area is passed as dev->name, or a new structure is made,
+ * a new name string is constructed.
+ */
 
-static int eth_mac_addr(struct device *dev, void *p)
+struct net_device *init_etherdev(struct net_device *dev, int sizeof_priv)
+{
+	return init_netdev(dev, sizeof_priv, "eth%d", ether_setup);
+}
+
+
+static int eth_mac_addr(struct net_device *dev, void *p)
 {
 	struct sockaddr *addr=p;
-	if(dev->start)
+	if (netif_running(dev))
 		return -EBUSY;
 	memcpy(dev->dev_addr, addr->sa_data,dev->addr_len);
 	return 0;
 }
 
-static int eth_change_mtu(struct device *dev, int new_mtu)
+static int eth_change_mtu(struct net_device *dev, int new_mtu)
 {
 	if ((new_mtu < 68) || (new_mtu > 1500))
 		return -EINVAL;
@@ -154,33 +182,93 @@ static int eth_change_mtu(struct device *dev, int new_mtu)
 	return 0;
 }
 
-void ether_setup(struct device *dev)
+#ifdef CONFIG_FDDI
+
+struct net_device *init_fddidev(struct net_device *dev, int sizeof_priv)
 {
-	int i;
+	return init_netdev(dev, sizeof_priv, "fddi%d", fddi_setup);
+}
+
+static int fddi_change_mtu(struct net_device *dev, int new_mtu)
+{
+	if ((new_mtu < FDDI_K_SNAP_HLEN) || (new_mtu > FDDI_K_SNAP_DLEN))
+		return(-EINVAL);
+	dev->mtu = new_mtu;
+	return(0);
+}
+
+#endif /* CONFIG_FDDI */
+
+#ifdef CONFIG_HIPPI
+
+static int hippi_change_mtu(struct net_device *dev, int new_mtu)
+{
+	/*
+	 * HIPPI's got these nice large MTUs.
+	 */
+	if ((new_mtu < 68) || (new_mtu > 65280))
+		return -EINVAL;
+	dev->mtu = new_mtu;
+	return(0);
+}
+
+
+/*
+ * For HIPPI we will actually use the lower 4 bytes of the hardware
+ * address as the I-FIELD rather than the actual hardware address.
+ */
+static int hippi_mac_addr(struct net_device *dev, void *p)
+{
+	struct sockaddr *addr = p;
+	if (netif_running(dev))
+		return -EBUSY;
+	memcpy(dev->dev_addr, addr->sa_data, dev->addr_len);
+	return 0;
+}
+
+
+struct net_device *init_hippi_dev(struct net_device *dev, int sizeof_priv)
+{
+	return init_netdev(dev, sizeof_priv, "hip%d", hippi_setup);
+}
+
+
+void unregister_hipdev(struct net_device *dev)
+{
+	rtnl_lock();
+	unregister_netdevice(dev);
+	rtnl_unlock();
+}
+
+
+static int hippi_neigh_setup_dev(struct net_device *dev, struct neigh_parms *p)
+{
+	/* Never send broadcast/multicast ARP messages */
+	p->mcast_probes = 0;
+ 
+	/* In IPv6 unicast probes are valid even on NBMA,
+	* because they are encapsulated in normal IPv6 protocol.
+	* Should be a generic flag. 
+	*/
+	if (p->tbl->family != AF_INET6)
+		p->ucast_probes = 0;
+	return 0;
+}
+
+#endif /* CONFIG_HIPPI */
+
+void ether_setup(struct net_device *dev)
+{
 	/* Fill in the fields of the device structure with ethernet-generic values.
 	   This should be in a common file instead of per-driver.  */
-	for (i = 0; i < DEV_NUMBUFFS; i++)
-		skb_queue_head_init(&dev->buffs[i]);
-
-	/* register boot-defined "eth" devices */
-	if (dev->name && (strncmp(dev->name, "eth", 3) == 0)) {
-		i = simple_strtoul(dev->name + 3, NULL, 0);
-		if (ethdev_index[i] == NULL) {
-			ethdev_index[i] = dev;
-		}
-		else if (dev != ethdev_index[i]) {
-			/* Really shouldn't happen! */
-			printk("ether_setup: Ouch! Someone else took %s\n",
-				dev->name);
-		}
-	}
-
+	
 	dev->change_mtu		= eth_change_mtu;
 	dev->hard_header	= eth_header;
 	dev->rebuild_header 	= eth_rebuild_header;
 	dev->set_mac_address 	= eth_mac_addr;
-	dev->header_cache_bind 	= eth_header_cache_bind;
+	dev->hard_header_cache	= eth_header_cache;
 	dev->header_cache_update= eth_header_cache_update;
+	dev->hard_header_parse	= eth_header_parse;
 
 	dev->type		= ARPHRD_ETHER;
 	dev->hard_header_len 	= ETH_HLEN;
@@ -192,46 +280,117 @@ void ether_setup(struct device *dev)
 
 	/* New-style flags. */
 	dev->flags		= IFF_BROADCAST|IFF_MULTICAST;
-	dev->family		= AF_INET;
-	dev->pa_addr	= 0;
-	dev->pa_brdaddr = 0;
-	dev->pa_mask	= 0;
-	dev->pa_alen	= 4;
+
+	dev_init_buffers(dev);
 }
 
-#ifdef CONFIG_TR
+#ifdef CONFIG_FDDI
 
-void tr_setup(struct device *dev)
+void fddi_setup(struct net_device *dev)
 {
-	int i;
-	/* Fill in the fields of the device structure with ethernet-generic values.
-	   This should be in a common file instead of per-driver.  */
-	for (i = 0; i < DEV_NUMBUFFS; i++)
-		skb_queue_head_init(&dev->buffs[i]);
-
-	dev->hard_header	= tr_header;
-	dev->rebuild_header 	= tr_rebuild_header;
-
-	dev->type		= ARPHRD_IEEE802;
-	dev->hard_header_len 	= TR_HLEN;
-	dev->mtu		= 2000; /* bug in fragmenter...*/
-	dev->addr_len		= TR_ALEN;
-	dev->tx_queue_len	= 100;	/* Long queues on tr */
+	/*
+	 * Fill in the fields of the device structure with FDDI-generic values.
+	 * This should be in a common file instead of per-driver.
+	 */
 	
-	memset(dev->broadcast,0xFF, TR_ALEN);
+	dev->change_mtu			= fddi_change_mtu;
+	dev->hard_header		= fddi_header;
+	dev->rebuild_header		= fddi_rebuild_header;
 
-	/* New-style flags. */
-	dev->flags		= IFF_BROADCAST;
-	dev->family		= AF_INET;
-	dev->pa_addr	= 0;
-	dev->pa_brdaddr = 0;
-	dev->pa_mask	= 0;
-	dev->pa_alen	= 4;
+	dev->type				= ARPHRD_FDDI;
+	dev->hard_header_len	= FDDI_K_SNAP_HLEN+3;	/* Assume 802.2 SNAP hdr len + 3 pad bytes */
+	dev->mtu				= FDDI_K_SNAP_DLEN;		/* Assume max payload of 802.2 SNAP frame */
+	dev->addr_len			= FDDI_K_ALEN;
+	dev->tx_queue_len		= 100;	/* Long queues on FDDI */
+	
+	memset(dev->broadcast, 0xFF, FDDI_K_ALEN);
+
+	/* New-style flags */
+	dev->flags		= IFF_BROADCAST | IFF_MULTICAST;
+
+	dev_init_buffers(dev);
+	
+	return;
 }
 
-#endif
+#endif /* CONFIG_FDDI */
 
-int ether_config(struct device *dev, struct ifmap *map)
+#ifdef CONFIG_HIPPI
+void hippi_setup(struct net_device *dev)
+{
+	dev->set_multicast_list	= NULL;
+	dev->change_mtu			= hippi_change_mtu;
+	dev->hard_header		= hippi_header;
+	dev->rebuild_header 		= hippi_rebuild_header;
+	dev->set_mac_address 		= hippi_mac_addr;
+	dev->hard_header_parse		= NULL;
+	dev->hard_header_cache		= NULL;
+	dev->header_cache_update	= NULL;
+	dev->neigh_setup 		= hippi_neigh_setup_dev; 
+
+	/*
+	 * We don't support HIPPI `ARP' for the time being, and probably
+	 * never will unless someone else implements it. However we
+	 * still need a fake ARPHRD to make ifconfig and friends play ball.
+	 */
+	dev->type		= ARPHRD_HIPPI;
+	dev->hard_header_len 	= HIPPI_HLEN;
+	dev->mtu		= 65280;
+	dev->addr_len		= HIPPI_ALEN;
+	dev->tx_queue_len	= 25 /* 5 */;
+	memset(dev->broadcast, 0xFF, HIPPI_ALEN);
+
+
+	/*
+	 * HIPPI doesn't support broadcast+multicast and we only use
+	 * static ARP tables. ARP is disabled by hippi_neigh_setup_dev. 
+	 */
+	dev->flags = 0; 
+
+	dev_init_buffers(dev);
+}
+#endif /* CONFIG_HIPPI */
+
+#if defined(CONFIG_ATALK) || defined(CONFIG_ATALK_MODULE)
+
+static int ltalk_change_mtu(struct net_device *dev, int mtu)
+{
+	return -EINVAL;
+}
+
+static int ltalk_mac_addr(struct net_device *dev, void *addr)
+{	
+	return -EINVAL;
+}
+
+
+void ltalk_setup(struct net_device *dev)
+{
+	/* Fill in the fields of the device structure with localtalk-generic values. */
+	
+	dev->change_mtu		= ltalk_change_mtu;
+	dev->hard_header	= NULL;
+	dev->rebuild_header 	= NULL;
+	dev->set_mac_address 	= ltalk_mac_addr;
+	dev->hard_header_cache	= NULL;
+	dev->header_cache_update= NULL;
+
+	dev->type		= ARPHRD_LOCALTLK;
+	dev->hard_header_len 	= LTALK_HLEN;
+	dev->mtu		= LTALK_MTU;
+	dev->addr_len		= LTALK_ALEN;
+	dev->tx_queue_len	= 10;	
+	
+	dev->broadcast[0]	= 0xFF;
+
+	dev->flags		= IFF_BROADCAST|IFF_MULTICAST|IFF_NOARP;
+
+	dev_init_buffers(dev);
+}
+
+#endif /* CONFIG_ATALK || CONFIG_ATALK_MODULE */
+
+int ether_config(struct net_device *dev, struct ifmap *map)
 {
 	if (map->mem_start != (u_long)(-1))
 		dev->mem_start = map->mem_start;
@@ -248,137 +407,150 @@ int ether_config(struct device *dev, struct ifmap *map)
 	return 0;
 }
 
-int register_netdev(struct device *dev)
+int register_netdev(struct net_device *dev)
 {
-	struct device *d = dev_base;
-	unsigned long flags;
-	int i=MAX_ETH_CARDS;
+	int err;
 
-	save_flags(flags);
-	cli();
+	rtnl_lock();
 
-	if (dev && dev->init) {
-		if (dev->name &&
-			((dev->name[0] == '\0') || (dev->name[0] == ' '))) {
-			for (i = 0; i < MAX_ETH_CARDS; ++i)
-				if (ethdev_index[i] == NULL) {
-					sprintf(dev->name, "eth%d", i);
-					printk("loading device '%s'...\n", dev->name);
-					ethdev_index[i] = dev;
-					break;
-				}
-		}
-
-		sti();	/* device probes assume interrupts enabled */
-		if (dev->init(dev) != 0) {
-		    if (i < MAX_ETH_CARDS) ethdev_index[i] = NULL;
-			restore_flags(flags);
-			return -EIO;
-		}
-		cli();
-
-		/* Add device to end of chain */
-		if (dev_base) {
-			while (d->next)
-				d = d->next;
-			d->next = dev;
-		}
-		else
-			dev_base = dev;
-		dev->next = NULL;
+	/*
+	 *	If the name is a format string the caller wants us to
+	 *	do a name allocation
+	 */
+	 
+	if (strchr(dev->name, '%'))
+	{
+		err = -EBUSY;
+		if(dev_alloc_name(dev, dev->name)<0)
+			goto out;
 	}
-	restore_flags(flags);
+	
+	/*
+	 *	Back compatibility hook. Kill this one in 2.5
+	 */
+	
+	if (dev->name[0]==0 || dev->name[0]==' ')
+	{
+		err = -EBUSY;
+		if(dev_alloc_name(dev, "eth%d")<0)
+			goto out;
+	}
+		
+		
+	err = -EIO;
+	if (register_netdevice(dev))
+		goto out;
+
+	err = 0;
+
+out:
+	rtnl_unlock();
+	return err;
+}
+
+void unregister_netdev(struct net_device *dev)
+{
+	rtnl_lock();
+	unregister_netdevice(dev);
+	rtnl_unlock();
+}
+
+
+#ifdef CONFIG_TR
+
+static void tr_configure(struct net_device *dev)
+{
+	/*
+	 *	Configure and register
+	 */
+	
+	dev->hard_header	= tr_header;
+	dev->rebuild_header	= tr_rebuild_header;
+
+	dev->type		= ARPHRD_IEEE802_TR;
+	dev->hard_header_len	= TR_HLEN;
+	dev->mtu		= 2000;
+	dev->addr_len		= TR_ALEN;
+	dev->tx_queue_len	= 100;	/* Long queues on tr */
+	
+	memset(dev->broadcast,0xFF, TR_ALEN);
+
+	/* New-style flags. */
+	dev->flags		= IFF_BROADCAST | IFF_MULTICAST ;
+}
+
+struct net_device *init_trdev(struct net_device *dev, int sizeof_priv)
+{
+	return init_netdev(dev, sizeof_priv, "tr%d", tr_configure);
+}
+
+void tr_setup(struct net_device *dev)
+{
+}
+
+int register_trdev(struct net_device *dev)
+{
+	dev_init_buffers(dev);
+	
+	if (dev->init && dev->init(dev) != 0) {
+		unregister_trdev(dev);
+		return -EIO;
+	}
 	return 0;
 }
 
-void unregister_netdev(struct device *dev)
+void unregister_trdev(struct net_device *dev)
 {
-	struct device *d = dev_base;
-	unsigned long flags;
-	int i;
+	rtnl_lock();
+	unregister_netdevice(dev);
+	rtnl_unlock();
+}
+#endif /* CONFIG_TR */
 
-	save_flags(flags);
-	cli();
 
-	if (dev == NULL) 
-	{
-		printk("was NULL\n");
-		restore_flags(flags);
-		return;
-	}
-	/* else */
-	if (dev->start)
-		printk("ERROR '%s' busy and not MOD_IN_USE.\n", dev->name);
+#ifdef CONFIG_NET_FC
 
-	/*
-	 * 	must jump over main_device+aliases
-	 * 	avoid alias devices unregistration so that only
-	 * 	net_alias module manages them
-	 */
-#ifdef CONFIG_NET_ALIAS		
-	if (dev_base == dev)
-		dev_base = net_alias_nextdev(dev);
-	else
-	{
-		while(d && (net_alias_nextdev(d) != dev)) /* skip aliases */
-			d = net_alias_nextdev(d);
-	  
-		if (d && (net_alias_nextdev(d) == dev))
-		{
-			/*
-			 * 	Critical: Bypass by consider devices as blocks (maindev+aliases)
-			 */
-			net_alias_nextdev_set(d, net_alias_nextdev(dev)); 
-		}
-#else
-	if (dev_base == dev)
-		dev_base = dev->next;
-	else 
-	{
-		while (d && (d->next != dev))
-			d = d->next;
-		
-		if (d && (d->next == dev)) 
-		{
-			d->next = dev->next;
-		}
-#endif
-		else 
-		{
-			printk("unregister_netdev: '%s' not found\n", dev->name);
-			restore_flags(flags);
-			return;
-		}
-	}
-	for (i = 0; i < MAX_ETH_CARDS; ++i) 
-	{
-		if (ethdev_index[i] == dev) 
-		{
-			ethdev_index[i] = NULL;
-			break;
-		}
-	}
+void fc_setup(struct net_device *dev)
+{
+	dev->hard_header        =        fc_header;
+        dev->rebuild_header  	=        fc_rebuild_header;
+                
+        dev->type               =        ARPHRD_IEEE802;
+	dev->hard_header_len    =        FC_HLEN;
+        dev->mtu                =        2024;
+        dev->addr_len           =        FC_ALEN;
+        dev->tx_queue_len       =        100; /* Long queues on fc */
 
-	restore_flags(flags);
+        memset(dev->broadcast,0xFF, FC_ALEN);
 
-	/*
-	 *	You can i.e use a interfaces in a route though it is not up.
-	 *	We call close_dev (which is changed: it will down a device even if
-	 *	dev->flags==0 (but it will not call dev->stop if IFF_UP
-	 *	is not set).
-	 *	This will call notifier_call_chain(&netdev_chain, NETDEV_DOWN, dev),
-	 *	dev_mc_discard(dev), ....
-	 */
-	 
-	dev_close(dev);
+        /* New-style flags. */
+        dev->flags              =        IFF_BROADCAST;
+	dev_init_buffers(dev);
+        return;
 }
 
-
-/*
- * Local variables:
- *  compile-command: "gcc -D__KERNEL__ -I/usr/src/linux/net/inet -Wall -Wstrict-prototypes -O6 -m486 -c net_init.c"
- *  version-control: t
- *  kept-new-versions: 5
- *  tab-width: 4
- * End:
- */
+
+struct net_device *init_fcdev(struct net_device *dev, int sizeof_priv)
+{
+	return init_netdev(dev, sizeof_priv, "fc%d", fc_setup);
+}
+
+int register_fcdev(struct net_device *dev)
+{
+        dev_init_buffers(dev);
+        if (dev->init && dev->init(dev) != 0) {
+                unregister_fcdev(dev);
+                return -EIO;
+        }
+        return 0;
+}                                               
+        
+void unregister_fcdev(struct net_device *dev)
+{
+        rtnl_lock();
+	unregister_netdevice(dev);
+        rtnl_unlock();
+}
+
+#endif /* CONFIG_NET_FC */
+

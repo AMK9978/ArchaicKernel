@@ -7,65 +7,147 @@
 #
 # Copyright (C) 1994 by Linus Torvalds
 # Adapted for PowerPC by Gary Thomas
+# modified by Cort (cort@cs.nmt.edu)
 #
-
 .c.s:
 	$(CC) $(CFLAGS) -S -o $*.s $<
 .s.o:
 	$(AS) -o $*.o $<
 .c.o:
-	$(CC) $(CFLAGS) -c -o $*.o $<
+	$(CC) $(CFLAGS)  -DINITRD_OFFSET=$(IOFF) -DINITRD_SIZE=$(ISZ) -DZIMAGE_OFFSET=$(ZOFF) -DZIMAGE_SIZE=$(ZSZ) -D__BOOTER__ -c -o $*.o $<
 .S.s:
-	$(CC) -D__ASSEMBLY__ -traditional -E -o $*.o $<
+	$(CPP) $(AFLAGS) -traditional -o $*.o $<
 .S.o:
-	$(CC) -D__ASSEMBLY__ -traditional -c -o $*.o $<
+	$(CC) $(AFLAGS) -traditional -c -o $*.o $<
 
-OBJECTS = head.o main.o
+ZOFF = 0
+ZSZ = 0
+IOFF = 0
+ISZ = 0
 
-all:	linux.boot
+ifeq ($(CONFIG_ALL_PPC),y)
+CONFIG_PREP=y
+endif
 
-#zImage: $(CONFIGURE) bootsect setup compressed/vmlinux tools/build
-zImage: compressed/vmlinux mk_type41
-	mkboot compressed/vmlinux vmlinux 0
-	mk_type41 vmlinux zImage
-	cp compressed/vmlinux zBoot
-	rm -f vmlinux compressed/vmlinux
+ifeq ($(CONFIG_SMP),y)
+TFTPIMAGE=/tftpboot/zImage.prep.smp$(MSIZE)
+else
+TFTPIMAGE=/tftpboot/zImage.prep$(MSIZE)
+endif
 
-zdisk: zImage
-	dd if=zImage of=/dev/fd0 bs=36b	
+ifeq ($(CONFIG_SMP),y)
+TFTPSIMAGE=/tftpboot/sImage.smp
+else
+TFTPSIMAGE=/tftpboot/sImage
+endif
 
-compressed/vmlinux: $(TOPDIR)/vmlinux
-	@$(MAKE) -C compressed vmlinux
+ifeq ($(CONFIG_PPC64BRIDGE),y)
+MSIZE=.64
+else
+MSIZE=
+endif
 
-tImage: mk_type41 $(TOPDIR)/vmlinux
-	mkboot $(TOPDIR)/vmlinux vmlinux 0
-	mk_type41 vmlinux tImage
-	rm -f vmlinux
+ZLINKFLAGS = -T ../vmlinux.lds -Ttext 0x00800000
 
-bImage: mk_type41 $(TOPDIR)/vmlinux.no_ramdisk
-	mkboot $(TOPDIR)/vmlinux.no_ramdisk vmlinux 0
-	mk_type41 vmlinux bImage
-	rm -f vmlinux
+GZIP_FLAGS = -v9f
 
-xImage: compressed/vmlinux.no_ramdisk
-	mkboot compressed/vmlinux.no_ramdisk vmlinux 0
-	mk_type41 vmlinux xImage
-	rm -f vmlinux compressed/vmlinux.no_ramdisk
+OBJECTS := head.o misc.o ../coffboot/zlib.o
+CFLAGS = $(CPPFLAGS) -O2 -DSTDC_HEADERS -fno-builtin
+OBJCOPY_ARGS = -O elf32-powerpc
 
-compressed/vmlinux.no_ramdisk: $(TOPDIR)/vmlinux.no_ramdisk
-	@$(MAKE) -C compressed vmlinux.no_ramdisk
+OBJECTS += vreset.o kbd.o of1275.o
+ifeq ($(CONFIG_SERIAL_CONSOLE),y)
+OBJECTS += ns16550.o
+endif
 
-bdisk: xImage
-	dd if=xImage of=/dev/fd0 bs=36b
-	
-linux.boot: $(TOPDIR)/vmlinux
-	mkboot $(TOPDIR)/vmlinux $@ 0
+all:	zImage
 
-mk_type41: mk_type41.c
-	cc -o mk_type41 mk_type41.c
-	
+zvmlinux.initrd: zvmlinux
+	$(LD) $(ZLINKFLAGS) -o zvmlinux.initrd.tmp $(OBJECTS)
+	$(OBJCOPY) $(OBJCOPY_ARGS) -R .comment \
+		--add-section=initrd=ramdisk.image.gz \
+		--add-section=image=../coffboot/vmlinux.gz \
+		zvmlinux.initrd.tmp zvmlinux.initrd
+	$(CC) $(CFLAGS) -DINITRD_OFFSET=`sh offset $(OBJDUMP) zvmlinux.initrd initrd` \
+		-DINITRD_SIZE=`sh size $(OBJDUMP) zvmlinux.initrd initrd` \
+		-DZIMAGE_OFFSET=`sh offset $(OBJDUMP) zvmlinux.initrd image` \
+		-DZIMAGE_SIZE=`sh size $(OBJDUMP) zvmlinux.initrd image` \
+		-D__BOOTER__ \
+		-c -o misc.o misc.c
+	$(LD) $(ZLINKFLAGS) -o zvmlinux.initrd.tmp $(OBJECTS)
+	$(OBJCOPY) $(OBJCOPY_ARGS) -R .comment \
+		--add-section=initrd=ramdisk.image.gz \
+		--add-section=image=../coffboot/vmlinux.gz \
+		zvmlinux.initrd.tmp $@
+	rm zvmlinux.initrd.tmp
+
+zImage: zvmlinux mkprep sImage
+ifdef CONFIG_PREP
+	./mkprep -pbp zvmlinux zImage
+endif
+ifdef CONFIG_APUS
+	$(STRIP) ../../../vmlinux -o vmapus
+	gzip $(GZIP_FLAGS) vmapus
+endif
+
+sImage: ../../../vmlinux
+ifdef CONFIG_GEMINI
+	$(OBJCOPY) -I elf32-powerpc -O binary ../../../vmlinux sImage
+endif
+
+zImage.initrd: zvmlinux.initrd mkprep
+ifdef CONFIG_PREP
+	./mkprep -pbp zvmlinux.initrd zImage.initrd
+endif
+
+zvmlinux: $(OBJECTS) ../coffboot/vmlinux.gz
+#
+# build the boot loader image and then compute the offset into it
+# for the kernel image
+#
+	$(LD) $(ZLINKFLAGS) -o zvmlinux.tmp $(OBJECTS)
+	$(OBJCOPY) $(OBJCOPY_ARGS) -R .comment --add-section=image=../coffboot/vmlinux.gz \
+		zvmlinux.tmp $@
+#
+# then with the offset rebuild the bootloader so we know where the kernel is
+#
+	$(CC) $(CFLAGS) -DINITRD_OFFSET=0 -DINITRD_SIZE=0 \
+		-DZIMAGE_OFFSET=`sh offset $(OBJDUMP) zvmlinux image` \
+		-DZIMAGE_SIZE=`sh size $(OBJDUMP) zvmlinux image` \
+		-D__BOOTER__ \
+		-c -o misc.o misc.c
+	$(LD) $(ZLINKFLAGS) -o zvmlinux.tmp $(OBJECTS)
+	$(OBJCOPY) $(OBJCOPY_ARGS) -R .comment --add-section=image=../coffboot/vmlinux.gz \
+		zvmlinux.tmp $@
+	rm zvmlinux.tmp
+
+floppy: $(TOPDIR)/vmlinux zImage
+	dd if=zImage of=/dev/fd0H1440 bs=64b
+
+mkprep : mkprep.c
+	$(HOSTCC) -o mkprep mkprep.c
+
+znetboot : zImage
+ifdef CONFIG_PREP
+	cp zImage $(TFTPIMAGE)
+endif
+ifdef CONFIG_GEMINI
+	cp sImage $(TFTPSIMAGE)
+endif
+
+znetboot.initrd : zImage.initrd
+	cp zImage.initrd $(TFTPIMAGE)
+
 clean:
-	rm -f linux.boot 
+	rm -f vmlinux* zvmlinux* mkprep zImage* sImage*
+
+fastdep:
+	$(TOPDIR)/scripts/mkdep *.[Sch] > .depend
 
 dep:
-fastdep:
+	$(CPP) $(CPPFLAGS) -M *.S *.c > .depend
+
+# just here to match coffboot/Makefile
+vmlinux.coff:
+
+vmlinux.coff.initrd:

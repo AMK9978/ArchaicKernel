@@ -1,47 +1,48 @@
 #ifndef __ALPHA_DELAY_H
 #define __ALPHA_DELAY_H
 
-extern unsigned long loops_per_sec;
+#include <linux/config.h>
+#include <asm/param.h>
+#include <asm/smp.h>
 
 /*
- * Copyright (C) 1993 Linus Torvalds
+ * Copyright (C) 1993, 2000 Linus Torvalds
  *
- * Delay routines, using a pre-computed "loops_per_second" value.
+ * Delay routines, using a pre-computed "loops_per_jiffy" value.
  */
 
-extern __inline__ void __delay(unsigned long loops)
-{
-	__asm__ __volatile__(".align 3\n"
-		"1:\tsubq %0,1,%0\n\t"
-		"bge %0,1b": "=r" (loops) : "0" (loops));
-}
-
 /*
- * division by multiplication: you don't have to worry about
- * loss of precision.
+ * Use only for very small delays (< 1 msec). 
  *
- * Use only for very small delays ( < 1 msec).  Should probably use a
- * lookup table, really, as the multiplications take much too long with
- * short delays.  This is a "reasonable" implementation, though (and the
- * first constant multiplications gets optimized away if the delay is
- * a constant)
+ * The active part of our cycle counter is only 32-bits wide, and
+ * we're treating the difference between two marks as signed.  On
+ * a 1GHz box, that's about 2 seconds.
  */
-extern __inline__ void udelay(unsigned long usecs)
+
+extern __inline__ void
+__delay(int loops)
 {
-	usecs *= 0x000010c6f7a0b5edUL;		/* 2**64 / 1000000 */
-	__asm__("umulh %1,%2,%0"
-		:"=r" (usecs)
-		:"r" (usecs),"r" (loops_per_sec));
-	__delay(usecs);
+	int tmp;
+	__asm__ __volatile__(
+		"	rpcc %0\n"
+		"	addl %1,%0,%1\n"
+		"1:	rpcc %0\n"
+		"	subl %1,%0,%0\n"
+		"	bgt %0,1b"
+		: "=&r" (tmp), "=r" (loops) : "1"(loops));
 }
 
-/*
- * 64-bit integers means we don't have to worry about overflow as
- * on some other architectures..
- */
-extern __inline__ unsigned long muldiv(unsigned long a, unsigned long b, unsigned long c)
+extern __inline__ void
+__udelay(unsigned long usecs, unsigned long lpj)
 {
-	return (a*b)/c;
+	usecs *= (((unsigned long)HZ << 32) / 1000000) * lpj;
+	__delay((long)usecs >> 32);
 }
+
+#ifdef CONFIG_SMP
+#define udelay(u)  __udelay((u), cpu_data[smp_processor_id()].loops_per_jiffy)
+#else
+#define udelay(u)  __udelay((u), loops_per_jiffy)
+#endif
 
 #endif /* defined(__ALPHA_DELAY_H) */

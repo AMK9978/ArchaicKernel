@@ -1,7 +1,7 @@
 /*
  *      linux/drivers/char/riscom8.h  -- RISCom/8 multiport serial driver.
  *
- *      Copyright (C) 1994-1996  Dmitry Gorodchanin (begemot@bgm.rosprint.net)
+ *      Copyright (C) 1994-1996  Dmitry Gorodchanin (pgmdsg@ibi.com)
  *
  *      This code is loosely based on the Linux serial driver, written by
  *      Linus Torvalds, Theodore T'so and others. The RISCom/8 card 
@@ -71,7 +71,7 @@ struct riscom_port {
 	struct tty_struct 	* tty;
 	int			count;
 	int			blocked_open;
-	int			event;
+	long			event; /* long req'd for set_bit --RR */
 	int			timeout;
 	int			close_delay;
 	long			session;
@@ -83,8 +83,8 @@ struct riscom_port {
 	int			xmit_cnt;
 	struct termios          normal_termios;
 	struct termios		callout_termios;
-	struct wait_queue	*open_wait;
-	struct wait_queue	*close_wait;
+	wait_queue_head_t	open_wait;
+	wait_queue_head_t	close_wait;
 	struct tq_struct	tqueue;
 	struct tq_struct	tqueue_hangup;
 	short			wakeup_chars;

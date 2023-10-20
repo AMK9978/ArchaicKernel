@@ -12,6 +12,8 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/malloc.h>
+#include <linux/pagemap.h>
+#include <linux/smp_lock.h>
 
 #include "rock.h"
 
@@ -54,40 +56,23 @@
   {if (buffer) kfree(buffer); \
   if (cont_extent){ \
     int block, offset, offset1; \
-    struct buffer_head * bh; \
+    struct buffer_head * pbh; \
     buffer = kmalloc(cont_size,GFP_KERNEL); \
     if (!buffer) goto out; \
     block = cont_extent; \
     offset = cont_offset; \
     offset1 = 0; \
-    if(ISOFS_BUFFER_SIZE(DEV) == 1024) {     \
-      block <<= 1;    \
-      if (offset >= 1024) block++; \
-      offset &= 1023; \
-      if(offset + cont_size >= 1024) { \
-	  bh = bread(DEV->i_dev, block++, ISOFS_BUFFER_SIZE(DEV)); \
-	  if(!bh) {printk("Unable to read continuation Rock Ridge record\n"); \
-		     kfree(buffer); \
-		     buffer = NULL; } else { \
-	    memcpy(buffer, bh->b_data + offset, 1024 - offset); \
-            brelse(bh); \
-	    offset1 = 1024 - offset; \
-	    offset = 0;} \
-      }  \
-    };     \
-    if(buffer) { \
-      bh = bread(DEV->i_dev, block, ISOFS_BUFFER_SIZE(DEV)); \
-      if(bh){       \
-        memcpy(buffer + offset1, bh->b_data + offset, cont_size - offset1); \
-        brelse(bh); \
-        chr = (unsigned char *) buffer; \
-        len = cont_size; \
-        cont_extent = 0; \
-        cont_size = 0; \
-        cont_offset = 0; \
-        goto LABEL; \
-      };    \
-    } \
+    pbh = bread(DEV->i_dev, block, ISOFS_BUFFER_SIZE(DEV)); \
+    if(pbh){       \
+      memcpy(buffer + offset1, pbh->b_data + offset, cont_size - offset1); \
+      brelse(pbh); \
+      chr = (unsigned char *) buffer; \
+      len = cont_size; \
+      cont_extent = 0; \
+      cont_size = 0; \
+      cont_offset = 0; \
+      goto LABEL; \
+    }    \
     printk("Unable to read rock-ridge attributes\n");    \
   }}
 
@@ -135,22 +120,16 @@ int find_rock_ridge_relocation(struct iso_directory_record * de,
 	CHECK_SP(goto out);
 	break;
       case SIG('C','L'):
-#ifdef DEBUG
-	printk("RR: CL\n");
-#endif
 	if (flag == 0) {
 	  retval = isonum_733(rr->u.CL.location);
 	  goto out;
-	};
+	}
 	break;
       case SIG('P','L'):
-#ifdef DEBUG
-	printk("RR: PL\n");
-#endif
 	if (flag != 0) {
 	  retval = isonum_733(rr->u.PL.location);
 	  goto out;
-	};
+	}
 	break;
       case SIG('C','E'):
 	CHECK_CE; /* This tells is if there is a continuation record */
@@ -158,8 +137,8 @@ int find_rock_ridge_relocation(struct iso_directory_record * de,
       default:
 	break;
       }
-    };
-  };
+    }
+  }
   MAYBE_CONTINUE(repeat, inode);
   return retval;
  out:
@@ -167,16 +146,17 @@ int find_rock_ridge_relocation(struct iso_directory_record * de,
   return retval;
 }
 
+/* return length of name field; 0: not found, -1: to be ignored */
 int get_rock_ridge_filename(struct iso_directory_record * de,
-			   char ** name, int * namlen, struct inode * inode)
+			    char * retname, struct inode * inode)
 {
   int len;
   unsigned char * chr;
   CONTINUE_DECLS;
-  char * retname = NULL;
   int retnamlen = 0, truncate=0;
  
   if (!inode->i_sb->u.isofs_sb.s_rock) return 0;
+  *retname = 0;
 
   SETUP_ROCK_RIDGE(de, chr, len);
  repeat:
@@ -203,51 +183,40 @@ int get_rock_ridge_filename(struct iso_directory_record * de,
 	break;
       case SIG('N','M'):
 	if (truncate) break;
+        /*
+	 * If the flags are 2 or 4, this indicates '.' or '..'.
+	 * We don't want to do anything with this, because it
+	 * screws up the code that calls us.  We don't really
+	 * care anyways, since we can just use the non-RR
+	 * name.
+	 */
+	if (rr->u.NM.flags & 6) {
+	  break;
+	}
+
 	if (rr->u.NM.flags & ~1) {
 	  printk("Unsupported NM flag settings (%d)\n",rr->u.NM.flags);
 	  break;
-	};
-	if (!retname){
-	  retname = (char *) kmalloc (255,GFP_KERNEL);
-	  /* This may be a waste, but we only
-	     need this for a moment.  The layers
-	     that call this function should
-	     deallocate the mem fairly soon
-	     after control is returned */
-
-	  if (!retname) goto out;
-	  *retname = 0; /* Zero length string */
-	  retnamlen = 0;
-	};
+	}
 	if((strlen(retname) + rr->len - 5) >= 254) {
 	  truncate = 1;
 	  break;
-	};
+	}
 	strncat(retname, rr->u.NM.name, rr->len - 5);
 	retnamlen += rr->len - 5;
 	break;
       case SIG('R','E'):
-#ifdef DEBUG
-	printk("RR: RE (%x)\n", inode->i_ino);
-#endif
 	if (buffer) kfree(buffer);
-	if (retname) kfree(retname);
 	return -1;
       default:
 	break;
       }
-    };
+    }
   }
   MAYBE_CONTINUE(repeat,inode);
-  if(retname){
-    *name = retname;
-    *namlen = retnamlen;
-    return 1;
-  };
-  return 0;  /* This file did not have a NM field */
+  return retnamlen; /* If 0, this file did not have a NM field */
  out:
   if(buffer) kfree(buffer);
-  if (retname) kfree(retname);
   return 0;
 }
 
@@ -287,10 +256,11 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 	CHECK_CE;
 	break;
       case SIG('E','R'):
-	printk("ISO9660 Extensions: ");
+	inode->i_sb->u.isofs_sb.s_rock = 1;
+	printk(KERN_DEBUG "ISO 9660 Extensions: ");
 	{ int p;
 	  for(p=0;p<rr->u.ER.len_id;p++) printk("%c",rr->u.ER.data[p]);
-	};
+	}
 	  printk("\n");
 	break;
       case SIG('P','X'):
@@ -315,7 +285,7 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 	  } else {
 	    inode->i_rdev = MKDEV(high, low);
 	  }
-	};
+	}
 	break;
       case SIG('T','F'):
 	/* Some RRIP writers incorrectly place ctime in the TF_CREATE field.
@@ -355,7 +325,7 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 	     break;
 	   default:
 	     printk("Symlink component flag not implemented\n");
-	   };
+	   }
 	   slen -= slp->len + 2;
 	   oldslp = slp;
 	   slp = (struct SL_component *) (((char *) slp) + slp->len + 2);
@@ -369,22 +339,22 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 	   /*
 	    * If this component record isn't continued, then append a '/'.
 	    */
-	   if(   (!rootflag)
-		 && ((oldslp->flags & 1) == 0) ) inode->i_size += 1;
+	   if (!rootflag && (oldslp->flags & 1) == 0)
+		   inode->i_size += 1;
 	 }
 	}
 	symlink_len = inode->i_size;
 	break;
       case SIG('R','E'):
-	printk("Attempt to read inode for relocated directory\n");
+	printk(KERN_WARNING "Attempt to read inode for relocated directory\n");
 	goto out;
       case SIG('C','L'):
-#ifdef DEBUG
-	printk("RR CL (%x)\n",inode->i_ino);
-#endif
-	inode->u.isofs_i.i_first_extent = isonum_733(rr->u.CL.location) <<
-		inode -> i_sb -> u.isofs_sb.s_log_zone_size;
-	reloc = iget(inode->i_sb, inode->u.isofs_i.i_first_extent);
+	inode->u.isofs_i.i_first_extent = isonum_733(rr->u.CL.location);
+	reloc = iget(inode->i_sb,
+		     (inode->u.isofs_i.i_first_extent <<
+		      inode -> i_sb -> u.isofs_sb.s_log_zone_size));
+	if (!reloc)
+		goto out;
 	inode->i_mode = reloc->i_mode;
 	inode->i_nlink = reloc->i_nlink;
 	inode->i_uid = reloc->i_uid;
@@ -399,7 +369,7 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
       default:
 	break;
       }
-    };
+    }
   }
   MAYBE_CONTINUE(repeat,inode);
   return 0;
@@ -408,158 +378,162 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
   return 0;
 }
 
-
-/* Returns the name of the file that this inode is symlinked to.  This is
-   in malloc'd memory, so it needs to be freed, once we are through with it */
-
-char * get_rock_ridge_symlink(struct inode * inode)
+static char *get_symlink_chunk(char *rpnt, struct rock_ridge *rr)
 {
-  unsigned long bufsize = ISOFS_BUFFER_SIZE(inode);
-  unsigned char bufbits = ISOFS_BUFFER_BITS(inode);
-  struct buffer_head * bh;
-  unsigned char * pnt;
-  void * cpnt = NULL;
-  char * rpnt;
-  struct iso_directory_record * raw_inode;
-  CONTINUE_DECLS;
-  int block;
-  int sig;
-  int rootflag;
-  int len;
-  unsigned char * chr;
-  struct rock_ridge * rr;
-  
-  if (!inode->i_sb->u.isofs_sb.s_rock)
-    panic("Cannot have symlink with high sierra variant of iso filesystem\n");
+	int slen;
+	int rootflag;
+	struct SL_component *oldslp;
+	struct SL_component *slp;
+	slen = rr->len - 5;
+	slp = &rr->u.SL.link;
+	while (slen > 1) {
+		rootflag = 0;
+		switch (slp->flags & ~1) {
+		case 0:
+			memcpy(rpnt, slp->text, slp->len);
+			rpnt+=slp->len;
+			break;
+		case 4:
+			*rpnt++='.';
+			/* fallthru */
+		case 2:
+			*rpnt++='.';
+			break;
+		case 8:
+			rootflag = 1;
+			*rpnt++='/';
+			break;
+		default:
+			printk("Symlink component flag not implemented (%d)\n",
+			     slp->flags);
+		}
+		slen -= slp->len + 2;
+		oldslp = slp;
+		slp = (struct SL_component *) ((char *) slp + slp->len + 2);
 
-  rpnt = 0;
-  
-  block = inode->i_ino >> bufbits;
-  if (!(bh=bread(inode->i_dev,block, bufsize))) {
-    printk("unable to read i-node block");
-    return NULL;
-  };
-  
-  pnt = ((unsigned char *) bh->b_data) + (inode->i_ino & (bufsize - 1));
-  
-  raw_inode = ((struct iso_directory_record *) pnt);
-  
-  if ((inode->i_ino & (bufsize - 1)) + *pnt > bufsize){
-    int frag1, offset;
-    
-    offset = (inode->i_ino & (bufsize - 1));
-    frag1 = bufsize - offset;
-    cpnt = kmalloc(*pnt,GFP_KERNEL);
-    if(!cpnt) return NULL;
-    memcpy(cpnt, bh->b_data + offset, frag1);
-    brelse(bh);
-    if (!(bh = bread(inode->i_dev,++block, bufsize))) {
-      kfree(cpnt);
-      printk("unable to read i-node block");
-      return NULL;
-    };
-    offset += *pnt - bufsize;
-    memcpy((char *)cpnt+frag1, bh->b_data, offset);
-    pnt = ((unsigned char *) cpnt);
-    raw_inode = ((struct iso_directory_record *) pnt);
-  };
-  
-  /* Now test for possible Rock Ridge extensions which will override some of
-     these numbers in the inode structure. */
-  
-  SETUP_ROCK_RIDGE(raw_inode, chr, len);
-  
- repeat:
-  while (len > 1){ /* There may be one byte for padding somewhere */
-    rr = (struct rock_ridge *) chr;
-    if (rr->len == 0) goto out; /* Something got screwed up here */
-    sig = (chr[0] << 8) + chr[1];
-    chr += rr->len; 
-    len -= rr->len;
-    
-    switch(sig){
-    case SIG('R','R'):
-      if((rr->u.RR.flags[0] & RR_SL) == 0) goto out;
-      break;
-    case SIG('S','P'):
-      CHECK_SP(goto out);
-      break;
-    case SIG('S','L'):
-      {int slen;
-       struct SL_component * oldslp;
-       struct SL_component * slp;
-       slen = rr->len - 5;
-       slp = &rr->u.SL.link;
-       while (slen > 1){
-	 if (!rpnt){
-	   rpnt = (char *) kmalloc (inode->i_size +1, GFP_KERNEL);
-	   if (!rpnt) goto out;
-	   *rpnt = 0;
-	 };
-	 rootflag = 0;
-	 switch(slp->flags &~1){
-	 case 0:
-	   strncat(rpnt,slp->text, slp->len);
-	   break;
-	 case 2:
-	   strcat(rpnt,".");
-	   break;
-	 case 4:
-	   strcat(rpnt,"..");
-	   break;
-	 case 8:
-	   rootflag = 1;
-	   strcat(rpnt,"/");
-	   break;
-	 default:
-	   printk("Symlink component flag not implemented (%d)\n",slen);
-	 };
-	 slen -= slp->len + 2;
-	 oldslp = slp;
-	 slp = (struct SL_component *) (((char *) slp) + slp->len + 2);
+		if (slen < 2) {
+			/*
+			 * If there is another SL record, and this component
+			 * record isn't continued, then add a slash.
+			 */
+			if ((rr->u.SL.flags & 1) && !(oldslp->flags & 1))
+				*rpnt++='/';
+			break;
+		}
 
-	 if(slen < 2) {
-	   /*
-	    * If there is another SL record, and this component record
-	    * isn't continued, then add a slash.
-	    */
-	   if(    ((rr->u.SL.flags & 1) != 0) 
-	       && ((oldslp->flags & 1) == 0) ) strcat(rpnt,"/");
-	   break;
-	 }
+		/*
+		 * If this component record isn't continued, then append a '/'.
+		 */
+		if (!rootflag && !(oldslp->flags & 1))
+			*rpnt++='/';
 
-	 /*
-	  * If this component record isn't continued, then append a '/'.
-	  */
-	 if(   (!rootflag)
-	    && ((oldslp->flags & 1) == 0) ) strcat(rpnt,"/");
-
-       };
-       break;
-     case SIG('C','E'):
-       CHECK_CE; /* This tells is if there is a continuation record */
-       break;
-     default:
-       break;
-     }
-    };
-  };
-  MAYBE_CONTINUE(repeat,inode);
-  brelse(bh);
-  
-  if (cpnt) {
-    kfree(cpnt);
-    cpnt = NULL;
-  };
-
-  return rpnt;
- out:
-  if(buffer) kfree(buffer);
-  return 0;
+	}
+	return rpnt;
 }
 
 
+/* readpage() for symlinks: reads symlink contents into the page and either
+   makes it uptodate and returns 0 or returns error (-EIO) */
 
+static int rock_ridge_symlink_readpage(struct file *file, struct page *page)
+{
+	struct inode *inode = page->mapping->host;
+	char *link = kmap(page);
+	unsigned long bufsize = ISOFS_BUFFER_SIZE(inode);
+	unsigned char bufbits = ISOFS_BUFFER_BITS(inode);
+	struct buffer_head *bh;
+	char *rpnt = link;
+	unsigned char *pnt;
+	struct iso_directory_record *raw_inode;
+	CONTINUE_DECLS;
+	int block;
+	int sig;
+	int len;
+	unsigned char *chr;
+	struct rock_ridge *rr;
 
+	if (!inode->i_sb->u.isofs_sb.s_rock)
+		panic ("Cannot have symlink with high sierra variant of iso filesystem\n");
 
+	block = inode->i_ino >> bufbits;
+	lock_kernel();
+	bh = bread(inode->i_dev, block, bufsize);
+	if (!bh)
+		goto out_noread;
 
+	pnt = (unsigned char *) bh->b_data + (inode->i_ino & (bufsize - 1));
+
+	raw_inode = (struct iso_directory_record *) pnt;
+
+	/*
+	 * If we go past the end of the buffer, there is some sort of error.
+	 */
+	if ((inode->i_ino & (bufsize - 1)) + *pnt > bufsize)
+		goto out_bad_span;
+
+	/* Now test for possible Rock Ridge extensions which will override
+	   some of these numbers in the inode structure. */
+
+	SETUP_ROCK_RIDGE(raw_inode, chr, len);
+
+      repeat:
+	while (len > 1) { /* There may be one byte for padding somewhere */
+		rr = (struct rock_ridge *) chr;
+		if (rr->len == 0)
+			goto out;	/* Something got screwed up here */
+		sig = (chr[0] << 8) + chr[1];
+		chr += rr->len;
+		len -= rr->len;
+
+		switch (sig) {
+		case SIG('R', 'R'):
+			if ((rr->u.RR.flags[0] & RR_SL) == 0)
+				goto out;
+			break;
+		case SIG('S', 'P'):
+			CHECK_SP(goto out);
+			break;
+		case SIG('S', 'L'):
+			rpnt = get_symlink_chunk(rpnt, rr);
+			break;
+		case SIG('C', 'E'):
+			/* This tells is if there is a continuation record */
+			CHECK_CE;
+		default:
+			break;
+		}
+	}
+	MAYBE_CONTINUE(repeat, inode);
+
+	if (rpnt == link)
+		goto fail;
+	brelse(bh);
+	*rpnt = '\0';
+	unlock_kernel();
+	SetPageUptodate(page);
+	kunmap(page);
+	UnlockPage(page);
+	return 0;
+
+	/* error exit from macro */
+      out:
+	if (buffer)
+		kfree(buffer);
+	goto fail;
+      out_noread:
+	printk("unable to read i-node block");
+	goto fail;
+      out_bad_span:
+	printk("symlink spans iso9660 blocks\n");
+      fail:
+	brelse(bh);
+	unlock_kernel();
+	SetPageError(page);
+	kunmap(page);
+	UnlockPage(page);
+	return -EIO;
+}
+
+struct address_space_operations isofs_symlink_aops = {
+	readpage:	rock_ridge_symlink_readpage
+};

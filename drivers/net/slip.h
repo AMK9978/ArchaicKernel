@@ -52,7 +52,9 @@ struct slip {
 
   /* Various fields. */
   struct tty_struct	*tty;		/* ptr to TTY structure		*/
-  struct device		*dev;		/* easy for intr handling	*/
+  struct net_device	*dev;		/* easy for intr handling	*/
+  spinlock_t		lock;
+
 #ifdef SL_INCLUDE_CSLIP
   struct slcompress	*slcomp;	/* for header compression 	*/
   unsigned char		*cbuff;		/* compression buffer		*/
@@ -68,6 +70,8 @@ struct slip {
   /* SLIP interface statistics. */
   unsigned long		rx_packets;	/* inbound frames counter	*/
   unsigned long         tx_packets;     /* outbound frames counter      */
+  unsigned long		rx_bytes;	/* inbound byte counte		*/
+  unsigned long         tx_bytes;       /* outbound byte counter	*/
   unsigned long         rx_errors;      /* Parity, etc. errors          */
   unsigned long         tx_errors;      /* Planned stuff                */
   unsigned long         rx_dropped;     /* No memory for skb            */
@@ -87,7 +91,7 @@ struct slip {
   int			xdata, xbits;	/* 6 bit slip controls 		*/
 #endif
 
-  unsigned char		flags;		/* Flag values/ mode etc	*/
+  unsigned long		flags;		/* Flag values/ mode etc	*/
 #define SLF_INUSE	0		/* Channel in use               */
 #define SLF_ESCAPE	1               /* ESC received                 */
 #define SLF_ERROR	2               /* Parity, etc. error           */
@@ -95,6 +99,9 @@ struct slip {
 #define SLF_OUTWAIT	4		/* is outpacket was flag	*/
 
   unsigned char		mode;		/* SLIP mode			*/
+  unsigned char		leased;
+  kdev_t		line;
+  pid_t			pid;
 #define SL_MODE_SLIP	0
 #define SL_MODE_CSLIP	1
 #define SL_MODE_SLIP6	2		/* Matt Dillon's printable slip */
@@ -113,6 +120,6 @@ struct slip {
 
 #define SLIP_MAGIC 0x5302
 
-extern int slip_init(struct device *dev);
+extern int slip_init(struct net_device *dev);
 
 #endif	/* _LINUX_SLIP.H */

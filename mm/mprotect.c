@@ -3,18 +3,13 @@
  *
  *  (C) Copyright 1994 Linus Torvalds
  */
-#include <linux/stat.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/mm.h>
+#include <linux/slab.h>
+#include <linux/smp_lock.h>
 #include <linux/shm.h>
-#include <linux/errno.h>
 #include <linux/mman.h>
-#include <linux/string.h>
-#include <linux/malloc.h>
 
-#include <asm/segment.h>
-#include <asm/system.h>
+#include <asm/uaccess.h>
+#include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 
 static inline void change_pte_range(pmd_t * pmd, unsigned long address,
@@ -26,7 +21,7 @@ static inline void change_pte_range(pmd_t * pmd, unsigned long address,
 	if (pmd_none(*pmd))
 		return;
 	if (pmd_bad(*pmd)) {
-		printk("change_pte_range: bad pmd (%08lx)\n", pmd_val(*pmd));
+		pmd_ERROR(*pmd);
 		pmd_clear(pmd);
 		return;
 	}
@@ -36,12 +31,19 @@ static inline void change_pte_range(pmd_t * pmd, unsigned long address,
 	if (end > PMD_SIZE)
 		end = PMD_SIZE;
 	do {
-		pte_t entry = *pte;
-		if (pte_present(entry))
+		if (pte_present(*pte)) {
+			pte_t entry;
+
+			/* Avoid an SMP race with hardware updated dirty/clean
+			 * bits by wiping the pte and then setting the new pte
+			 * into place.
+			 */
+			entry = ptep_get_and_clear(pte);
 			set_pte(pte, pte_modify(entry, newprot));
+		}
 		address += PAGE_SIZE;
 		pte++;
-	} while (address < end);
+	} while (address && (address < end));
 }
 
 static inline void change_pmd_range(pgd_t * pgd, unsigned long address,
@@ -53,7 +55,7 @@ static inline void change_pmd_range(pgd_t * pgd, unsigned long address,
 	if (pgd_none(*pgd))
 		return;
 	if (pgd_bad(*pgd)) {
-		printk("change_pmd_range: bad pgd (%08lx)\n", pgd_val(*pgd));
+		pgd_ERROR(*pgd);
 		pgd_clear(pgd);
 		return;
 	}
@@ -66,7 +68,7 @@ static inline void change_pmd_range(pgd_t * pgd, unsigned long address,
 		change_pte_range(pmd, address, end - address, newprot);
 		address = (address + PMD_SIZE) & PMD_MASK;
 		pmd++;
-	} while (address < end);
+	} while (address && (address < end));
 }
 
 static void change_protection(unsigned long start, unsigned long end, pgprot_t newprot)
@@ -76,11 +78,15 @@ static void change_protection(unsigned long start, unsigned long end, pgprot_t n
 
 	dir = pgd_offset(current->mm, start);
 	flush_cache_range(current->mm, beg, end);
-	while (start < end) {
+	if (start >= end)
+		BUG();
+	spin_lock(&current->mm->page_table_lock);
+	do {
 		change_pmd_range(dir, start, end - start, newprot);
 		start = (start + PGDIR_SIZE) & PGDIR_MASK;
 		dir++;
-	}
+	} while (start && (start < end));
+	spin_unlock(&current->mm->page_table_lock);
 	flush_tlb_range(current->mm, beg, end);
 	return;
 }
@@ -88,8 +94,10 @@ static void change_protection(unsigned long start, unsigned long end, pgprot_t n
 static inline int mprotect_fixup_all(struct vm_area_struct * vma,
 	int newflags, pgprot_t prot)
 {
+	spin_lock(&vma->vm_mm->page_table_lock);
 	vma->vm_flags = newflags;
 	vma->vm_page_prot = prot;
+	spin_unlock(&vma->vm_mm->page_table_lock);
 	return 0;
 }
 
@@ -99,20 +107,25 @@ static inline int mprotect_fixup_start(struct vm_area_struct * vma,
 {
 	struct vm_area_struct * n;
 
-	n = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
+	n = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!n)
 		return -ENOMEM;
 	*n = *vma;
-	vma->vm_start = end;
 	n->vm_end = end;
-	vma->vm_offset += vma->vm_start - n->vm_start;
 	n->vm_flags = newflags;
+	n->vm_raend = 0;
 	n->vm_page_prot = prot;
-	if (n->vm_inode)
-		n->vm_inode->i_count++;
+	if (n->vm_file)
+		get_file(n->vm_file);
 	if (n->vm_ops && n->vm_ops->open)
 		n->vm_ops->open(n);
-	insert_vm_struct(current, n);
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
+	vma->vm_pgoff += (end - vma->vm_start) >> PAGE_SHIFT;
+	vma->vm_start = end;
+	__insert_vm_struct(current->mm, n);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
 	return 0;
 }
 
@@ -122,20 +135,25 @@ static inline int mprotect_fixup_end(struct vm_area_struct * vma,
 {
 	struct vm_area_struct * n;
 
-	n = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
+	n = kmem_cache_alloc(vm_area_cachep, GFP_KERNEL);
 	if (!n)
 		return -ENOMEM;
 	*n = *vma;
-	vma->vm_end = start;
 	n->vm_start = start;
-	n->vm_offset += n->vm_start - vma->vm_start;
+	n->vm_pgoff += (n->vm_start - vma->vm_start) >> PAGE_SHIFT;
 	n->vm_flags = newflags;
+	n->vm_raend = 0;
 	n->vm_page_prot = prot;
-	if (n->vm_inode)
-		n->vm_inode->i_count++;
+	if (n->vm_file)
+		get_file(n->vm_file);
 	if (n->vm_ops && n->vm_ops->open)
 		n->vm_ops->open(n);
-	insert_vm_struct(current, n);
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
+	vma->vm_end = start;
+	__insert_vm_struct(current->mm, n);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
 	return 0;
 }
 
@@ -145,32 +163,39 @@ static inline int mprotect_fixup_middle(struct vm_area_struct * vma,
 {
 	struct vm_area_struct * left, * right;
 
-	left = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
+	left = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!left)
 		return -ENOMEM;
-	right = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
+	right = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!right) {
-		kfree(left);
+		kmem_cache_free(vm_area_cachep, left);
 		return -ENOMEM;
 	}
 	*left = *vma;
 	*right = *vma;
 	left->vm_end = start;
-	vma->vm_start = start;
-	vma->vm_end = end;
 	right->vm_start = end;
-	vma->vm_offset += vma->vm_start - left->vm_start;
-	right->vm_offset += right->vm_start - left->vm_start;
-	vma->vm_flags = newflags;
-	vma->vm_page_prot = prot;
-	if (vma->vm_inode)
-		vma->vm_inode->i_count += 2;
+	right->vm_pgoff += (right->vm_start - left->vm_start) >> PAGE_SHIFT;
+	left->vm_raend = 0;
+	right->vm_raend = 0;
+	if (vma->vm_file)
+		atomic_add(2,&vma->vm_file->f_count);
 	if (vma->vm_ops && vma->vm_ops->open) {
 		vma->vm_ops->open(left);
 		vma->vm_ops->open(right);
 	}
-	insert_vm_struct(current, left);
-	insert_vm_struct(current, right);
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
+	vma->vm_pgoff += (start - vma->vm_start) >> PAGE_SHIFT;
+	vma->vm_start = start;
+	vma->vm_end = end;
+	vma->vm_flags = newflags;
+	vma->vm_raend = 0;
+	vma->vm_page_prot = prot;
+	__insert_vm_struct(current->mm, left);
+	__insert_vm_struct(current->mm, right);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
 	return 0;
 }
 
@@ -183,12 +208,12 @@ static int mprotect_fixup(struct vm_area_struct * vma,
 	if (newflags == vma->vm_flags)
 		return 0;
 	newprot = protection_map[newflags & 0xf];
-	if (start == vma->vm_start)
+	if (start == vma->vm_start) {
 		if (end == vma->vm_end)
 			error = mprotect_fixup_all(vma, newflags, newprot);
 		else
 			error = mprotect_fixup_start(vma, end, newflags, newprot);
-	else if (end == vma->vm_end)
+	} else if (end == vma->vm_end)
 		error = mprotect_fixup_end(vma, start, newflags, newprot);
 	else
 		error = mprotect_fixup_middle(vma, start, end, newflags, newprot);
@@ -200,15 +225,15 @@ static int mprotect_fixup(struct vm_area_struct * vma,
 	return 0;
 }
 
-asmlinkage int sys_mprotect(unsigned long start, size_t len, unsigned long prot)
+asmlinkage long sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 {
 	unsigned long nstart, end, tmp;
 	struct vm_area_struct * vma, * next;
-	int error;
+	int error = -EINVAL;
 
 	if (start & ~PAGE_MASK)
 		return -EINVAL;
-	len = (len + ~PAGE_MASK) & PAGE_MASK;
+	len = PAGE_ALIGN(len);
 	end = start + len;
 	if (end < start)
 		return -EINVAL;
@@ -216,9 +241,13 @@ asmlinkage int sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 		return -EINVAL;
 	if (end == start)
 		return 0;
-	vma = find_vma(current, start);
+
+	down(&current->mm->mmap_sem);
+
+	vma = find_vma(current->mm, start);
+	error = -EFAULT;
 	if (!vma || vma->vm_start > start)
-		return -EFAULT;
+		goto out;
 
 	for (nstart = start ; ; ) {
 		unsigned int newflags;
@@ -248,6 +277,7 @@ asmlinkage int sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 			break;
 		}
 	}
-	merge_segments(current, start, end);
+out:
+	up(&current->mm->mmap_sem);
 	return error;
 }

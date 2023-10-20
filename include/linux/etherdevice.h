@@ -24,22 +24,26 @@
 #ifndef _LINUX_ETHERDEVICE_H
 #define _LINUX_ETHERDEVICE_H
 
-
 #include <linux/if_ether.h>
 
 #ifdef __KERNEL__
-extern int		eth_header(struct sk_buff *skb, struct device *dev,
+extern int		eth_header(struct sk_buff *skb, struct net_device *dev,
 				   unsigned short type, void *daddr,
 				   void *saddr, unsigned len);
-extern int		eth_rebuild_header(void *buff, struct device *dev,
-			unsigned long dst, struct sk_buff *skb);
-extern unsigned short	eth_type_trans(struct sk_buff *skb, struct device *dev);
-extern void eth_header_cache_bind(struct hh_cache ** hhp, struct device *dev,
-				  unsigned short htype, __u32 daddr);
-extern void eth_header_cache_update(struct hh_cache *hh, struct device *dev, unsigned char * haddr);
-extern void		eth_copy_and_sum(struct sk_buff *dest,
-				unsigned char *src, int length, int base);
-extern struct device	* init_etherdev(struct device *, int);
+extern int		eth_rebuild_header(struct sk_buff *skb);
+extern unsigned short	eth_type_trans(struct sk_buff *skb, struct net_device *dev);
+extern void		eth_header_cache_update(struct hh_cache *hh, struct net_device *dev,
+						unsigned char * haddr);
+extern int		eth_header_cache(struct neighbour *neigh,
+					 struct hh_cache *hh);
+extern int		eth_header_parse(struct sk_buff *skb,
+					 unsigned char *haddr);
+extern struct net_device	* init_etherdev(struct net_device *, int);
+
+static __inline__ void eth_copy_and_sum (struct sk_buff *dest, unsigned char *src, int len, int base)
+{
+	memcpy (dest->data, src, len);
+}
 
 #endif
 

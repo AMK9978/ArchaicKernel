@@ -1,5 +1,47 @@
-Changelog for version 3.5.4
----------------------------
+Note these changes relate to Hannu's code and don't include the changes
+made outside of this for modularising the sound
+
+Changelog for version 3.8o
+--------------------------
+
+Since 3.8h
+- Included support for OPL3-SA1 and SoftOSS
+
+Since 3.8
+- Fixed SNDCTL_DSP_GETOSPACE
+- Compatibility fixes for Linux 2.1.47
+
+Since 3.8-beta21
+- Fixed all known bugs (I think).
+
+Since 3.8-beta8
+- Lot of fixes to audio playback code in dmabuf.c
+
+Since 3.8-beta6
+- Fixed the famous Quake delay bug.
+
+Since 3.8-beta5
+- Fixed many bugs in audio playback.
+
+Since 3.8-beta4
+- Just minor changes.
+
+Since 3.8-beta1
+- Major rewrite of audio playback handling.
+- Added AWE32 support by Takashi Iwai (in ./lowlevel/).
+
+Since 3.7-beta#
+- Passing of ioctl() parameters between soundcard.c and other modules has been
+changed so that arg always points to kernel space.
+- Some bugfixes.
+
+Since 3.7-beta5
+- Disabled MIDI input with GUS PnP (Interwave). There seems to be constant
+stream of received 0x00 bytes when the MIDI receiver is enabled.
+
+Since 3.5
+- Changes almost everywhere.
+- Support for OPTi 82C924-based sound cards.
 
 Since 3.5.4-beta8
 - Fixed a bug in handling of non-fragment sized writes in 16 bit/stereo mode
@@ -37,7 +79,7 @@ Since 3.5.4-beta2
 - Added the "lowlevel" subdirectory for additional low level drivers that
   are not part of USS core. See lowlevel/README for more info.
 - Included support for ACI mixer (by Markus Kuhn). ACI is a mixer used in
-  miroPCM soundcards. See lowlevel/aci.readme for more info.
+  miroPCM sound cards. See lowlevel/aci.readme for more info.
 - Support for Aztech Washington chipset (AZT2316 ASIC).
 
 Since 3.5.4-beta1
@@ -57,7 +99,7 @@ Since 3.5.2
 Since 3.5.1
 - TB Maui initialization support
 Since 3.5
-- Improved handling of playback underrunt situations.
+- Improved handling of playback underrun situations.
 
 Since 3.5-beta10
 - Bug fixing
@@ -100,14 +142,14 @@ Since 3.5-beta2
   to James Hightower.
 
 Since 3.5-beta1
-- Bugfixes.
+- Bug fixes.
 - Full duplex audio with MAD16+CS4231 may work now. The driver configures
   SB DMA of MAD16 so that it doesn't conflict with codec's DMA channels.
   The side effect is that all 8 bit DMA channels (0,1,3) are populated in 
   duplex mode.
 
 Since 3.5-alpha9
-- Bugfixes (mostly in Jazz16 and ESS1688/688 supports).
+- Bug fixes (mostly in Jazz16 and ESS1688/688 supports).
 - Temporarily disabled recording with ESS1688/688 since it causes crash.
 - Changed audio buffer partitioning algorithm so that it selects
   smaller fragment size than earlier. This improves real time capabilities
@@ -116,7 +158,7 @@ Since 3.5-alpha9
   shorter than 4096 bytes.
 
 Since 3.5-alpha8
-- Bugfixes
+- Bug fixes
 
 Since 3.5-alpha7
 - Linux kernel compatible configuration (_EXPERIMENTAL_). Enable
@@ -135,7 +177,7 @@ configure to handle this.
 modularized version. They can be enabled by using init_trace=1 in
 the insmod command line (insmod sound init_trace=1).
 - More AIX stuff.
-- Added support for syncronizing dsp/audio devices with /dev/sequencer.
+- Added support for synchronizing dsp/audio devices with /dev/sequencer.
 - mmap() support for dsp/audio devices.
 
 Since 3.5-alpha5
@@ -148,7 +190,7 @@ Since 3.5-alpha4
   sources. Running 'setfx' is required again.
 
 Since 3.5-alpha3
-- Moved stuff from the 'setfx' program to the AudioTriX Pro driver.
+- Moved stuff from the 'setfx' program to the AudioTrix Pro driver.
 
 Since 3.5-alpha2
 - Modifications to makefile and configure.c. Unnecessary sources
@@ -159,13 +201,13 @@ Since 3.5-alpha2
 - Fixed random protection fault in gus_wave.c
 
 Since 3.5-alpha1
-- Modified to work with Linux-1.3.33 and leater
+- Modified to work with Linux-1.3.33 and later
 - Some minor changes
 
 Since 3.0.2
 - Support for CS4232 based PnP cards (AcerMagic S23 etc).
 - Full duplex support for some CS4231, CS4232 and AD1845 based cards
-(GUA MAX, AudioTrix Pro, AcerMagic S23 and many MAD16/Mozart cards
+(GUS MAX, AudioTrix Pro, AcerMagic S23 and many MAD16/Mozart cards
 having a codec mentioned above).
 - Almost fully rewritten loadable modules support.
 - Fixed some bugs.
@@ -229,7 +271,7 @@ Since pre-3.0-940712
   GUS MAX, but it doesn't work yet.
 Since pre-3.0-940426
 - AD1848/CS4248/CS4231 codec support (MSS, GUS MAX, Aztec, Orchid etc).
-This codec chip is used in various soundcards. This version is developed
+This codec chip is used in various sound cards. This version is developed
 for the 16 bit daughtercard of GUS. It should work with other cards also
 if the following requirements are met:
 	- The I/O, IRQ and DMA settings are jumper selectable or
@@ -286,15 +328,15 @@ Since 2.3
 Since 2.2b
 - Full SB16 DSP support. 8/16 bit, mono/stereo
 - The SCO and FreeBSD versions should be in sync now. There are some
-  problems with SB16 and GUS in the freebsd versions.
+  problems with SB16 and GUS in the FreeBSD versions.
   The DMA buffer allocation of the SCO version has been polished but
   there could still be some problems. At least it hogs memory.
   The DMA channel
-  configuration method used in the sco/System is a hack.
+  configuration method used in the SCO/System is a hack.
 - Support for the MPU emulation of the SB16.
-- Some big arrays are now allocated boot time. This makes the bss segment
+- Some big arrays are now allocated boot time. This makes the BSS segment
   smaller which makes it possible to use the full driver with
-  NetBSD. These arrays are not allocated if no suitable soundcard is available.
+  NetBSD. These arrays are not allocated if no suitable sound card is available.
 - Fixed a bug in the compute_and_set_volume in gus_wave.c
 - Fixed the too fast mono playback problem of SB Pro and PAS16.
 
@@ -308,7 +350,7 @@ Since 2.2
 
 Since 2.1
 - Preliminary support for SB16. 
-  - The SB16 mixer is supported in it's native mode.
+  - The SB16 mixer is supported in its native mode.
   - Digitized voice capability up to 44.1 kHz/8 bit/mono
     (16 bit and stereo support coming in the next release).
 - Fixed some bugs in the digitized voice driver for PAS16.

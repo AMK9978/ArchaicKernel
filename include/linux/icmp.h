@@ -30,6 +30,7 @@
 #define ICMP_INFO_REPLY		16	/* Information Reply		*/
 #define ICMP_ADDRESS		17	/* Address Mask Request		*/
 #define ICMP_ADDRESSREPLY	18	/* Address Mask Reply		*/
+#define NR_ICMP_TYPES		18
 
 
 /* Codes for UNREACH. */
@@ -46,6 +47,10 @@
 #define ICMP_HOST_ANO		10
 #define ICMP_NET_UNR_TOS	11
 #define ICMP_HOST_UNR_TOS	12
+#define ICMP_PKT_FILTERED	13	/* Packet filtered */
+#define ICMP_PREC_VIOLATION	14	/* Precedence violation */
+#define ICMP_PREC_CUTOFF	15	/* Precedence cut off */
+#define NR_ICMP_UNREACH		15	/* instead of hardcoding immediate value */
 
 /* Codes for REDIRECT. */
 #define ICMP_REDIR_NET		0	/* Redirect Net			*/
@@ -68,13 +73,45 @@ struct icmphdr {
 		__u16	sequence;
 	} echo;
 	__u32	gateway;
+	struct {
+		__u16	__unused;
+		__u16	mtu;
+	} frag;
   } un;
 };
 
+#ifdef __KERNEL__
 
-struct icmp_err {
-  int		errno;
-  unsigned	fatal:1;
+#include <linux/ip.h>
+
+/*
+ *	Build xmit assembly blocks
+ */
+
+struct icmp_bxm
+{
+	void *data_ptr;
+	int data_len;
+	struct icmphdr icmph;
+	unsigned long csum;
+	struct ip_options replyopts;
+	unsigned char  optbuf[40];
+};
+
+struct sk_buff;
+
+extern void icmp_reply(struct icmp_bxm *, struct sk_buff *);
+
+#endif
+
+/*
+ *	constants for (set|get)sockopt
+ */
+
+#define ICMP_FILTER			1
+
+struct icmp_filter {
+	__u32		data;
 };
 
 

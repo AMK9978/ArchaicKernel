@@ -11,6 +11,11 @@
  *        Removed sound configuration.
  *        Added "module" support.
  *
+ *      9 November 1999 -- Make kernel-parameter implementation work with 2.3.x 
+ *	                   Removed init_module & cleanup_module in favor of 
+ *			   module_init & module_exit.
+ *			   Torben Mathiasen <tmm@image.dk>
+ *
  *    Detect cdrom interface on ISP16 sound card.
  *    Configure cdrom interface.
  *
@@ -47,8 +52,9 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
-#include <linux/isp16.h>
+#include <linux/init.h>
 #include <asm/io.h>
+#include "isp16.h"
 
 static short isp16_detect(void);
 static short isp16_c928__detect(void);
@@ -62,18 +68,26 @@ static int isp16_cdrom_base = ISP16_CDROM_IO_BASE;
 static int isp16_cdrom_irq = ISP16_CDROM_IRQ;
 static int isp16_cdrom_dma = ISP16_CDROM_DMA;
 static char *isp16_cdrom_type = ISP16_CDROM_TYPE;
+
 #ifdef MODULE
-int init_module(void);
-void cleanup_module(void);
+MODULE_PARM(isp16_cdrom_base, "i");
+MODULE_PARM(isp16_cdrom_irq, "i");
+MODULE_PARM(isp16_cdrom_dma, "i");
+MODULE_PARM(isp16_cdrom_type, "s");
+void isp16_exit(void);
 #endif
 
 #define ISP16_IN(p) (outb(isp16_ctrl,ISP16_CTRL_PORT), inb(p))
 #define ISP16_OUT(p,b) (outb(isp16_ctrl,ISP16_CTRL_PORT), outb(b,p))
 
+#ifndef MODULE
 
-void
-isp16_setup(char *str, int *ints)
+static int 
+__init isp16_setup(char *str)
 {
+  int ints[4];
+  
+  (void)get_options(str, ARRAY_SIZE(ints), ints);
   if ( ints[0] > 0 )
     isp16_cdrom_base = ints[1];
   if ( ints[0] > 1 )      
@@ -82,13 +96,19 @@ isp16_setup(char *str, int *ints)
     isp16_cdrom_dma = ints[3];
   if ( str )
     isp16_cdrom_type = str;
+
+  return 1;
 }
+
+__setup("isp16=", isp16_setup);
+
+#endif /* MODULE */
 
 /*
  *  ISP16 initialisation.
  *
  */
-int
+int __init 
 isp16_init(void)
 {
   u_char expected_drive;
@@ -138,7 +158,7 @@ isp16_init(void)
   return(0);
 }
 
-static short
+static short __init 
 isp16_detect(void)
 {
 
@@ -148,7 +168,7 @@ isp16_detect(void)
     return(isp16_c928__detect());
 }
 
-static short
+static short __init 
 isp16_c928__detect(void)
 {
   u_char ctrl;
@@ -197,7 +217,7 @@ isp16_c928__detect(void)
   return(i);
 }
 
-static short
+static short __init 
 isp16_c929__detect(void)
 {
   u_char ctrl;
@@ -224,7 +244,7 @@ isp16_c929__detect(void)
   return(2);
 }
 
-static short
+static short __init 
 isp16_cdi_config(int base, u_char drive_type, int irq, int dma)
 {
   u_char base_code;
@@ -301,15 +321,15 @@ isp16_cdi_config(int base, u_char drive_type, int irq, int dma)
   return(0);
 }
 
-#ifdef MODULE
-int init_module(void)
-{
-  return isp16_init();
-}
-
-void cleanup_module(void)
+void __exit isp16_exit(void)
 {
 	release_region(ISP16_IO_BASE, ISP16_IO_SIZE);
 	printk(KERN_INFO "ISP16: module released.\n");
 }
-#endif /* MODULE */
+
+#ifdef MODULE
+module_init(isp16_init);
+#endif
+module_exit(isp16_exit);
+
+

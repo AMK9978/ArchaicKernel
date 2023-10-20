@@ -24,7 +24,7 @@
 
 /*
  * Truncate has the most races in the whole filesystem: coding it is
- * a pain in the a**. Especially as I don't do any locking...
+ * a pain in the a**, especially as I don't do any locking.
  *
  * The code may look a bit weird, but that's just because I've tried to
  * handle things like file-size changes in a somewhat graceful manner.
@@ -35,14 +35,17 @@
  * general case (size = XXX). I hope.
  */
 
+#define DATA_BUFFER_USED(bh) \
+	(atomic_read(&bh->b_count)>1 || buffer_locked(bh))
+
 /* We throw away any data beyond inode->i_size. */
 
 static int trunc_direct(struct inode * inode)
 {
 	struct super_block * sb;
 	unsigned int i;
-	unsigned long * p;
-	unsigned long block;
+	u32 * p;
+	u32 block;
 	struct buffer_head * bh;
 	int retry = 0;
 
@@ -58,20 +61,20 @@ repeat:
 			brelse(bh);
 			goto repeat;
 		}
-		if ((bh && bh->b_count != 1) || (block != *p)) {
+		if ((bh && DATA_BUFFER_USED(bh)) || (block != *p)) {
 			retry = 1;
 			brelse(bh);
 			continue;
 		}
 		*p = 0;
-		inode->i_dirt = 1;
+		mark_inode_dirty(inode);
 		brelse(bh);
 		sysv_free_block(sb,block);
 	}
 	return retry;
 }
 
-static int trunc_indirect(struct inode * inode, unsigned long offset, unsigned long * p, int convert, unsigned char * dirt)
+static int trunc_indirect(struct inode * inode, unsigned long offset, sysv_zone_t * p, int convert, unsigned char * dirt)
 {
 	unsigned long indtmp, indblock;
 	struct super_block * sb;
@@ -115,20 +118,20 @@ repeat:
 			brelse(bh);
 			goto repeat;
 		}
-		if ((bh && bh->b_count != 1) || (tmp != *ind)) {
+		if ((bh && DATA_BUFFER_USED(bh)) || (tmp != *ind)) {
 			retry = 1;
 			brelse(bh);
 			continue;
 		}
 		*ind = 0;
-		mark_buffer_dirty(indbh, 1);
+		mark_buffer_dirty(indbh);
 		brelse(bh);
 		sysv_free_block(sb,block);
 	}
 	for (i = 0; i < sb->sv_ind_per_block; i++)
 		if (((sysv_zone_t *) indbh->b_data)[i])
 			goto done;
-	if ((indbh->b_count != 1) || (indtmp != *p)) {
+	if (DATA_BUFFER_USED(indbh) || (indtmp != *p)) {
 		brelse(indbh);
 		return 1;
 	}
@@ -140,14 +143,14 @@ done:
 	return retry;
 }
 
-static int trunc_dindirect(struct inode * inode, unsigned long offset, unsigned long * p, int convert, unsigned char * dirt)
+static int trunc_dindirect(struct inode * inode, unsigned long offset, sysv_zone_t * p, int convert, unsigned char * dirt)
 {
-	unsigned long indtmp, indblock;
+	u32 indtmp, indblock;
 	struct super_block * sb;
 	struct buffer_head * indbh;
 	unsigned int i;
 	sysv_zone_t * ind;
-	unsigned long tmp, block;
+	u32 tmp, block;
 	int retry = 0;
 
 	indblock = indtmp = *p;
@@ -180,12 +183,12 @@ static int trunc_dindirect(struct inode * inode, unsigned long offset, unsigned 
 			continue;
 		retry |= trunc_indirect(inode,offset+(i<<sb->sv_ind_per_block_bits),ind,sb->sv_convert,&dirty);
 		if (dirty)
-			mark_buffer_dirty(indbh, 1);
+			mark_buffer_dirty(indbh);
 	}
 	for (i = 0; i < sb->sv_ind_per_block; i++)
 		if (((sysv_zone_t *) indbh->b_data)[i])
 			goto done;
-	if ((indbh->b_count != 1) || (indtmp != *p)) {
+	if (DATA_BUFFER_USED(indbh) || (indtmp != *p)) {
 		brelse(indbh);
 		return 1;
 	}
@@ -197,14 +200,14 @@ done:
 	return retry;
 }
 
-static int trunc_tindirect(struct inode * inode, unsigned long offset, unsigned long * p, int convert, unsigned char * dirt)
+static int trunc_tindirect(struct inode * inode, unsigned long offset, sysv_zone_t * p, int convert, unsigned char * dirt)
 {
-	unsigned long indtmp, indblock;
+	u32 indtmp, indblock;
 	struct super_block * sb;
 	struct buffer_head * indbh;
 	unsigned int i;
 	sysv_zone_t * ind;
-	unsigned long tmp, block;
+	u32 tmp, block;
 	int retry = 0;
 
 	indblock = indtmp = *p;
@@ -237,12 +240,12 @@ static int trunc_tindirect(struct inode * inode, unsigned long offset, unsigned 
 			continue;
 		retry |= trunc_dindirect(inode,offset+(i<<sb->sv_ind_per_block_2_bits),ind,sb->sv_convert,&dirty);
 		if (dirty)
-			mark_buffer_dirty(indbh, 1);
+			mark_buffer_dirty(indbh);
 	}
 	for (i = 0; i < sb->sv_ind_per_block; i++)
 		if (((sysv_zone_t *) indbh->b_data)[i])
 			goto done;
-	if ((indbh->b_count != 1) || (indtmp != *p)) {
+	if (DATA_BUFFER_USED(indbh) || (indtmp != *p)) {
 		brelse(indbh);
 		return 1;
 	}
@@ -257,12 +260,13 @@ done:
 static int trunc_all(struct inode * inode)
 {
 	struct super_block * sb;
+	char dirty;
 
 	sb = inode->i_sb;
 	return trunc_direct(inode)
-	     | trunc_indirect(inode,sb->sv_ind0_size,&inode->u.sysv_i.i_data[10],0,&inode->i_dirt)
-	     | trunc_dindirect(inode,sb->sv_ind1_size,&inode->u.sysv_i.i_data[11],0,&inode->i_dirt)
-	     | trunc_tindirect(inode,sb->sv_ind2_size,&inode->u.sysv_i.i_data[12],0,&inode->i_dirt);
+	     | trunc_indirect(inode,sb->sv_ind0_size,&inode->u.sysv_i.i_data[10],0,&dirty)
+	     | trunc_dindirect(inode,sb->sv_ind1_size,&inode->u.sysv_i.i_data[11],0,&dirty)
+	     | trunc_tindirect(inode,sb->sv_ind2_size,&inode->u.sysv_i.i_data[12],0,&dirty);
 }
 
 
@@ -285,5 +289,5 @@ void sysv_truncate(struct inode * inode)
 		schedule();
 	}
 	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
-	inode->i_dirt = 1;
+	mark_inode_dirty(inode);
 }

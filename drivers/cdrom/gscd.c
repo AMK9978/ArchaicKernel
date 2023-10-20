@@ -31,6 +31,13 @@
 	You should have received a copy of the GNU General Public License
 	along with this program; if not, write to the Free Software
 	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+	
+	--------------------------------------------------------------------
+	
+	9 November 1999 -- Make kernel-parameter implementation work with 2.3.x 
+	                   Removed init_module & cleanup_module in favor of 
+		   	   module_init & module_exit.
+			   Torben Mathiasen <tmm@image.dk>
 
 */
 
@@ -55,25 +62,29 @@
 #include <linux/ioport.h>
 #include <linux/major.h>
 #include <linux/string.h>
+#include <linux/init.h>
+#include <linux/devfs_fs_kernel.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
 #define MAJOR_NR GOLDSTAR_CDROM_MAJOR
 #include <linux/blk.h>
 #define gscd_port gscd /* for compatible parameter passing with "insmod" */
-#include <linux/gscd.h>
+#include "gscd.h"
 
+static int gscd_blocksizes[1] = {512};
 
 static int gscdPresent            = 0;
 
 static unsigned char gscd_buf[2048];    /* buffer for block size conversion */
 static int   gscd_bn              = -1;
 static short gscd_port            = GSCD_BASE_ADDR;
+MODULE_PARM(gscd, "h");
 
 /* Kommt spaeter vielleicht noch mal dran ...
- *    static struct wait_queue *gscd_waitq = NULL;
+ *    static DECLARE_WAIT_QUEUE_HEAD(gscd_waitq);
  */ 
 
 static void gscd_transfer         (void);
@@ -83,10 +94,11 @@ static void gscd_bin2bcd          (unsigned char *p);
 
 /* Schnittstellen zum Kern/FS */
 
-static void do_gscd_request       (void);
+static void do_gscd_request       (request_queue_t *);
+static void __do_gscd_request     (unsigned long dummy);
 static int  gscd_ioctl            (struct inode *, struct file *, unsigned int, unsigned long);
 static int  gscd_open             (struct inode *, struct file *);
-static void gscd_release          (struct inode *, struct file *);
+static int  gscd_release          (struct inode *, struct file *);
 static int  check_gscd_med_chg    (kdev_t);
 
 /*      GoldStar Funktionen    */
@@ -148,21 +160,13 @@ static int  AudioStart_f;
 static int  AudioEnd_m;
 static int  AudioEnd_f;
  
+static struct timer_list gscd_timer;
 
-static struct file_operations gscd_fops = {
-	NULL,			/* lseek - default */
-	block_read,		/* read - general block-dev read */
-	block_write,		/* write - general block-dev write */
-	NULL,			/* readdir - bad */
-	NULL,			/* select */
-	gscd_ioctl,		/* ioctl */
-	NULL,			/* mmap */
-	gscd_open,		/* open */
-	gscd_release,		/* release */
-	NULL,                   /* fsync */
-	NULL,                   /* fasync*/
-	check_gscd_med_chg,     /* media change */
-	NULL                    /* revalidate */
+static struct block_device_operations gscd_fops = {
+	open:			gscd_open,
+	release:		gscd_release,
+	ioctl:			gscd_ioctl,
+	check_media_change:	check_gscd_med_chg,
 };
 
 /* 
@@ -190,14 +194,24 @@ static int check_gscd_med_chg (kdev_t full_dev)
 }
 
 
-void gscd_setup (char *str, int *ints)
+#ifndef MODULE
+/* Using new interface for kernel-parameters */
+  
+static int __init gscd_setup (char *str)
 {
+  int ints[2];
+  (void)get_options(str, ARRAY_SIZE(ints), ints);
+  
   if (ints[0] > 0) 
   {
      gscd_port = ints[1];
   }
+ return 1;
 }
 
+__setup("gscd=", gscd_setup);
+
+#endif
 
 static int gscd_ioctl (struct inode *ip, struct file *fp, unsigned int cmd, unsigned long arg)
 {
@@ -256,20 +270,26 @@ long offs;
  * I/O request routine called from Linux kernel.
  */
 
-static void do_gscd_request (void)
+static void do_gscd_request (request_queue_t * q)
+{
+  __do_gscd_request(0);
+}
+
+static void __do_gscd_request (unsigned long dummy)
 {
 unsigned int block,dev;
 unsigned int nsect;
 
 repeat:
-	if (!(CURRENT) || CURRENT->rq_status == RQ_INACTIVE) return;
+	if (QUEUE_EMPTY || CURRENT->rq_status == RQ_INACTIVE)
+		goto out;
 	INIT_REQUEST;
 	dev = MINOR(CURRENT->rq_dev);
 	block = CURRENT->sector;
 	nsect = CURRENT->nr_sectors;
 
-	if (CURRENT == NULL || CURRENT -> sector == -1)
-		return;
+	if (QUEUE_EMPTY || CURRENT -> sector == -1)
+		goto out;
 
 	if (CURRENT -> cmd != READ)
 	{
@@ -300,6 +320,8 @@ repeat:
 #endif
 
 	gscd_read_cmd ();
+out:
+	return;
 }
 
 
@@ -351,7 +373,7 @@ char   cmd[] = { CMD_READ, 0x80, 0,0,0, 0,1 }; /* cmd mode M-S-F secth sectl */
               end_request(1);
 	   }
 	}
-	SET_TIMER(do_gscd_request, 1);
+	SET_TIMER(__do_gscd_request, 1);
 }
 
 
@@ -393,7 +415,7 @@ printk ( "GSCD: open\n" );
  * On close, we flush all gscd blocks from the buffer cache.
  */
 
-static void gscd_release (struct inode * inode, struct file * file)
+static int gscd_release (struct inode * inode, struct file * file)
 {
 
 #ifdef GSCD_DEBUG
@@ -401,10 +423,9 @@ printk ( "GSCD: release\n" );
 #endif
 
 	gscd_bn = -1;
-	sync_dev(inode->i_rdev);
-	invalidate_buffers(inode -> i_rdev);
 
 	MOD_DEC_USE_COUNT;
+	return 0;
 }
 
 
@@ -846,7 +867,7 @@ int  i;
      return;
 }
 
-int find_drives (void)
+int __init find_drives (void)
 {
 int *pdrv;
 int drvnum;
@@ -897,7 +918,7 @@ int i;
     return drvnum;
 }    
 
-void init_cd_drive ( int num )
+void __init init_cd_drive ( int num )
 {
 char resp [50];
 int  i;
@@ -952,9 +973,8 @@ unsigned int AX;
 }
 #endif
 
-#ifdef MODULE
 /* Init for the Module-Version */
-int init_module (void)
+int init_gscd(void)
 {
 long err;
 
@@ -973,23 +993,30 @@ long err;
      }    
 }
 
-void cleanup_module (void)
+void __exit exit_gscd(void)
 {
+   CLEAR_TIMER;
 
-   if ((unregister_blkdev(MAJOR_NR, "gscd" ) == -EINVAL))
+   devfs_unregister(devfs_find_handle(NULL, "gscd", 0, 0, DEVFS_SPECIAL_BLK,
+				      0));
+   if ((devfs_unregister_blkdev(MAJOR_NR, "gscd" ) == -EINVAL))
    {
       printk("What's that: can't unregister GoldStar-module\n" );
       return;
    }
-
+   blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
    release_region (gscd_port,4);
    printk(KERN_INFO "GoldStar-module released.\n" );
 }
-#endif
+
+#ifdef MODULE
+module_init(init_gscd);
+#endif 
+module_exit(exit_gscd);
 
 
 /* Test for presence of drive and initialize it.  Called only at boot time. */
-int gscd_init (void)
+int __init gscd_init (void)
 {
    return my_gscd_init ();
 }
@@ -997,7 +1024,7 @@ int gscd_init (void)
 
 /* This is the common initialisation for the GoldStar drive. */
 /* It is called at boot time AND for module init.           */
-int my_gscd_init (void)
+int __init my_gscd_init (void)
 {
 int i;
 int result;
@@ -1048,20 +1075,24 @@ int result;
            i++;
         }
 
-	if (register_blkdev(MAJOR_NR, "gscd", &gscd_fops) != 0)
+	if (devfs_register_blkdev(MAJOR_NR, "gscd", &gscd_fops) != 0)
 	{
 		printk("GSCD: Unable to get major %d for GoldStar CD-ROM\n",
 		       MAJOR_NR);
 		return -EIO;
 	}
+	devfs_register (NULL, "gscd", DEVFS_FL_DEFAULT, MAJOR_NR, 0,
+			S_IFBLK | S_IRUGO | S_IWUGO, &gscd_fops, NULL);
 
-	blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
+	blksize_size[MAJOR_NR] = gscd_blocksizes;
 	read_ahead[MAJOR_NR] = 4;
         
         disk_state = 0;
         gscdPresent = 1;
 
 	request_region(gscd_port, 4, "gscd");
+	register_disk(NULL, MKDEV(MAJOR_NR,0), 1, &gscd_fops, 0);
 
         printk (KERN_INFO "GSCD: GoldStar CD-ROM Drive found.\n" );
 	return 0;
@@ -1069,7 +1100,7 @@ int result;
 
 static void gscd_hsg2msf (long hsg, struct msf *msf)
 {
-	hsg += CD_BLOCK_OFFSET;
+	hsg += CD_MSF_OFFSET;
 	msf -> min = hsg / (CD_FRAMES*CD_SECS);
 	hsg %= CD_FRAMES*CD_SECS;
 	msf -> sec = hsg / CD_FRAMES;
@@ -1097,7 +1128,7 @@ static long gscd_msf2hsg (struct msf *mp)
 	return gscd_bcd2bin(mp -> frame)
 		+ gscd_bcd2bin(mp -> sec) * CD_FRAMES
 		+ gscd_bcd2bin(mp -> min) * CD_FRAMES * CD_SECS
-		- CD_BLOCK_OFFSET;
+		- CD_MSF_OFFSET;
 }
 
 static int gscd_bcd2bin (unsigned char bcd)

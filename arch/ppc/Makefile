@@ -1,6 +1,3 @@
-#
-# ppc/Makefile
-#
 # This file is included by the global makefile so that you can add your own
 # architecture-specific flags and dependencies. Remember to do have actions
 # for "archclean" and "archdep" for cleaning up and making dependencies for
@@ -12,106 +9,191 @@
 #
 # Copyright (C) 1994 by Linus Torvalds
 # Changes for PPC by Gary Thomas
+# Rewritten by Cort Dougan and Paul Mackerras
 #
 
-# PowerPC (cross) tools
-AS		= as.ppc
+KERNELLOAD	=0xc0000000
+
+ifeq ($(shell uname -m),ppc)
+CHECKS		= checks
+endif
+
 ASFLAGS		=
-LD		= ld.ppc
-#LINKFLAGS	= -T arch/ppc/ld.script -Ttext 0x90000000 -Map vmlinux.map
-LINKFLAGS	= -T arch/ppc/ld.script -Ttext 0x90000000
-HOSTCC		= gcc
-CC		= cc.ppc
-CFLAGS		= -D__KERNEL__ -I$(TOPDIR)/include \
-		-Wall -Wstrict-prototypes \
-		-msoft-float \
-		-fomit-frame-pointer \
-		-fno-builtin \
-		-finhibit-size-directive \
-		-fsigned-char \
-		-O2
+LINKFLAGS	= -T arch/ppc/vmlinux.lds -Ttext $(KERNELLOAD) -Bstatic
+CPPFLAGS	:= $(CPPFLAGS) -D__powerpc__
+CFLAGS		:= $(CFLAGS) -D__powerpc__ -fsigned-char \
+		-msoft-float -pipe -ffixed-r2 -Wno-uninitialized \
+		-mmultiple -mstring
 CPP		= $(CC) -E $(CFLAGS)
-AR		= ar.ppc
-RANLIB		= ranlib.ppc
-STRIP		= strip.ppc
-NM		= nm.ppc
 
-#
-# Set these to indicate how to link it..
-#
-# -zmagic:   
-#
-# ZLINKFLAGS   = -Ttext 0x1000
-# LINKFLAGS    = -Ttext 0x100000
-#
-# -qmagic (we need to remove the 32 byte header for bootup purposes)
-#
-## ZLINKFLAGS =-qmagic -Ttext 0xfe0
-## LINKFLAGS =-qmagic -Ttext 0xfffe0
-## CFLAGS := $(CFLAGS) -pipe
+ifdef CONFIG_4xx
+CFLAGS := $(CFLAGS) -mcpu=403
+endif
 
-## ifdef CONFIG_M486
-## CFLAGS := $(CFLAGS) -m486
-## else
-## ifdef CONFIG_M586
-## CFLAGS := $(CFLAGS) -mpentium
-## else
-## CFLAGS := $(CFLAGS) -m386
-## endif
-## endif
+ifdef CONFIG_8xx
+CFLAGS := $(CFLAGS) -mcpu=860 -I../8xx_io
+endif
 
-HEAD := arch/ppc/kernel/head.o
+ifdef CONFIG_PPC64BRIDGE
+CFLAGS := $(CFLAGS) -Wa,-mppc64bridge
+endif
+
+ifdef CONFIG_4xx
+  HEAD := arch/ppc/kernel/head_4xx.o
+else
+  ifdef CONFIG_8xx
+    HEAD := arch/ppc/kernel/head_8xx.o
+  else
+    HEAD := arch/ppc/kernel/head.o
+  endif
+endif
 
 ARCH_SUBDIRS = arch/ppc/kernel arch/ppc/mm arch/ppc/lib
 SUBDIRS := $(SUBDIRS) $(ARCH_SUBDIRS)
 ARCHIVES := arch/ppc/kernel/kernel.o arch/ppc/mm/mm.o arch/ppc/lib/lib.o $(ARCHIVES)
-NO_RD_ARCHIVES := arch/ppc/kernel/no_ramdisk.o $(ARCHIVES)
-ARCHIVES := arch/ppc/kernel/ramdisk.o $(ARCHIVES)
+CORE_FILES := arch/ppc/kernel/kernel.o arch/ppc/mm/mm.o arch/ppc/lib/lib.o $(CORE_FILES)
 
-arch/ppc/kernel: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=arch/ppc/kernel
+ifdef CONFIG_MATH_EMULATION
+SUBDIRS += arch/ppc/math-emu
+ARCHIVES += arch/ppc/math-emu/math-emu.o
+CORE_FILES += arch/ppc/math-emu/math-emu.o
+endif
 
-arch/ppc/mm: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=arch/ppc/mm
-
-arch/ppc/lib: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=arch/ppc/lib
+ifdef CONFIG_XMON
+SUBDIRS += arch/ppc/xmon
+CORE_FILES += arch/ppc/xmon/x.o
+endif
 
 MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
+MAKECOFFBOOT = $(MAKE) -C arch/$(ARCH)/coffboot
+MAKECHRPBOOT = $(MAKE) -C arch/$(ARCH)/chrpboot
+MAKEMBXBOOT = $(MAKE) -C arch/$(ARCH)/mbxboot
+MAKETREEBOOT = $(MAKE) -C arch/$(ARCH)/treeboot
 
-vmlinux.no_ramdisk: $(CONFIGURATION) init/main.o init/version.o linuxsubdirs
-	$(LD) $(LINKFLAGS) $(HEAD) init/main.o init/version.o \
-		$(NO_RD_ARCHIVES) \
-		$(FILESYSTEMS) \
-		$(DRIVERS) \
-		$(LIBS) -o vmlinux.no_ramdisk
+ifdef CONFIG_8xx
+SUBDIRS += arch/ppc/8xx_io
+DRIVERS += arch/ppc/8xx_io/8xx_io.o
+endif
 
-## 
-zImage: vmlinux
-	@$(MAKEBOOT) zImage
+ifdef CONFIG_8260
+SUBDIRS += arch/ppc/8260_io
+DRIVERS += arch/ppc/8260_io/8260_io.o
+endif
 
-tImage: vmlinux
-	@$(MAKEBOOT) tImage
+ifdef CONFIG_APUS
+SUBDIRS += arch/ppc/amiga
+ARCHIVES += arch/ppc/amiga/amiga.o
+CORE_FILES += arch/ppc/amiga/amiga.o
+endif
 
-bImage: vmlinux.no_ramdisk
-	@$(MAKEBOOT) bImage
+checks:
+	@$(MAKE) -C arch/$(ARCH)/kernel checks
 
-bdisk: vmlinux.no_ramdisk
-	@$(MAKEBOOT) bdisk
+BOOT_TARGETS = zImage znetboot.initrd zImage.initrd
 
-## compressed: zImage
-## 
-## zlilo: vmlinux
-## 	@$(MAKEBOOT) zlilo
-## 
-zdisk: vmlinux
-	@$(MAKEBOOT) zdisk
- 
-## install: vmlinux
-## 	@$(MAKEBOOT) install
+ifdef CONFIG_4xx
+$(BOOT_TARGETS): $(CHECKS) vmlinux
+	@$(MAKETREEBOOT) $@
+endif
+
+ifdef CONFIG_8xx
+$(BOOT_TARGETS): $(CHECKS) vmlinux
+	@$(MAKECOFFBOOT) $@
+	@$(MAKEMBXBOOT) $@
+endif
+
+ifdef CONFIG_6xx
+ifndef CONFIG_8260
+$(BOOT_TARGETS): $(CHECKS) vmlinux
+	@$(MAKECOFFBOOT) $@
+	@$(MAKEBOOT) $@
+	@$(MAKECHRPBOOT) $@
+
+znetboot: $(CHECKS) vmlinux
+ifdef CONFIG_ALL_PPC
+ifdef CONFIG_SMP
+	cp -f vmlinux /tftpboot/vmlinux.smp
+else
+	cp -f vmlinux /tftpboot/vmlinux
+endif
+endif
+	@$(MAKECOFFBOOT) $@
+	@$(MAKEBOOT) $@
+	@$(MAKECHRPBOOT) $@
+else
+# 8260 is custom 6xx
+$(BOOT_TARGETS): $(CHECKS) vmlinux
+	@$(MAKECOFFBOOT) $@
+	@$(MAKEMBXBOOT) $@
+endif
+endif
+
+ifdef CONFIG_PPC64BRIDGE
+$(BOOT_TARGETS): $(CHECKS) vmlinux
+	@$(MAKECOFFBOOT) $@
+	@$(MAKEBOOT) $@
+	@$(MAKECHRPBOOT) $@
+
+znetboot: $(CHECKS) vmlinux
+	cp -f vmlinux /tftpboot/vmlinux.64
+	@$(MAKECOFFBOOT) $@
+	@$(MAKEBOOT) $@
+	@$(MAKECHRPBOOT) $@
+endif
+
+.PHONY: clean_config
+clean_config:
+	rm -f .config arch/ppc/defconfig
+
+gemini_config: clean_config
+	cp -f arch/ppc/configs/gemini_defconfig arch/ppc/defconfig
+
+pmac_config: clean_config
+	cp -f arch/ppc/configs/pmac_defconfig arch/ppc/defconfig
+
+prep_config: clean_config
+	cp -f arch/ppc/configs/prep_defconfig arch/ppc/defconfig
+
+chrp_config: clean_config
+	cp -f arch/ppc/configs/chrp_defconfig arch/ppc/defconfig
+
+common_config: clean_config
+	cp -f arch/ppc/configs/common_defconfig arch/ppc/defconfig
+
+mbx_config: clean_config
+	cp -f arch/ppc/configs/mbx_defconfig arch/ppc/defconfig
+
+apus_config: clean_config
+	cp -f arch/ppc/configs/apus_defconfig arch/ppc/defconfig
+
+oak_config: clean_config
+	cp -f arch/ppc/configs/oak_defconfig arch/ppc/defconfig
+
+walnut_config: clean_config
+	cp -f arch/ppc/configs/walnut_defconfig arch/ppc/defconfig
+
+rpxlite_config: clean_config
+	cp -f arch/ppc/configs/rpxlite_defconfig arch/ppc/defconfig
+
+rpxcllf_config: clean_config
+	cp -f arch/ppc/configs/rpxcllf_defconfig arch/ppc/defconfig
+
+bseip_config: clean_config
+	cp -f arch/ppc/configs/bseip_defconfig arch/ppc/defconfig
+
+est8260_config: clean_config
+	cp -f arch/ppc/configs/est8260_defconfig arch/ppc/defconfig
 
 archclean:
+	rm -f arch/ppc/kernel/{mk_defs,ppc_defs.h,find_name,checks}
+	@$(MAKECOFFBOOT) clean
 	@$(MAKEBOOT) clean
+	@$(MAKECHRPBOOT) clean
+	@$(MAKEMBXBOOT) clean
+	@$(MAKETREEBOOT) clean
+
+archmrproper:
 
 archdep:
-#	@$(MAKEBOOT) dep
+	$(MAKEBOOT) fastdep
+	$(MAKECHRPBOOT) fastdep

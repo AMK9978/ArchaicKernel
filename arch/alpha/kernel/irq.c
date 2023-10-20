@@ -11,6 +11,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/kernel.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/kernel_stat.h>
@@ -19,206 +20,431 @@
 #include <linux/interrupt.h>
 #include <linux/malloc.h>
 #include <linux/random.h>
+#include <linux/init.h>
+#include <linux/irq.h>
+#include <linux/proc_fs.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/irq.h>
 #include <asm/bitops.h>
-#include <asm/dma.h>
-
-extern void timer_interrupt(struct pt_regs * regs);
-
-#if NR_IRQS > 64
-#  error Unable to handle more than 64 irq levels.
-#endif
+#include <asm/uaccess.h>
 
 /*
- * Shadow-copy of masked interrupts.
- *  The bits are used as follows:
- *	 0.. 7	first ISA PIC (irq level 0..7)
- *	 8..15	second ISA PIC (irq level 8..15)
- *   Systems with 32 PCI interrupt lines (e.g., Alcor):
- *	16..47	PCI interrupts 0..31 (int at GRU_INT_MASK)
- *   Mikasa:
- *	16..31	PCI interrupts 0..15 (short at I/O port 536)
- *   Other systems (not Mikasa) with 16 PCI interrupt lines:
- *	16..23	PCI interrupts 0.. 7 (char at I/O port 26)
- *	24..31	PCI interrupts 8..15 (char at I/O port 27)
- *   Systems with 17 PCI interrupt lines (e.g., Cabriolet and eb164):
- *	16..32	PCI interrupts 0..31 (int at I/O port 804)
+ * Controller mappings for all interrupt sources:
  */
-static unsigned long irq_mask = ~0UL;
+irq_desc_t irq_desc[NR_IRQS] __cacheline_aligned = {
+	[0 ... NR_IRQS-1] = { 0, &no_irq_type, NULL, 0, SPIN_LOCK_UNLOCKED}
+};
 
+static void register_irq_proc(unsigned int irq);
+
+unsigned long irq_err_count;
 
 /*
- * Update the hardware with the irq mask passed in MASK.  The function
- * exploits the fact that it is known that only bit IRQ has changed.
+ * Special irq handlers.
  */
-static void update_hw(unsigned long irq, unsigned long mask)
+
+void no_action(int cpl, void *dev_id, struct pt_regs *regs) { }
+
+/*
+ * Generic no controller code
+ */
+
+static void no_irq_enable_disable(unsigned int irq) { }
+static unsigned int no_irq_startup(unsigned int irq) { return 0; }
+
+static void
+no_irq_ack(unsigned int irq)
 {
-	switch (irq) {
-#if NR_IRQS == 48
-	      default:
-		/* note inverted sense of mask bits: */
-		*(unsigned int *)GRU_INT_MASK = ~(mask >> 16);
-		mb();
-		break;
-
-#elif NR_IRQS == 33
-	      default:
-		outl(mask >> 16, 0x804);
-		break;
-
-#elif defined(CONFIG_ALPHA_MIKASA)
-	      default:
-		outw(~(mask >> 16), 0x536); /* note invert */
-		break;
-
-#elif NR_IRQS == 32
-	      case 16 ... 23:
-		outb(mask >> 16, 0x26);
-		break;
-
-	      default:
-		outb(mask >> 24, 0x27);
-		break;
-#endif
-		/* handle ISA irqs last---fast devices belong on PCI... */
-
-	      case  0 ... 7:	/* ISA PIC1 */
-		outb(mask, 0x21);
-		break;
-
-	      case  8 ...15:	/* ISA PIC2 */
-		outb(mask >> 8, 0xA1);
-		break;
-	}
+	irq_err_count++;
+	printk(KERN_CRIT "Unexpected IRQ trap at vector %u\n", irq);
 }
 
-static inline void mask_irq(unsigned long irq)
+struct hw_interrupt_type no_irq_type = {
+	typename:	"none",
+	startup:	no_irq_startup,
+	shutdown:	no_irq_enable_disable,
+	enable:		no_irq_enable_disable,
+	disable:	no_irq_enable_disable,
+	ack:		no_irq_ack,
+	end:		no_irq_enable_disable,
+};
+
+int
+handle_IRQ_event(unsigned int irq, struct pt_regs *regs,
+		 struct irqaction *action)
 {
-	irq_mask |= (1UL << irq);
-	update_hw(irq, irq_mask);
+	int status;
+	int cpu = smp_processor_id();
+
+	kstat.irqs[cpu][irq]++;
+	irq_enter(cpu, irq);
+
+	status = 1;	/* Force the "do bottom halves" bit */
+
+	do {
+		if (!(action->flags & SA_INTERRUPT))
+			__sti();
+		else
+			__cli();
+
+		status |= action->flags;
+		action->handler(irq, action->dev_id, regs);
+		action = action->next;
+	} while (action);
+	if (status & SA_SAMPLE_RANDOM)
+		add_interrupt_randomness(irq);
+	__cli();
+
+	irq_exit(cpu, irq);
+
+	return status;
 }
 
-static inline void unmask_irq(unsigned long irq)
+/*
+ * Generic enable/disable code: this just calls
+ * down into the PIC-specific version for the actual
+ * hardware disable after having gotten the irq
+ * controller lock. 
+ */
+void inline
+disable_irq_nosync(unsigned int irq)
 {
-	irq_mask &= ~(1UL << irq);
-	update_hw(irq, irq_mask);
-}
-
-void disable_irq(unsigned int irq_nr)
-{
+	irq_desc_t *desc = irq_desc + irq;
 	unsigned long flags;
 
-	save_flags(flags);
-	cli();
-	mask_irq(irq_nr);
-	restore_flags(flags);
-}
-
-void enable_irq(unsigned int irq_nr)
-{
-	unsigned long flags;
-
-	save_flags(flags);
-	cli();
-	unmask_irq(irq_nr);
-	restore_flags(flags);
+	spin_lock_irqsave(&desc->lock, flags);
+	if (!desc->depth++) {
+		desc->status |= IRQ_DISABLED;
+		desc->handler->disable(irq);
+	}
+	spin_unlock_irqrestore(&desc->lock, flags);
 }
 
 /*
- * Initial irq handlers.
+ * Synchronous version of the above, making sure the IRQ is
+ * no longer running on any other IRQ..
  */
-static struct irqaction *irq_action[NR_IRQS];
-
-int get_irq_list(char *buf)
+void
+disable_irq(unsigned int irq)
 {
-	int i, len = 0;
-	struct irqaction * action;
+	disable_irq_nosync(irq);
 
-	for (i = 0 ; i < NR_IRQS ; i++) {
-		action = irq_action[i];
-		if (!action) 
-			continue;
-		len += sprintf(buf+len, "%2d: %8d %c %s",
-			i, kstat.interrupts[i],
-			(action->flags & SA_INTERRUPT) ? '+' : ' ',
-			action->name);
-		for (action=action->next; action; action = action->next) {
-			len += sprintf(buf+len, ",%s %s",
-				(action->flags & SA_INTERRUPT) ? " +" : "",
-				action->name);
-		}
-		len += sprintf(buf+len, "\n");
+	if (!local_irq_count(smp_processor_id())) {
+		do {
+			barrier();
+		} while (irq_desc[irq].status & IRQ_INPROGRESS);
 	}
-	return len;
 }
 
-static inline void ack_irq(int irq)
+void
+enable_irq(unsigned int irq)
 {
-	if (irq < 16) {
-		/* ACK the interrupt making it the lowest priority */
-		/*  First the slave .. */
-		if (irq > 7) {
-			outb(0xE0 | (irq - 8), 0xa0);
-			irq = 2;
+	irq_desc_t *desc = irq_desc + irq;
+	unsigned long flags;
+
+	spin_lock_irqsave(&desc->lock, flags);
+	switch (desc->depth) {
+	case 1: {
+		unsigned int status = desc->status & ~IRQ_DISABLED;
+		desc->status = status;
+		if ((status & (IRQ_PENDING | IRQ_REPLAY)) == IRQ_PENDING) {
+			desc->status = status | IRQ_REPLAY;
+			hw_resend_irq(desc->handler,irq);
 		}
-		/* .. then the master */
-		outb(0xE0 | irq, 0x20);
+		desc->handler->enable(irq);
+		/* fall-through */
 	}
-#if 0
-	/* This is not needed since all interrupt are level-sensitive */
-#if defined(CONFIG_ALPHA_ALCOR)
-	/* on ALCOR, need to dismiss interrupt via GRU */
-	*(int *)GRU_INT_CLEAR = 0x80000000;
-	mb();
-	*(int *)GRU_INT_CLEAR = 0x00000000;
-	mb();
-#endif /* CONFIG_ALPHA_ALCOR */
-#endif
+	default:
+		desc->depth--;
+		break;
+	case 0:
+		printk(KERN_ERR "enable_irq() unbalanced from %p\n",
+		       __builtin_return_address(0));
+	}
+	spin_unlock_irqrestore(&desc->lock, flags);
 }
 
-int request_irq(unsigned int irq, 
-		void (*handler)(int, void *, struct pt_regs *),
-		unsigned long irqflags, 
-		const char * devname,
-		void *dev_id)
+int
+setup_irq(unsigned int irq, struct irqaction * new)
 {
 	int shared = 0;
-	struct irqaction * action, **p;
+	struct irqaction *old, **p;
 	unsigned long flags;
+	irq_desc_t *desc = irq_desc + irq;
 
-	if (irq >= NR_IRQS)
-		return -EINVAL;
-	if (!handler)
-		return -EINVAL;
-	p = irq_action + irq;
-	action = *p;
-	if (action) {
+	/*
+	 * Some drivers like serial.c use request_irq() heavily,
+	 * so we have to be careful not to interfere with a
+	 * running system.
+	 */
+	if (new->flags & SA_SAMPLE_RANDOM) {
+		/*
+		 * This function might sleep, we want to call it first,
+		 * outside of the atomic block.
+		 * Yes, this might clear the entropy pool if the wrong
+		 * driver is attempted to be loaded, without actually
+		 * installing a new handler, but is this really a problem,
+		 * only the sysadmin is able to do this.
+		 */
+		rand_initialize_irq(irq);
+	}
+
+	/*
+	 * The following block of code has to be executed atomically
+	 */
+	spin_lock_irqsave(&desc->lock,flags);
+	p = &desc->action;
+	if ((old = *p) != NULL) {
 		/* Can't share interrupts unless both agree to */
-		if (!(action->flags & irqflags & SA_SHIRQ))
+		if (!(old->flags & new->flags & SA_SHIRQ)) {
+			spin_unlock_irqrestore(&desc->lock,flags);
 			return -EBUSY;
-
-		/* Can't share interrupts unless both are same type */
-		if ((action->flags ^ irqflags) & SA_INTERRUPT)
-			return -EBUSY;
+		}
 
 		/* add new interrupt at end of irq queue */
 		do {
-			p = &action->next;
-			action = *p;
-		} while (action);
+			p = &old->next;
+			old = *p;
+		} while (old);
 		shared = 1;
 	}
 
-	action = (struct irqaction *)kmalloc(sizeof(struct irqaction),
-					     GFP_KERNEL);
+	*p = new;
+
+	if (!shared) {
+		desc->depth = 0;
+		desc->status &= ~IRQ_DISABLED;
+		desc->handler->startup(irq);
+	}
+	spin_unlock_irqrestore(&desc->lock,flags);
+
+	return 0;
+}
+
+static struct proc_dir_entry * root_irq_dir;
+static struct proc_dir_entry * irq_dir[NR_IRQS];
+
+#ifdef CONFIG_SMP
+static struct proc_dir_entry * smp_affinity_entry[NR_IRQS];
+static char irq_user_affinity[NR_IRQS];
+static unsigned long irq_affinity[NR_IRQS] = { [0 ... NR_IRQS-1] = ~0UL };
+
+static void
+select_smp_affinity(int irq)
+{
+	static int last_cpu;
+	int cpu = last_cpu + 1;
+
+	if (! irq_desc[irq].handler->set_affinity || irq_user_affinity[irq])
+		return;
+
+	while (((cpu_present_mask >> cpu) & 1) == 0)
+		cpu = (cpu < (NR_CPUS-1) ? cpu + 1 : 0);
+	last_cpu = cpu;
+
+	irq_affinity[irq] = 1UL << cpu;
+	irq_desc[irq].handler->set_affinity(irq, 1UL << cpu);
+}
+
+#define HEX_DIGITS 16
+
+static int
+irq_affinity_read_proc (char *page, char **start, off_t off,
+			int count, int *eof, void *data)
+{
+	if (count < HEX_DIGITS+1)
+		return -EINVAL;
+	return sprintf (page, "%016lx\n", irq_affinity[(long)data]);
+}
+
+static unsigned int
+parse_hex_value (const char *buffer,
+		 unsigned long count, unsigned long *ret)
+{
+	unsigned char hexnum [HEX_DIGITS];
+	unsigned long value;
+	int i;
+
+	if (!count)
+		return -EINVAL;
+	if (count > HEX_DIGITS)
+		count = HEX_DIGITS;
+	if (copy_from_user(hexnum, buffer, count))
+		return -EFAULT;
+
+	/*
+	 * Parse the first 8 characters as a hex string, any non-hex char
+	 * is end-of-string. '00e1', 'e1', '00E1', 'E1' are all the same.
+	 */
+	value = 0;
+
+	for (i = 0; i < count; i++) {
+		unsigned int c = hexnum[i];
+
+		switch (c) {
+			case '0' ... '9': c -= '0'; break;
+			case 'a' ... 'f': c -= 'a'-10; break;
+			case 'A' ... 'F': c -= 'A'-10; break;
+		default:
+			goto out;
+		}
+		value = (value << 4) | c;
+	}
+out:
+	*ret = value;
+	return 0;
+}
+
+static int
+irq_affinity_write_proc(struct file *file, const char *buffer,
+			unsigned long count, void *data)
+{
+	int irq = (long) data, full_count = count, err;
+	unsigned long new_value;
+
+	if (!irq_desc[irq].handler->set_affinity)
+		return -EIO;
+
+	err = parse_hex_value(buffer, count, &new_value);
+
+	/* The special value 0 means release control of the
+	   affinity to kernel.  */
+	if (new_value == 0) {
+		irq_user_affinity[irq] = 0;
+		select_smp_affinity(irq);
+	}
+	/* Do not allow disabling IRQs completely - it's a too easy
+	   way to make the system unusable accidentally :-) At least
+	   one online CPU still has to be targeted.  */
+	else if (!(new_value & cpu_present_mask))
+		return -EINVAL;
+	else {
+		irq_affinity[irq] = new_value;
+		irq_user_affinity[irq] = 1;
+		irq_desc[irq].handler->set_affinity(irq, new_value);
+	}
+
+	return full_count;
+}
+
+static int
+prof_cpu_mask_read_proc(char *page, char **start, off_t off,
+			int count, int *eof, void *data)
+{
+	unsigned long *mask = (unsigned long *) data;
+	if (count < HEX_DIGITS+1)
+		return -EINVAL;
+	return sprintf (page, "%016lx\n", *mask);
+}
+
+static int
+prof_cpu_mask_write_proc(struct file *file, const char *buffer,
+			 unsigned long count, void *data)
+{
+	unsigned long *mask = (unsigned long *) data, full_count = count, err;
+	unsigned long new_value;
+
+	err = parse_hex_value(buffer, count, &new_value);
+	if (err)
+		return err;
+
+	*mask = new_value;
+	return full_count;
+}
+#endif /* CONFIG_SMP */
+
+#define MAX_NAMELEN 10
+
+static void
+register_irq_proc (unsigned int irq)
+{
+	struct proc_dir_entry *entry;
+	char name [MAX_NAMELEN];
+
+	if (!root_irq_dir || (irq_desc[irq].handler == &no_irq_type))
+		return;
+
+	memset(name, 0, MAX_NAMELEN);
+	sprintf(name, "%d", irq);
+
+	/* create /proc/irq/1234 */
+	irq_dir[irq] = proc_mkdir(name, root_irq_dir);
+
+#ifdef CONFIG_SMP
+	/* create /proc/irq/1234/smp_affinity */
+	entry = create_proc_entry("smp_affinity", 0600, irq_dir[irq]);
+
+	entry->nlink = 1;
+	entry->data = (void *)(long)irq;
+	entry->read_proc = irq_affinity_read_proc;
+	entry->write_proc = irq_affinity_write_proc;
+
+	smp_affinity_entry[irq] = entry;
+#endif
+}
+
+unsigned long prof_cpu_mask = ~0UL;
+
+void
+init_irq_proc (void)
+{
+	struct proc_dir_entry *entry;
+	int i;
+
+	/* create /proc/irq */
+	root_irq_dir = proc_mkdir("irq", 0);
+
+#ifdef CONFIG_SMP
+	/* create /proc/irq/prof_cpu_mask */
+	entry = create_proc_entry("prof_cpu_mask", 0600, root_irq_dir);
+
+	entry->nlink = 1;
+	entry->data = (void *)&prof_cpu_mask;
+	entry->read_proc = prof_cpu_mask_read_proc;
+	entry->write_proc = prof_cpu_mask_write_proc;
+#endif
+
+	/*
+	 * Create entries for all existing IRQs.
+	 */
+	for (i = 0; i < NR_IRQS; i++) {
+		if (irq_desc[i].handler == &no_irq_type)
+			continue;
+		register_irq_proc(i);
+	}
+}
+
+int
+request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *),
+	    unsigned long irqflags, const char * devname, void *dev_id)
+{
+	int retval;
+	struct irqaction * action;
+
+	if (irq >= ACTUAL_NR_IRQS)
+		return -EINVAL;
+	if (!handler)
+		return -EINVAL;
+
+#if 1
+	/*
+	 * Sanity-check: shared interrupts should REALLY pass in
+	 * a real dev-ID, otherwise we'll have trouble later trying
+	 * to figure out which interrupt is which (messes up the
+	 * interrupt freeing logic etc).
+	 */
+	if ((irqflags & SA_SHIRQ) && !dev_id) {
+		printk(KERN_ERR
+		       "Bad boy: %s (at %p) called us without a dev_id!\n",
+		       devname, __builtin_return_address(0));
+	}
+#endif
+
+	action = (struct irqaction *)
+			kmalloc(sizeof(struct irqaction), GFP_KERNEL);
 	if (!action)
 		return -ENOMEM;
-
-	if (irqflags & SA_SAMPLE_RANDOM)
-		rand_initialize_irq(irq);
 
 	action->handler = handler;
 	action->flags = irqflags;
@@ -227,339 +453,321 @@ int request_irq(unsigned int irq,
 	action->next = NULL;
 	action->dev_id = dev_id;
 
-	save_flags(flags);
-	cli();
-	*p = action;
+#ifdef CONFIG_SMP
+	select_smp_affinity(irq);
+#endif
 
-	if (!shared)
-		unmask_irq(irq);
-
-	restore_flags(flags);
-	return 0;
+	retval = setup_irq(irq, action);
+	if (retval)
+		kfree(action);
+	return retval;
 }
-		
-void free_irq(unsigned int irq, void *dev_id)
+
+void
+free_irq(unsigned int irq, void *dev_id)
 {
-	struct irqaction * action, **p;
+	irq_desc_t *desc;
+	struct irqaction **p;
 	unsigned long flags;
 
-	if (irq >= NR_IRQS) {
-		printk("Trying to free IRQ%d\n",irq);
+	if (irq >= ACTUAL_NR_IRQS) {
+		printk(KERN_CRIT "Trying to free IRQ%d\n", irq);
 		return;
 	}
-	for (p = irq + irq_action; (action = *p) != NULL; p = &action->next) {
-		if (action->dev_id != dev_id)
-			continue;
 
-		/* Found it - now free it */
-		save_flags(flags);
-		cli();
-		*p = action->next;
-		if (!irq[irq_action])
-			mask_irq(irq);
-		restore_flags(flags);
-		kfree(action);
-		return;
-	}
-	printk("Trying to free free IRQ%d\n",irq);
-}
+	desc = irq_desc + irq;
+	spin_lock_irqsave(&desc->lock,flags);
+	p = &desc->action;
+	for (;;) {
+		struct irqaction * action = *p;
+		if (action) {
+			struct irqaction **pp = p;
+			p = &action->next;
+			if (action->dev_id != dev_id)
+				continue;
 
-static inline void handle_nmi(struct pt_regs * regs)
-{
-	printk("Whee.. NMI received. Probable hardware error\n");
-	printk("61=%02x, 461=%02x\n", inb(0x61), inb(0x461));
-}
-
-static void unexpected_irq(int irq, struct pt_regs * regs)
-{
-	struct irqaction *action;
-	int i;
-
-	printk("IO device interrupt, irq = %d\n", irq);
-	printk("PC = %016lx PS=%04lx\n", regs->pc, regs->ps);
-	printk("Expecting: ");
-	for (i = 0; i < 16; i++)
-		if ((action = irq_action[i]))
-			while (action->handler) {
-				printk("[%s:%d] ", action->name, i);
-				action = action->next;
+			/* Found - now remove it from the list of entries.  */
+			*pp = action->next;
+			if (!desc->action) {
+				desc->status |= IRQ_DISABLED;
+				desc->handler->shutdown(irq);
 			}
-	printk("\n");
-#if defined(CONFIG_ALPHA_JENSEN)
-	printk("64=%02x, 60=%02x, 3fa=%02x 2fa=%02x\n",
-		inb(0x64), inb(0x60), inb(0x3fa), inb(0x2fa));
-	outb(0x0c, 0x3fc);
-	outb(0x0c, 0x2fc);
-	outb(0,0x61);
-	outb(0,0x461);
+			spin_unlock_irqrestore(&desc->lock,flags);
+
+#ifdef CONFIG_SMP
+			/* Wait to make sure it's not being used on
+			   another CPU.  */
+			while (desc->status & IRQ_INPROGRESS)
+				barrier();
 #endif
-}
-
-static inline void handle_irq(int irq, struct pt_regs * regs)
-{
-	struct irqaction * action = irq_action[irq];
-
-	kstat.interrupts[irq]++;
-	if (!action) {
-		unexpected_irq(irq, regs);
-		return;
-	}
-	do {
-		action->handler(irq, action->dev_id, regs);
-		action = action->next;
-	} while (action);
-}
-
-static inline void device_interrupt(int irq, int ack, struct pt_regs * regs)
-{
-	struct irqaction * action;
-
-	if ((unsigned) irq > NR_IRQS) {
-		printk("device_interrupt: unexpected interrupt %d\n", irq);
-		return;
-	}
-
-	kstat.interrupts[irq]++;
-	action = irq_action[irq];
-	/*
-	 * For normal interrupts, we mask it out, and then ACK it.
-	 * This way another (more timing-critical) interrupt can
-	 * come through while we're doing this one.
-	 *
-	 * Note! A irq without a handler gets masked and acked, but
-	 * never unmasked. The autoirq stuff depends on this (it looks
-	 * at the masks before and after doing the probing).
-	 */
-	mask_irq(ack);
-	ack_irq(ack);
-	if (!action)
-		return;
-	if (action->flags & SA_SAMPLE_RANDOM)
-		add_interrupt_randomness(irq);
-	do {
-		action->handler(irq, action->dev_id, regs);
-		action = action->next;
-	} while (action);
-	unmask_irq(ack);
-}
-
-#ifdef CONFIG_PCI
-
-/*
- * Handle ISA interrupt via the PICs.
- */
-static inline void isa_device_interrupt(unsigned long vector,
-					struct pt_regs * regs)
-{
-#if defined(CONFIG_ALPHA_APECS)
-#	define IACK_SC	APECS_IACK_SC
-#elif defined(CONFIG_ALPHA_LCA)
-#	define IACK_SC	LCA_IACK_SC
-#elif defined(CONFIG_ALPHA_CIA)
-#	define IACK_SC	CIA_IACK_SC
-#else
-	/*
-	 * This is bogus but necessary to get it to compile
-	 * on all platforms.  If you try to use this on any
-	 * other than the intended platforms, you'll notice
-	 * real fast...
-	 */
-#	define IACK_SC	1L
-#endif
-	int j;
-
-#if 1
-	/*
-	 * Generate a PCI interrupt acknowledge cycle.  The PIC will
-	 * respond with the interrupt vector of the highest priority
-	 * interrupt that is pending.  The PALcode sets up the
-	 * interrupts vectors such that irq level L generates vector
-	 * L.
-	 */
-	j = *(volatile int *) IACK_SC;
-	j &= 0xff;
-	if (j == 7) {
-		if (!(inb(0x20) & 0x80)) {
-			/* it's only a passive release... */
+			kfree(action);
 			return;
 		}
+		printk(KERN_ERR "Trying to free free IRQ%d\n",irq);
+		spin_unlock_irqrestore(&desc->lock,flags);
+		return;
 	}
-	device_interrupt(j, j, regs);
-#else
-	unsigned long pic;
-
-	/*
-	 * It seems to me that the probability of two or more *device*
-	 * interrupts occurring at almost exactly the same time is
-	 * pretty low.  So why pay the price of checking for
-	 * additional interrupts here if the common case can be
-	 * handled so much easier?
-	 */
-	/* 
-	 *  The first read of gives you *all* interrupting lines.
-	 *  Therefore, read the mask register and and out those lines
-	 *  not enabled.  Note that some documentation has 21 and a1 
-	 *  write only.  This is not true.
-	 */
-	pic = inb(0x20) | (inb(0xA0) << 8);	/* read isr */
-	pic &= ~irq_mask;			/* apply mask */
-	pic &= 0xFFFB;				/* mask out cascade & hibits */
-
-	while (pic) {
-		j = ffz(~pic);
-		pic &= pic - 1;
-		device_interrupt(j, j, regs);
-	}
-#endif
 }
 
-static inline void cabriolet_and_eb66p_device_interrupt(unsigned long vector,
-							struct pt_regs * regs)
+int
+get_irq_list(char *buf)
 {
-	unsigned long pld;
-	unsigned int i;
-	unsigned long flags;
-
-	save_flags(flags);
-	cli();
-
-	/* read the interrupt summary registers */
-	pld = inb(0x804) | (inb(0x805) << 8) | (inb(0x806) << 16);
-
-#if 0
-	printk("[0x%04X/0x%04X]", pld, inb(0x20) | (inb(0xA0) << 8));
-#endif
-
-	/*
-	 * Now for every possible bit set, work through them and call
-	 * the appropriate interrupt handler.
-	 */
-	while (pld) {
-		i = ffz(~pld);
-		pld &= pld - 1;	/* clear least bit set */
-		if (i == 4) {
-			isa_device_interrupt(vector, regs);
-		} else {
-			device_interrupt(16 + i, 16 + i, regs);
-		}
-	}
-	restore_flags(flags);
-}
-
-static inline void eb66_and_eb64p_device_interrupt(unsigned long vector,
-						   struct pt_regs * regs)
-{
-	unsigned long pld;
-	unsigned int i;
-	unsigned long flags;
-
-	save_flags(flags);
-	cli();
-
-	/* read the interrupt summary registers */
-	pld = inb(0x26) | (inb(0x27) << 8);
-	/*
-	 * Now, for every possible bit set, work through
-	 * them and call the appropriate interrupt handler.
-	 */
-	while (pld) {
-		i = ffz(~pld);
-		pld &= pld - 1;	/* clear least bit set */
-
-		if (i == 5) {
-			isa_device_interrupt(vector, regs);
-		} else {
-			device_interrupt(16 + i, 16 + i, regs);
-		}
-	}
-	restore_flags(flags);
-}
-
-#endif /* CONFIG_PCI */
-
-/*
- * Jensen is special: the vector is 0x8X0 for EISA interrupt X, and
- * 0x9X0 for the local motherboard interrupts..
- *
- *	0x660 - NMI
- *
- *	0x800 - IRQ0  interval timer (not used, as we use the RTC timer)
- *	0x810 - IRQ1  line printer (duh..)
- *	0x860 - IRQ6  floppy disk
- *	0x8E0 - IRQ14 SCSI controller
- *
- *	0x900 - COM1
- *	0x920 - COM2
- *	0x980 - keyboard
- *	0x990 - mouse
- *
- * PCI-based systems are more sane: they don't have the local
- * interrupts at all, and have only normal PCI interrupts from
- * devices.  Happily it's easy enough to do a sane mapping from the
- * Jensen..  Note that this means that we may have to do a hardware
- * "ack" to a different interrupt than we report to the rest of the
- * world.
- */
-static inline void srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
-{
-	int irq, ack;
-	unsigned long flags;
-
-	save_flags(flags);
-	cli();
-
-
-	ack = irq = (vector - 0x800) >> 4;
-
-#ifdef CONFIG_ALPHA_JENSEN
-	switch (vector) {
-	      case 0x660: handle_nmi(regs); return;
-		/* local device interrupts: */
-	      case 0x900: handle_irq(4, regs); return;	/* com1 -> irq 4 */
-	      case 0x920: handle_irq(3, regs); return;	/* com2 -> irq 3 */
-	      case 0x980: handle_irq(1, regs); return;	/* kbd -> irq 1 */
-	      case 0x990: handle_irq(9, regs); return;	/* mouse -> irq 9 */
-	      default:
-		if (vector > 0x900) {
-			printk("Unknown local interrupt %lx\n", vector);
-		}
-	}
-	/* irq1 is supposed to be the keyboard, silly Jensen (is this really needed??) */
-	if (irq == 1)
-		irq = 7;
-#endif /* CONFIG_ALPHA_JENSEN */
-
-	device_interrupt(irq, ack, regs);
-
-	restore_flags(flags) ;
-}
-
-/*
- * Start listening for interrupts..
- */
-unsigned long probe_irq_on(void)
-{
+	int i, j;
 	struct irqaction * action;
-	unsigned long irqs = 0;
-	unsigned long delay;
-	unsigned int i;
+	char *p = buf;
 
-	for (i = NR_IRQS - 1; i > 0; i--) {
-		action = irq_action[i];
-		if (!action) {
-			enable_irq(i);
-			irqs |= (1 << i);
+#ifdef CONFIG_SMP
+	p += sprintf(p, "           ");
+	for (i = 0; i < smp_num_cpus; i++)
+		p += sprintf(p, "CPU%d       ", i);
+#ifdef DO_BROADCAST_INTS
+	for (i = 0; i < smp_num_cpus; i++)
+		p += sprintf(p, "TRY%d       ", i);
+#endif
+	*p++ = '\n';
+#endif
+
+	for (i = 0; i < NR_IRQS; i++) {
+		action = irq_desc[i].action;
+		if (!action) 
+			continue;
+		p += sprintf(p, "%3d: ",i);
+#ifndef CONFIG_SMP
+		p += sprintf(p, "%10u ", kstat_irqs(i));
+#else
+		for (j = 0; j < smp_num_cpus; j++)
+			p += sprintf(p, "%10u ",
+				     kstat.irqs[cpu_logical_map(j)][i]);
+#ifdef DO_BROADCAST_INTS
+		for (j = 0; j < smp_num_cpus; j++)
+			p += sprintf(p, "%10lu ",
+				     irq_attempt(cpu_logical_map(j), i));
+#endif
+#endif
+		p += sprintf(p, " %14s", irq_desc[i].handler->typename);
+		p += sprintf(p, "  %c%s",
+			     (action->flags & SA_INTERRUPT)?'+':' ',
+			     action->name);
+
+		for (action=action->next; action; action = action->next) {
+			p += sprintf(p, ", %c%s",
+				     (action->flags & SA_INTERRUPT)?'+':' ',
+				     action->name);
 		}
+		*p++ = '\n';
 	}
-	/*
-	 * Wait about 100ms for spurious interrupts to mask themselves
-	 * out again...
-	 */
-	for (delay = jiffies + HZ/10; delay > jiffies; )
-		barrier();
+#if CONFIG_SMP
+	p += sprintf(p, "IPI: ");
+	for (j = 0; j < smp_num_cpus; j++)
+		p += sprintf(p, "%10lu ",
+			     cpu_data[cpu_logical_map(j)].ipi_count);
+	p += sprintf(p, "\n");
+#endif
+	p += sprintf(p, "ERR: %10lu\n", irq_err_count);
+	return p - buf;
+}
 
-	/* now filter out any obviously spurious interrupts */
-	return irqs & ~irq_mask;
+
+/*
+ * do_IRQ handles all normal device IRQ's (the special
+ * SMP cross-CPU interrupts have their own specific
+ * handlers).
+ */
+void
+handle_irq(int irq, struct pt_regs * regs)
+{	
+	/* 
+	 * We ack quickly, we don't want the irq controller
+	 * thinking we're snobs just because some other CPU has
+	 * disabled global interrupts (we have already done the
+	 * INT_ACK cycles, it's too late to try to pretend to the
+	 * controller that we aren't taking the interrupt).
+	 *
+	 * 0 return value means that this irq is already being
+	 * handled by some other CPU. (or is disabled)
+	 */
+	int cpu = smp_processor_id();
+	irq_desc_t *desc = irq_desc + irq;
+	struct irqaction * action;
+	unsigned int status;
+
+	if ((unsigned) irq > ACTUAL_NR_IRQS) {
+		irq_err_count++;
+		printk(KERN_CRIT "device_interrupt: illegal interrupt %d\n",
+		       irq);
+		return;
+	}
+
+	irq_attempt(cpu, irq)++;
+	spin_lock_irq(&desc->lock); /* mask also the higher prio events */
+	desc->handler->ack(irq);
+	/*
+	 * REPLAY is when Linux resends an IRQ that was dropped earlier.
+	 * WAITING is used by probe to mark irqs that are being tested.
+	 */
+	status = desc->status & ~(IRQ_REPLAY | IRQ_WAITING);
+	status |= IRQ_PENDING; /* we _want_ to handle it */
+
+	/*
+	 * If the IRQ is disabled for whatever reason, we cannot
+	 * use the action we have.
+	 */
+	action = NULL;
+	if (!(status & (IRQ_DISABLED | IRQ_INPROGRESS))) {
+		action = desc->action;
+		status &= ~IRQ_PENDING; /* we commit to handling */
+		status |= IRQ_INPROGRESS; /* we are handling it */
+	}
+	desc->status = status;
+
+	/*
+	 * If there is no IRQ handler or it was disabled, exit early.
+	 * Since we set PENDING, if another processor is handling
+	 * a different instance of this same irq, the other processor
+	 * will take care of it.
+	 */
+	if (!action)
+		goto out;
+
+	/*
+	 * Edge triggered interrupts need to remember pending events.
+	 * This applies to any hw interrupts that allow a second
+	 * instance of the same irq to arrive while we are in do_IRQ
+	 * or in the handler. But the code here only handles the _second_
+	 * instance of the irq, not the third or fourth. So it is mostly
+	 * useful for irq hardware that does not mask cleanly in an
+	 * SMP environment.
+	 */
+	for (;;) {
+		spin_unlock(&desc->lock);
+		handle_IRQ_event(irq, regs, action);
+		spin_lock(&desc->lock);
+		
+		if (!(desc->status & IRQ_PENDING)
+		    || (desc->status & IRQ_LEVEL))
+			break;
+		desc->status &= ~IRQ_PENDING;
+	}
+	desc->status &= ~IRQ_INPROGRESS;
+out:
+	/*
+	 * The ->end() handler has to deal with interrupts which got
+	 * disabled while the handler was running.
+	 */
+	desc->handler->end(irq);
+	spin_unlock(&desc->lock);
+}
+
+/*
+ * IRQ autodetection code..
+ *
+ * This depends on the fact that any interrupt that
+ * comes in on to an unassigned handler will get stuck
+ * with "IRQ_WAITING" cleared and the interrupt
+ * disabled.
+ */
+unsigned long
+probe_irq_on(void)
+{
+	int i;
+	irq_desc_t *desc;
+	unsigned long delay;
+	unsigned long val;
+
+	/* Something may have generated an irq long ago and we want to
+	   flush such a longstanding irq before considering it as spurious. */
+	for (i = NR_IRQS-1; i >= 0; i--) {
+		desc = irq_desc + i;
+
+		spin_lock_irq(&desc->lock);
+		if (!irq_desc[i].action) 
+			irq_desc[i].handler->startup(i);
+		spin_unlock_irq(&desc->lock);
+	}
+
+	/* Wait for longstanding interrupts to trigger. */
+	for (delay = jiffies + HZ/50; time_after(delay, jiffies); )
+		/* about 20ms delay */ synchronize_irq();
+
+	/* enable any unassigned irqs (we must startup again here because
+	   if a longstanding irq happened in the previous stage, it may have
+	   masked itself) first, enable any unassigned irqs. */
+	for (i = NR_IRQS-1; i >= 0; i--) {
+		desc = irq_desc + i;
+
+		spin_lock_irq(&desc->lock);
+		if (!desc->action) {
+			desc->status |= IRQ_AUTODETECT | IRQ_WAITING;
+			if (desc->handler->startup(i))
+				desc->status |= IRQ_PENDING;
+		}
+		spin_unlock_irq(&desc->lock);
+	}
+
+	/*
+	 * Wait for spurious interrupts to trigger
+	 */
+	for (delay = jiffies + HZ/10; time_after(delay, jiffies); )
+		/* about 100ms delay */ synchronize_irq();
+
+	/*
+	 * Now filter out any obviously spurious interrupts
+	 */
+	val = 0;
+	for (i=0; i<NR_IRQS; i++) {
+		irq_desc_t *desc = irq_desc + i;
+		unsigned int status;
+
+		spin_lock_irq(&desc->lock);
+		status = desc->status;
+
+		if (status & IRQ_AUTODETECT) {
+			/* It triggered already - consider it spurious. */
+			if (!(status & IRQ_WAITING)) {
+				desc->status = status & ~IRQ_AUTODETECT;
+				desc->handler->shutdown(i);
+			} else
+				if (i < 32)
+					val |= 1 << i;
+		}
+		spin_unlock_irq(&desc->lock);
+	}
+
+	return val;
+}
+
+/*
+ * Return a mask of triggered interrupts (this
+ * can handle only legacy ISA interrupts).
+ */
+unsigned int
+probe_irq_mask(unsigned long val)
+{
+	int i;
+	unsigned int mask;
+
+	mask = 0;
+	for (i = 0; i < NR_IRQS; i++) {
+		irq_desc_t *desc = irq_desc + i;
+		unsigned int status;
+
+		spin_lock_irq(&desc->lock);
+		status = desc->status;
+
+		if (status & IRQ_AUTODETECT) {
+			/* We only react to ISA interrupts */
+			if (!(status & IRQ_WAITING)) {
+				if (i < 16)
+					mask |= 1 << i;
+			}
+
+			desc->status = status & ~IRQ_AUTODETECT;
+			desc->handler->shutdown(i);
+		}
+		spin_unlock_irq(&desc->lock);
+	}
+
+	return mask & val;
 }
 
 /*
@@ -567,102 +775,34 @@ unsigned long probe_irq_on(void)
  * we have several candidates (but we return the lowest-numbered
  * one).
  */
-int probe_irq_off(unsigned long irqs)
-{
-	int i;
-	
-	irqs &= irq_mask & ~1;	/* always mask out irq 0---it's the unused timer */
-#ifdef CONFIG_ALPHA_P2K
-	irqs &= ~(1 << 8);	/* mask out irq 8 since that's the unused RTC input to PIC */
-#endif
-	if (!irqs)
-		return 0;
-	i = ffz(~irqs);
-	if (irqs != (1UL << i))
-		i = -i;
-	return i;
-}
 
-static void machine_check(unsigned long vector, unsigned long la, struct pt_regs * regs)
+int
+probe_irq_off(unsigned long val)
 {
-#if defined(CONFIG_ALPHA_LCA)
-	extern void lca_machine_check (unsigned long vector, unsigned long la,
-				       struct pt_regs *regs);
-	lca_machine_check(vector, la, regs);
-#elif defined(CONFIG_ALPHA_APECS)
-	extern void apecs_machine_check(unsigned long vector, unsigned long la,
-					struct pt_regs * regs);
-	apecs_machine_check(vector, la, regs);
-#elif defined(CONFIG_ALPHA_CIA)
-	extern void cia_machine_check(unsigned long vector, unsigned long la,
-					struct pt_regs * regs);
-	cia_machine_check(vector, la, regs);
-#else
-	printk("Machine check\n");
-#endif
-}
+	int i, irq_found, nr_irqs;
 
-asmlinkage void do_entInt(unsigned long type, unsigned long vector, unsigned long la_ptr,
-	unsigned long a3, unsigned long a4, unsigned long a5,
-	struct pt_regs regs)
-{
-	switch (type) {
-		case 0:
-			printk("Interprocessor interrupt? You must be kidding\n");
-			break;
-		case 1:
-			timer_interrupt(&regs);
-			return;
-		case 2:
-			machine_check(vector, la_ptr, &regs);
-			return;
-		case 3:
-#if defined(CONFIG_ALPHA_JENSEN) || defined(CONFIG_ALPHA_NONAME) || \
-    defined(CONFIG_ALPHA_P2K) || defined(CONFIG_ALPHA_SRM)
-			srm_device_interrupt(vector, &regs);
-#elif NR_IRQS == 33
-			cabriolet_and_eb66p_device_interrupt(vector, &regs);
-#elif NR_IRQS == 32
-# ifdef CONFIG_ALPHA_MIKASA
-#	error  we got a problem here Charlie MIKASA should be SRM console
-# else
-			eb66_and_eb64p_device_interrupt(vector, &regs);
-# endif
-#elif NR_IRQS == 16
-			isa_device_interrupt(vector, &regs);
-#endif
-			return;
-		case 4:
-			printk("Performance counter interrupt\n");
-			break;;
-		default:
-			printk("Hardware intr %ld %lx? Huh?\n", type, vector);
+	nr_irqs = 0;
+	irq_found = 0;
+	for (i=0; i<NR_IRQS; i++) {
+		irq_desc_t *desc = irq_desc + i;
+		unsigned int status;
+
+		spin_lock_irq(&desc->lock);
+		status = desc->status;
+
+		if (status & IRQ_AUTODETECT) {
+			if (!(status & IRQ_WAITING)) {
+				if (!nr_irqs)
+					irq_found = i;
+				nr_irqs++;
+			}
+			desc->status = status & ~IRQ_AUTODETECT;
+			desc->handler->shutdown(i);
+		}
+		spin_unlock_irq(&desc->lock);
 	}
-	printk("PC = %016lx PS=%04lx\n", regs.pc, regs.ps);
-}
 
-extern asmlinkage void entInt(void);
-
-void init_IRQ(void)
-{
-	wrent(entInt, 0);
-	dma_outb(0, DMA1_RESET_REG);
-	dma_outb(0, DMA2_RESET_REG);
-	dma_outb(0, DMA1_CLR_MASK_REG);
-	dma_outb(0, DMA2_CLR_MASK_REG);
-#if NR_IRQS == 48
-	*(unsigned int *)GRU_INT_MASK = ~(irq_mask >> 16);	/* invert */
-	mb();
-	enable_irq(16 + 31);	/* enable EISA PIC cascade */
-#elif NR_IRQS == 33
-	outl(irq_mask >> 16, 0x804);
-	enable_irq(16 +  4);	/* enable SIO cascade */
-#elif defined(CONFIG_ALPHA_MIKASA)
-	outw(~(irq_mask >> 16), 0x536); /* note invert */
-#elif NR_IRQS == 32
-	outb(irq_mask >> 16, 0x26);
-	outb(irq_mask >> 24, 0x27);
-	enable_irq(16 +  5);	/* enable SIO cascade */
-#endif
-	enable_irq(2);		/* enable cascade */
+	if (nr_irqs > 1)
+		irq_found = -irq_found;
+	return irq_found;
 }

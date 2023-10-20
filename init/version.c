@@ -6,19 +6,15 @@
  *  May be freely distributed as part of Linux.
  */
 
-#include <linux/config.h>
+#include <linux/uts.h>
 #include <linux/utsname.h>
 #include <linux/version.h>
 #include <linux/compile.h>
 
-/* make the "checkconfig" script happy: we really need to include config.h */
-#ifdef CONFIG_BOGUS
-#endif
-
 #define version(a) Version_ ## a
 #define version_string(a) version(a)
 
-int version_string(LINUX_VERSION_CODE) = 0;
+int version_string(LINUX_VERSION_CODE);
 
 struct new_utsname system_utsname = {
 	UTS_SYSNAME, UTS_NODENAME, UTS_RELEASE, UTS_VERSION,

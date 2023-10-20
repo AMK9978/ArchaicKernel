@@ -147,9 +147,6 @@ int capi_conn_resp(struct pcbit_chan* chan, struct sk_buff **skb)
 		return -1;
 	}
 
-        (*skb)->free = 1;
-
-
         *((ushort*) skb_put(*skb, 2) ) = chan->callref;  
         *(skb_put(*skb, 1)) = 0x01;  /* ACCEPT_CALL */
         *(skb_put(*skb, 1)) = 0;
@@ -169,8 +166,6 @@ int capi_conn_active_req(struct pcbit_chan* chan, struct sk_buff **skb)
 		printk(KERN_WARNING "capi_conn_active_req: alloc_skb failed\n");
 		return -1;
 	}
-
-        (*skb)->free = 1;
 
         *((ushort*) skb_put(*skb, 2) ) = chan->callref;  
 
@@ -200,8 +195,6 @@ int capi_conn_active_resp(struct pcbit_chan* chan, struct sk_buff **skb)
 		return -1;
 	}
 
-        (*skb)->free = 1;
-
         *((ushort*) skb_put(*skb, 2) ) = chan->callref;  
 
         return 2;
@@ -222,8 +215,6 @@ int capi_select_proto_req(struct pcbit_chan *chan, struct sk_buff **skb,
 		return -1;
 	}
 
-        (*skb)->free = 1;
-  
         *((ushort*) skb_put(*skb, 2) ) = chan->callref;  
 
         /* Layer2 protocol */
@@ -285,8 +276,6 @@ int capi_activate_transp_req(struct pcbit_chan *chan, struct sk_buff **skb)
 		return -1;
 	}
 
-        (*skb)->free = 1;
-
         *((ushort*) skb_put(*skb, 2) ) = chan->callref;  
 
         
@@ -315,7 +304,14 @@ int capi_tdata_req(struct pcbit_chan* chan, struct sk_buff *skb)
 	
 	data_len = skb->len;
 
-	skb_push(skb, 10);
+	if(skb_headroom(skb) < 10)
+	{
+		printk(KERN_CRIT "No headspace (%u) on headroom %p for capi header\n", skb_headroom(skb), skb);
+	}
+	else
+	{	
+		skb_push(skb, 10);
+	}
 
 	*((u16 *) (skb->data)) = chan->callref;
 	skb->data[2] = chan->layer2link;
@@ -338,8 +334,6 @@ int capi_tdata_resp(struct pcbit_chan *chan, struct sk_buff ** skb)
 		return -1;
 	}
 
-        (*skb)->free = 1;
-
         *((ushort*) skb_put(*skb, 2) ) = chan->callref;  
 
         *(skb_put(*skb, 1)) = chan->layer2link;
@@ -356,8 +350,6 @@ int capi_disc_req(ushort callref, struct sk_buff **skb, u_char cause)
 		printk(KERN_WARNING "capi_disc_req: alloc_skb failed\n");
 		return -1;
 	}
-
-        (*skb)->free = 1;
 
         *((ushort*) skb_put(*skb, 2) ) = callref;  
 
@@ -381,8 +373,6 @@ int capi_disc_resp(struct pcbit_chan *chan, struct sk_buff **skb)
 		printk(KERN_WARNING "capi_disc_resp: alloc_skb failed\n");
 		return -1;
 	}
-
-        (*skb)->free = 1;
 
         *((ushort*) skb_put(*skb, 2)) = chan->callref;  
 

@@ -2,6 +2,15 @@
  *  include/asm-i386/bugs.h
  *
  *  Copyright (C) 1994  Linus Torvalds
+ *
+ *  Cyrix stuff, June 1998 by:
+ *	- Rafael R. Reilova (moved everything from head.S),
+ *        <rreilova@ececs.uc.edu>
+ *	- Channing Corn (tests & fixes),
+ *	- Andrew D. Balsa (code cleanup).
+ *
+ *  Pentium III FXSR, SSE support
+ *	Gareth Hughes <gareth@valinux.com>, May 2000
  */
 
 /*
@@ -12,74 +21,83 @@
  */
 
 #include <linux/config.h>
+#include <asm/processor.h>
+#include <asm/i387.h>
+#include <asm/msr.h>
 
-#define CONFIG_BUGi386
-
-static void no_halt(char *s, int *ints)
+static int __init no_halt(char *s)
 {
-	hlt_works_ok = 0;
+	boot_cpu_data.hlt_works_ok = 0;
+	return 1;
 }
 
-static void no_387(char *s, int *ints)
+__setup("no-hlt", no_halt);
+
+static int __init mca_pentium(char *s)
 {
-	hard_math = 0;
-	__asm__("movl %%cr0,%%eax\n\t"
-		"orl $0xE,%%eax\n\t"
-		"movl %%eax,%%cr0\n\t" : : : "ax");
+	mca_pentium_flag = 1;
+	return 1;
 }
 
-static char fpu_error = 0;
+__setup("mca-pentium", mca_pentium);
 
-static void copro_timeout(void)
+static int __init no_387(char *s)
 {
-	fpu_error = 1;
-	timer_table[COPRO_TIMER].expires = jiffies+100;
-	timer_active |= 1<<COPRO_TIMER;
-	printk("387 failed: trying to reset\n");
-	send_sig(SIGFPE, last_task_used_math, 1);
-	outb_p(0,0xf1);
-	outb_p(0,0xf0);
+	boot_cpu_data.hard_math = 0;
+	write_cr0(0xE | read_cr0());
+	return 1;
 }
 
-static void check_fpu(void)
-{
-	static double x = 4195835.0;
-	static double y = 3145727.0;
-	unsigned short control_word;
+__setup("no387", no_387);
 
-	if (!hard_math) {
+static double __initdata x = 4195835.0;
+static double __initdata y = 3145727.0;
+
+/*
+ * This used to check for exceptions.. 
+ * However, it turns out that to support that,
+ * the XMM trap handlers basically had to
+ * be buggy. So let's have a correct XMM trap
+ * handler, and forget about printing out
+ * some status at boot.
+ *
+ * We should really only care about bugs here
+ * anyway. Not features.
+ */
+static void __init check_fpu(void)
+{
+	if (!boot_cpu_data.hard_math) {
 #ifndef CONFIG_MATH_EMULATION
-		printk("No coprocessor found and no math emulation present.\n");
-		printk("Giving up.\n");
+		printk(KERN_EMERG "No coprocessor found and no math emulation present.\n");
+		printk(KERN_EMERG "Giving up.\n");
 		for (;;) ;
 #endif
 		return;
 	}
+
+/* Enable FXSR and company _before_ testing for FP problems. */
+#if defined(CONFIG_X86_FXSR) || defined(CONFIG_X86_RUNTIME_FXSR)
 	/*
-	 * check if exception 16 works correctly.. This is truly evil
-	 * code: it disables the high 8 interrupts to make sure that
-	 * the irq13 doesn't happen. But as this will lead to a lockup
-	 * if no exception16 arrives, it depends on the fact that the
-	 * high 8 interrupts will be re-enabled by the next timer tick.
-	 * So the irq13 will happen eventually, but the exception 16
-	 * should get there first..
+	 * Verify that the FXSAVE/FXRSTOR data will be 16-byte aligned.
 	 */
-	printk("Checking 386/387 coupling... ");
-	timer_table[COPRO_TIMER].expires = jiffies+50;
-	timer_table[COPRO_TIMER].fn = copro_timeout;
-	timer_active |= 1<<COPRO_TIMER;
-	__asm__("clts ; fninit ; fnstcw %0 ; fwait":"=m" (*&control_word));
-	control_word &= 0xffc0;
-	__asm__("fldcw %0 ; fwait": :"m" (*&control_word));
-	outb_p(inb_p(0x21) | (1 << 2), 0x21);
-	__asm__("fldz ; fld1 ; fdiv %st,%st(1) ; fwait");
-	timer_active &= ~(1<<COPRO_TIMER);
-	if (fpu_error)
-		return;
-	if (!ignore_irq13) {
-		printk("Ok, fpu using old IRQ13 error reporting\n");
-		return;
+	if (offsetof(struct task_struct, thread.i387.fxsave) & 15)
+		panic("Kernel compiled for PII/PIII+ with FXSR, data not 16-byte aligned!");
+
+	if (cpu_has_fxsr) {
+		printk(KERN_INFO "Enabling fast FPU save and restore... ");
+		set_in_cr4(X86_CR4_OSFXSR);
+		printk("done.\n");
 	}
+#endif
+#ifdef CONFIG_X86_XMM
+	if (cpu_has_xmm) {
+		printk(KERN_INFO "Enabling unmasked SIMD FPU exception support... ");
+		set_in_cr4(X86_CR4_OSXMMEXCPT);
+		printk("done.\n");
+	}
+#endif
+
+	/* Test for the divl bug.. */
 	__asm__("fninit\n\t"
 		"fldl %1\n\t"
 		"fdivl %2\n\t"
@@ -89,46 +107,122 @@ static void check_fpu(void)
 		"fistpl %0\n\t"
 		"fwait\n\t"
 		"fninit"
-		: "=m" (*&fdiv_bug)
+		: "=m" (*&boot_cpu_data.fdiv_bug)
 		: "m" (*&x), "m" (*&y));
-	if (!fdiv_bug) {
-		printk("Ok, fpu using exception 16 error reporting.\n");
-		return;
-
-	}
-	printk("Hmm, FDIV bug i%c86 system\n", '0'+x86);
+	if (boot_cpu_data.fdiv_bug)
+		printk("Hmm, FPU with FDIV bug.\n");
 }
 
-static void check_hlt(void)
+static void __init check_hlt(void)
 {
-	printk("Checking 'hlt' instruction... ");
-	if (!hlt_works_ok) {
+	printk(KERN_INFO "Checking 'hlt' instruction... ");
+	if (!boot_cpu_data.hlt_works_ok) {
 		printk("disabled\n");
 		return;
 	}
 	__asm__ __volatile__("hlt ; hlt ; hlt ; hlt");
-	printk("Ok.\n");
+	printk("OK.\n");
 }
 
-static void check_tlb(void)
+/*
+ *	Most 386 processors have a bug where a POPAD can lock the 
+ *	machine even from user space.
+ */
+ 
+static void __init check_popad(void)
 {
-#ifndef CONFIG_M386
-	/*
-	 * The 386 chips don't support TLB finegrained invalidation.
-	 * They will fault when they hit a invlpg instruction.
-	 */
-	if (x86 == 3) {
-		printk("CPU is a 386 and this kernel was compiled for 486 or better.\n");
-		printk("Giving up.\n");
-		for (;;) ;
-	}
+#ifndef CONFIG_X86_POPAD_OK
+	int res, inp = (int) &res;
+
+	printk(KERN_INFO "Checking for popad bug... ");
+	__asm__ __volatile__( 
+	  "movl $12345678,%%eax; movl $0,%%edi; pusha; popa; movl (%%edx,%%edi),%%ecx "
+	  : "=&a" (res)
+	  : "d" (inp)
+	  : "ecx", "edi" );
+	/* If this fails, it means that any user program may lock the CPU hard. Too bad. */
+	if (res != 12345678) printk( "Buggy.\n" );
+		        else printk( "OK.\n" );
 #endif
 }
 
-static void check_bugs(void)
+/*
+ * Check whether we are able to run this kernel safely on SMP.
+ *
+ * - In order to run on a i386, we need to be compiled for i386
+ *   (for due to lack of "invlpg" and working WP on a i386)
+ * - In order to run on anything without a TSC, we need to be
+ *   compiled for a i486.
+ * - In order to support the local APIC on a buggy Pentium machine,
+ *   we need to be compiled with CONFIG_X86_GOOD_APIC disabled,
+ *   which happens implicitly if compiled for a Pentium or lower
+ *   (unless an advanced selection of CPU features is used) as an
+ *   otherwise config implies a properly working local APIC without
+ *   the need to do extra reads from the APIC.
+*/
+
+static void __init check_config(void)
 {
-	check_tlb();
+/*
+ * We'd better not be a i386 if we're configured to use some
+ * i486+ only features! (WP works in supervisor mode and the
+ * new "invlpg" and "bswap" instructions)
+ */
+#if defined(CONFIG_X86_WP_WORKS_OK) || defined(CONFIG_X86_INVLPG) || defined(CONFIG_X86_BSWAP)
+	if (boot_cpu_data.x86 == 3)
+		panic("Kernel requires i486+ for 'invlpg' and other features");
+#endif
+
+/*
+ * If we configured ourselves for a TSC, we'd better have one!
+ */
+#ifdef CONFIG_X86_TSC
+	if (!cpu_has_tsc)
+		panic("Kernel compiled for Pentium+, requires TSC feature!");
+#endif
+
+/*
+ * If we configured ourselves for PGE, we'd better have it.
+ */
+#ifdef CONFIG_X86_PGE
+	if (!cpu_has_pge)
+		panic("Kernel compiled for PPro+, requires PGE feature!");
+#endif
+
+/*
+ * If we were told we had a good local APIC, check for buggy Pentia,
+ * i.e. all B steppings and the C2 stepping of P54C when using their
+ * integrated APIC (see 11AP erratum in "Pentium Processor
+ * Specification Update").
+ */
+#if defined(CONFIG_X86_LOCAL_APIC) && defined(CONFIG_X86_GOOD_APIC)
+	if (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL
+	    && test_bit(X86_FEATURE_APIC, &boot_cpu_data.x86_capability)
+	    && boot_cpu_data.x86 == 5
+	    && boot_cpu_data.x86_model == 2
+	    && (boot_cpu_data.x86_mask < 6 || boot_cpu_data.x86_mask == 11))
+		panic("Kernel compiled for PMMX+, assumes a local APIC without the read-before-write bug!");
+#endif
+
+/*
+ * If we configured ourselves for FXSR, we'd better have it.
+ */
+#ifdef CONFIG_X86_FXSR
+	if (!cpu_has_fxsr)
+		panic("Kernel compiled for PII/PIII+, requires FXSR feature!");
+#endif
+}
+
+static void __init check_bugs(void)
+{
+	identify_cpu(&boot_cpu_data);
+#ifndef CONFIG_SMP
+	printk("CPU: ");
+	print_cpu_info(&boot_cpu_data);
+#endif
+	check_config();
 	check_fpu();
 	check_hlt();
-	system_utsname.machine[1] = '0' + x86;
+	check_popad();
+	system_utsname.machine[1] = '0' + (boot_cpu_data.x86 > 6 ? 6 : boot_cpu_data.x86);
 }

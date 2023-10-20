@@ -12,83 +12,86 @@
 #
 # Copyright (C) 1994 by Linus Torvalds
 #
-
+# 19990713  Artur Skawina <skawina@geocities.com>
+#           Added '-march' and '-mpreferred-stack-boundary' support
 #
-# Set these to indicate how to link it..
-#
-# -zmagic:   (aout, old GCC-2.5.2)
-#
-# ZLINKFLAGS   = -Ttext 0x1000
-# BZLINKFLAGS  = -Ttext 0x100000     # (for big high loaded kernels)
-# LINKFLAGS    = -Ttext 0x100000
-#
-# -qmagic:   (aout)
-#
-# ZLINKFLAGS   = -Ttext 0x0xfe0
-# BZLINKFLAGS  = -Ttext 0xfffe0      # (for big high loaded kernels)
-# LINKFLAGS    = -Ttext 0xfffe0
-#
-
-AS86    =$(CROSS_COMPILE)as86 -0 -a
-AS386   =$(CROSS_COMPILE)as86 -3
-LD86    =$(CROSS_COMPILE)ld86 -0
-
-ifdef CONFIG_KERNEL_ELF
 
 LD=$(CROSS_COMPILE)ld -m elf_i386
-CPP=$(CC) -E -D__ELF__
-OBJDUMP =$(CROSS_COMPILE)objdump
-ENCAPS=$(CROSS_COMPILE)encaps
-OBJDUMP_FLAGS=-k -q 
-ZLDFLAGS=-e startup_32 
+OBJCOPY=$(CROSS_COMPILE)objcopy -O binary -R .note -R .comment -S
 LDFLAGS=-e stext
-ZIMAGE_OFFSET=0x1000
-IMAGE_OFFSET=0x100000
-ZLINKFLAGS =-Ttext $(ZIMAGE_OFFSET) $(ZLDFLAGS)
-BZLINKFLAGS =-Ttext $(IMAGE_OFFSET) $(ZLDFLAGS)
-LINKFLAGS =-Ttext $(IMAGE_OFFSET) $(LDFLAGS)
+LINKFLAGS =-T $(TOPDIR)/arch/i386/vmlinux.lds $(LDFLAGS)
 
-else
+CFLAGS += -pipe
 
-#
-# -qmagic (we need to remove the 32 byte header for bootup purposes)
-#
-ZLINKFLAGS =-qmagic -Ttext 0xfe0
-BZLINKFLAGS =-qmagic -Ttext 0xfffe0
-LINKFLAGS =-qmagic -Ttext 0xfffe0
-endif
-
-CFLAGS := $(CFLAGS) -pipe
+# prevent gcc from keeping the stack 16 byte aligned
+CFLAGS += $(shell if $(CC) -mpreferred-stack-boundary=2 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-mpreferred-stack-boundary=2"; fi)
 
 ifdef CONFIG_M386
-CFLAGS := $(CFLAGS) -m386 -DCPU=386
+CFLAGS += -march=i386
 endif
 
 ifdef CONFIG_M486
-CFLAGS := $(CFLAGS) -m486 -DCPU=486
+CFLAGS += -march=i486
 endif
 
 ifdef CONFIG_M586
-CFLAGS := $(CFLAGS) -m486 -malign-loops=2 -malign-jumps=2 -malign-functions=2 -DCPU=586
+CFLAGS += -march=i586
+endif
+
+ifdef CONFIG_M586TSC
+CFLAGS += -march=i586
+endif
+
+ifdef CONFIG_M586MMX
+CFLAGS += -march=i586
 endif
 
 ifdef CONFIG_M686
-CFLAGS := $(CFLAGS) -m486 -malign-loops=2 -malign-jumps=2 -malign-functions=2 -DCPU=686
+CFLAGS += -march=i686
 endif
 
-ifdef SMP
-CFLAGS := $(CFLAGS) -D__SMP__
+ifdef CONFIG_M686FXSR
+CFLAGS += -march=i686
 endif
 
-HEAD := arch/i386/kernel/head.o
+ifdef CONFIG_MPENTIUM4
+CFLAGS += -march=i686
+endif
 
-SUBDIRS := $(SUBDIRS) arch/i386/kernel arch/i386/mm arch/i386/lib
-ARCHIVES := arch/i386/kernel/kernel.o arch/i386/mm/mm.o $(ARCHIVES)
+ifdef CONFIG_MK6
+CFLAGS += $(shell if $(CC) -march=k6 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-march=k6"; else echo "-march=i586"; fi)
+endif
+
+ifdef CONFIG_MK7
+CFLAGS += $(shell if $(CC) -march=athlon -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-march=athlon"; else echo "-march=i686 -malign-functions=4"; fi) 
+endif
+
+ifdef CONFIG_MCRUSOE
+CFLAGS += -march=i686 -malign-functions=0 -malign-jumps=0 -malign-loops=0
+endif
+
+ifdef CONFIG_MWINCHIPC6
+CFLAGS += -march=i586
+endif
+
+ifdef CONFIG_MWINCHIP2
+CFLAGS += -march=i586
+endif
+
+ifdef CONFIG_MWINCHIP3D
+CFLAGS += -march=i586
+endif
+
+HEAD := arch/i386/kernel/head.o arch/i386/kernel/init_task.o
+
+SUBDIRS += arch/i386/kernel arch/i386/mm arch/i386/lib
+
+CORE_FILES := arch/i386/kernel/kernel.o arch/i386/mm/mm.o $(CORE_FILES)
 LIBS := $(TOPDIR)/arch/i386/lib/lib.a $(LIBS) $(TOPDIR)/arch/i386/lib/lib.a
 
 ifdef CONFIG_MATH_EMULATION
-SUBDIRS := $(SUBDIRS) arch/i386/math-emu
-DRIVERS := $(DRIVERS) arch/i386/math-emu/math.a
+SUBDIRS += arch/i386/math-emu
+DRIVERS += arch/i386/math-emu/math.o
 endif
 
 arch/i386/kernel: dummy
@@ -98,6 +101,13 @@ arch/i386/mm: dummy
 	$(MAKE) linuxsubdirs SUBDIRS=arch/i386/mm
 
 MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
+
+vmlinux: arch/i386/vmlinux.lds
+
+FORCE: ;
+
+.PHONY: zImage bzImage compressed zlilo bzlilo zdisk bzdisk install \
+		clean archclean archmrproper archdep
 
 zImage: vmlinux
 	@$(MAKEBOOT) zImage
@@ -110,6 +120,8 @@ compressed: zImage
 zlilo: vmlinux
 	@$(MAKEBOOT) BOOTIMAGE=zImage zlilo
 
+tmp:
+	@$(MAKEBOOT) BOOTIMAGE=bzImage zlilo
 bzlilo: vmlinux
 	@$(MAKEBOOT) BOOTIMAGE=bzImage zlilo
 
@@ -120,11 +132,12 @@ bzdisk: vmlinux
 	@$(MAKEBOOT) BOOTIMAGE=bzImage zdisk
 
 install: vmlinux
-	@$(MAKEBOOT) install
+	@$(MAKEBOOT) BOOTIMAGE=bzImage install
 
 archclean:
 	@$(MAKEBOOT) clean
-	$(MAKE) -C arch/$(ARCH)/kernel clean
+
+archmrproper:
 
 archdep:
 	@$(MAKEBOOT) dep

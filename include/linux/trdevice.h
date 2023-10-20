@@ -3,7 +3,7 @@
  *		operating system.  NET  is implemented using the  BSD Socket
  *		interface as the means of communication with the user level.
  *
- *		Definitions for the Ethernet handlers.
+ *		Definitions for the Token-ring handlers.
  *
  * Version:	@(#)eth.h	1.0.4	05/13/93
  *
@@ -28,12 +28,12 @@
 #include <linux/if_tr.h>
 
 #ifdef __KERNEL__
-extern int		tr_header(struct sk_buff *skb, struct device *dev,
+extern int		tr_header(struct sk_buff *skb, struct net_device *dev,
 				   unsigned short type, void *daddr,
 				   void *saddr, unsigned len);
-extern int		tr_rebuild_header(void *buff, struct device *dev,
-			unsigned long raddr, struct sk_buff *skb);
-extern unsigned short	tr_type_trans(struct sk_buff *skb, struct device *dev);
+extern int		tr_rebuild_header(struct sk_buff *skb);
+extern unsigned short	tr_type_trans(struct sk_buff *skb, struct net_device *dev);
+extern struct net_device    * init_trdev(struct net_device *, int);
 
 #endif
 

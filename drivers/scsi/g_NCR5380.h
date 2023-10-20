@@ -32,6 +32,8 @@
 #ifndef GENERIC_NCR5380_H
 #define GENERIC_NCR5380_H
 
+#include <linux/config.h>
+
 #define GENERIC_NCR5380_PUBLIC_RELEASE 1
 
 #ifdef NCR53C400
@@ -68,20 +70,21 @@ int generic_NCR5380_proc_info(char* buffer, char** start, off_t offset, int leng
 #define CAN_QUEUE 16
 #endif
 
-#if defined(HOSTS_C) || defined(MODULE)
-
-#define GENERIC_NCR5380 {NULL, NULL, NULL, 	 			\
-	generic_NCR5380_proc_info,					\
-	"Generic NCR5380/NCR53C400 Scsi Driver", 			\
-	generic_NCR5380_detect, generic_NCR5380_release_resources,	\
-	(void *)generic_NCR5380_info, NULL,				\
-	generic_NCR5380_queue_command, generic_NCR5380_abort, 		\
-	generic_NCR5380_reset, NULL,					\
-	NCR5380_BIOSPARAM,						\
-	/* can queue */ CAN_QUEUE, /* id */ 7, SG_ALL,			\
-	/* cmd per lun */ CMD_PER_LUN , 0, 0, DISABLE_CLUSTERING}
-
-#endif
+#define GENERIC_NCR5380 {						\
+	proc_info:      generic_NCR5380_proc_info,			\
+	name:           "Generic NCR5380/NCR53C400 Scsi Driver",	\
+	detect:         generic_NCR5380_detect,				\
+	release:        generic_NCR5380_release_resources,		\
+	info:           (void *)generic_NCR5380_info,			\
+	queuecommand:   generic_NCR5380_queue_command,			\
+	abort:          generic_NCR5380_abort,				\
+	reset:          generic_NCR5380_reset, 				\
+	bios_param:     NCR5380_BIOSPARAM,				\
+	can_queue:      CAN_QUEUE,					\
+        this_id:        7,						\
+        sg_tablesize:   SG_ALL,						\
+	cmd_per_lun:    CMD_PER_LUN ,					\
+        use_clustering: DISABLE_CLUSTERING}
 
 #ifndef HOSTS_C
 
@@ -116,7 +119,7 @@ int generic_NCR5380_proc_info(char* buffer, char** start, off_t offset, int leng
 
 #define NCR5380_map_config memory
 
-#define NCR5380_map_type volatile unsigned char*
+#define NCR5380_map_type unsigned long
 
 #define NCR5380_map_name base
 
@@ -133,8 +136,8 @@ int generic_NCR5380_proc_info(char* buffer, char** start, off_t offset, int leng
 #define NCR5380_region_size 0x3a00
 
 
-#define NCR5380_read(reg) (*(NCR5380_map_name + NCR53C400_mem_base + (reg)))
-#define NCR5380_write(reg, value) (*(NCR5380_map_name + NCR53C400_mem_base + (reg)) = value)
+#define NCR5380_read(reg) isa_readb(NCR5380_map_name + NCR53C400_mem_base + (reg))
+#define NCR5380_write(reg, value) isa_writeb(NCR5380_map_name + NCR53C400_mem_base + (reg), value)
 
 #endif
 
@@ -148,6 +151,7 @@ int generic_NCR5380_proc_info(char* buffer, char** start, off_t offset, int leng
     NCR5380_map_name = (NCR5380_map_type)((instance)->NCR5380_instance_name)
 
 #define NCR5380_intr generic_NCR5380_intr
+#define do_NCR5380_intr do_generic_NCR5380_intr
 #define NCR5380_queue_command generic_NCR5380_queue_command
 #define NCR5380_abort generic_NCR5380_abort
 #define NCR5380_reset generic_NCR5380_reset
@@ -157,6 +161,8 @@ int generic_NCR5380_proc_info(char* buffer, char** start, off_t offset, int leng
 
 #define BOARD_NCR5380	0
 #define BOARD_NCR53C400	1
+#define BOARD_NCR53C400A 2
+#define BOARD_DTC3181E	3
 
 #endif /* else def HOSTS_C */
 #endif /* ndef ASM */

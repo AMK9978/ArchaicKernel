@@ -2,7 +2,7 @@
  *    in2000.h -  Linux device driver definitions for the
  *                Always IN2000 ISA SCSI card.
  *
- *    IMPORTANT: This file is for version 1.28 - 07/May/1996
+ *    IMPORTANT: This file is for version 1.33 - 26/Aug/1998
  *
  * Copyright (c) 1996 John Shifflett, GeoLog Consulting
  *    john@geolog.com
@@ -25,9 +25,75 @@
 
 #include <asm/io.h>
 
+#define PROC_INTERFACE     /* add code for /proc/scsi/in2000/xxx interface */
+#ifdef  PROC_INTERFACE
+#define PROC_STATISTICS    /* add code for keeping various real time stats */
+#endif
+
+#define SYNC_DEBUG         /* extra info on sync negotiation printed */
+#define DEBUGGING_ON       /* enable command-line debugging bitmask */
+#define DEBUG_DEFAULTS 0   /* default bitmask - change from command-line */
+
+#ifdef __i386__
+#define FAST_READ_IO       /* No problems with these on my machine */
+#define FAST_WRITE_IO
+#endif
+
+#ifdef DEBUGGING_ON
+#define DB(f,a) if (hostdata->args & (f)) a;
+#define CHECK_NULL(p,s) /* if (!(p)) {printk("\n"); while (1) printk("NP:%s\r",(s));} */
+#else
+#define DB(f,a)
+#define CHECK_NULL(p,s)
+#endif
 
 #define uchar unsigned char
 
+#define read1_io(a)     (inb(hostdata->io_base+(a)))
+#define read2_io(a)     (inw(hostdata->io_base+(a)))
+#define write1_io(b,a)  (outb((b),hostdata->io_base+(a)))
+#define write2_io(w,a)  (outw((w),hostdata->io_base+(a)))
+
+#ifdef __i386__
+/* These inline assembly defines are derived from a patch
+ * sent to me by Bill Earnest. He's done a lot of very
+ * valuable thinking, testing, and coding during his effort
+ * to squeeze more speed out of this driver. I really think
+ * that we are doing IO at close to the maximum now with
+ * the fifo. (And yes, insw uses 'edi' while outsw uses
+ * 'esi'. Thanks Bill!)
+ */
+
+#define FAST_READ2_IO()    \
+({ \
+int __dummy_1,__dummy_2; \
+   __asm__ __volatile__ ("\n \
+   cld                    \n \
+   orl %%ecx, %%ecx       \n \
+   jz 1f                  \n \
+   rep                    \n \
+   insw (%%dx),%%es:(%%edi) \n \
+1: "                       \
+   : "=D" (sp) ,"=c" (__dummy_1) ,"=d" (__dummy_2)  /* output */   \
+   : "2" (f), "0" (sp), "1" (i)  /* input */    \
+   );       /* trashed */ \
+})
+
+#define FAST_WRITE2_IO()   \
+({ \
+int __dummy_1,__dummy_2; \
+   __asm__ __volatile__ ("\n \
+   cld                    \n \
+   orl %%ecx, %%ecx       \n \
+   jz 1f                  \n \
+   rep                    \n \
+   outsw %%ds:(%%esi),(%%dx) \n \
+1: "                       \
+   : "=S" (sp) ,"=c" (__dummy_1) ,"=d" (__dummy_2)/* output */   \
+   : "2" (f), "0" (sp), "1" (i)  /* input */    \
+   );       /* trashed */ \
+})
+#endif
 
 /* IN2000 io_port offsets */
 #define IO_WD_ASR       0x00     /* R - 3393 auxstat reg */
@@ -194,6 +260,9 @@
 
 
 
+#define ILLEGAL_STATUS_BYTE   0xff
+
+
 #define DEFAULT_SX_PER     500   /* (ns) fairly safe */
 #define DEFAULT_SX_OFF     0     /* aka async */
 
@@ -231,7 +300,15 @@ struct IN2000_hostdata {
     uchar            sync_xfer[8];     /* sync_xfer reg settings per target */
     uchar            sync_stat[8];     /* status of sync negotiation per target */
     uchar            sync_off;         /* bit mask: don't use sync with these targets */
+#ifdef PROC_INTERFACE
     uchar            proc;             /* bit mask: what's in proc output */
+#ifdef PROC_STATISTICS
+    unsigned long    cmd_cnt[8];       /* # of commands issued per target */
+    unsigned long    int_cnt;          /* # of interrupts serviced */
+    unsigned long    disc_allowed_cnt[8]; /* # of disconnects allowed per target */
+    unsigned long    disc_done_cnt[8]; /* # of disconnects done per target*/
+#endif
+#endif
     };
 
 
@@ -301,7 +378,7 @@ struct IN2000_hostdata {
 
 #define PR_VERSION   1<<0
 #define PR_INFO      1<<1
-#define PR_TOTALS    1<<2
+#define PR_STATISTICS 1<<2
 #define PR_CONNECTED 1<<3
 #define PR_INPUTQ    1<<4
 #define PR_DISCQ     1<<5
@@ -309,12 +386,21 @@ struct IN2000_hostdata {
 #define PR_STOP      1<<7
 
 
-int in2000_detect(Scsi_Host_Template *);
+#include <linux/version.h>
+
+# include <linux/init.h>
+# include <linux/spinlock.h>
+# define in2000__INITFUNC(function) __initfunc(function)
+# define in2000__INIT __init
+# define in2000__INITDATA __initdata
+# define CLISPIN_LOCK(flags)   spin_lock_irqsave(&io_request_lock, flags)
+# define CLISPIN_UNLOCK(flags) spin_unlock_irqrestore(&io_request_lock, flags)
+
+int in2000_detect(Scsi_Host_Template *) in2000__INIT;
 int in2000_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
 int in2000_abort(Scsi_Cmnd *);
-void in2000_setup(char *, int *);
+void in2000_setup(char *, int *) in2000__INIT;
 int in2000_proc_info(char *, char **, off_t, int, int, int);
-struct proc_dir_entry proc_scsi_in2000;
 int in2000_biosparam(struct scsi_disk *, kdev_t, int *);
 int in2000_reset(Scsi_Cmnd *, unsigned int);
 
@@ -324,28 +410,20 @@ int in2000_reset(Scsi_Cmnd *, unsigned int);
 #define IN2000_CPL      2
 #define IN2000_HOST_ID  7
 
-#define IN2000 {  NULL,                /* link pointer for modules */ \
-                  NULL,                /* usage_count for modules */ \
-                  &proc_scsi_in2000,   /* pointer to /proc/scsi directory entry */ \
-                  in2000_proc_info,    /* pointer to proc info function */ \
-                  "Always IN2000",     /* device name */ \
-                  in2000_detect,       /* returns number of in2000's found */ \
-                  NULL,                /* optional unload function for modules */ \
-                  NULL,                /* optional misc info function */ \
-                  NULL,                /* send scsi command, wait for completion */ \
-                  in2000_queuecommand, /* queue scsi command, don't wait */ \
-                  in2000_abort,        /* abort current command */ \
-                  in2000_reset,        /* reset scsi bus */ \
-                  NULL,                /* slave_attach - unused */ \
-                  in2000_biosparam,    /* figures out BIOS parameters for lilo, etc */ \
-                  IN2000_CAN_Q,        /* max commands we can queue up */ \
-                  IN2000_HOST_ID,      /* host-adapter scsi id */ \
-                  IN2000_SG,           /* scatter-gather table size */ \
-                  IN2000_CPL,          /* commands per lun */ \
-                  0,                   /* board counter */ \
-                  0,                   /* unchecked dma */ \
-                  DISABLE_CLUSTERING \
-               }
-
+#define IN2000 {  proc_name:       "in2000",		/* name of /proc/scsi directory entry */ \
+                  proc_info:       in2000_proc_info,    /* pointer to proc info function */ \
+                  name:            "Always IN2000",     /* device name */ \
+                  detect:          in2000_detect,       /* returns number of in2000's found */ \
+                  queuecommand:    in2000_queuecommand, /* queue scsi command, don't wait */ \
+                  abort:           in2000_abort,        /* abort current command */ \
+                  reset:           in2000_reset,        /* reset scsi bus */ \
+                  bios_param:      in2000_biosparam,    /* figures out BIOS parameters for lilo, etc */ \
+                  can_queue:       IN2000_CAN_Q,        /* max commands we can queue up */ \
+                  this_id:         IN2000_HOST_ID,      /* host-adapter scsi id */ \
+                  sg_tablesize:    IN2000_SG,           /* scatter-gather table size */ \
+                  cmd_per_lun:     IN2000_CPL,          /* commands per lun */ \
+                  use_clustering:  DISABLE_CLUSTERING,  /* ENABLE_CLUSTERING may speed things up */ \
+                  use_new_eh_code: 0                    /* new error code - not using it yet */ \
+                }
 
 #endif /* IN2000_H */

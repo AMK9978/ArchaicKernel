@@ -52,8 +52,8 @@ void sysv_free_block(struct super_block * sb, unsigned int block)
 	 * into this block being freed:
 	 */
 	if (*sb->sv_sb_flc_count == sb->sv_flc_size) {
-		unsigned short * flc_count;
-		unsigned long * flc_blocks;
+		u16 * flc_count;
+		u32 * flc_blocks;
 
 		bh = sv_getblk(sb, sb->s_dev, block);
 		if (!bh) {
@@ -83,7 +83,7 @@ void sysv_free_block(struct super_block * sb, unsigned int block)
 		}
 		*flc_count = *sb->sv_sb_flc_count; /* = sb->sv_flc_size */
 		memcpy(flc_blocks, sb->sv_sb_flc_blocks, *flc_count * sizeof(sysv_zone_t));
-		mark_buffer_dirty(bh, 1);
+		mark_buffer_dirty(bh);
 		mark_buffer_uptodate(bh, 1);
 		brelse(bh);
 		*sb->sv_sb_flc_count = 0;
@@ -100,7 +100,7 @@ void sysv_free_block(struct super_block * sb, unsigned int block)
 		}
 		memset(bh->b_data, 0, sb->sv_block_size);
 		/* this implies ((struct ..._freelist_chunk *) bh->b_data)->flc_count = 0; */
-		mark_buffer_dirty(bh, 1);
+		mark_buffer_dirty(bh);
 		mark_buffer_uptodate(bh, 1);
 		brelse(bh);
 		/* still *sb->sv_sb_flc_count = 0 */
@@ -119,8 +119,8 @@ void sysv_free_block(struct super_block * sb, unsigned int block)
 		  to_coh_ulong(from_coh_ulong(*sb->sv_sb_total_free_blocks) + 1);
 	else
 		*sb->sv_sb_total_free_blocks = *sb->sv_sb_total_free_blocks + 1;
-	mark_buffer_dirty(sb->sv_bh1, 1); /* super-block has been modified */
-	if (sb->sv_bh1 != sb->sv_bh2) mark_buffer_dirty(sb->sv_bh2, 1);
+	mark_buffer_dirty(sb->sv_bh1); /* super-block has been modified */
+	if (sb->sv_bh1 != sb->sv_bh2) mark_buffer_dirty(sb->sv_bh2);
 	sb->s_dirt = 1; /* and needs time stamp */
 	unlock_super(sb);
 }
@@ -154,8 +154,8 @@ int sysv_new_block(struct super_block * sb)
 		return 0;
 	}
 	if (*sb->sv_sb_flc_count == 0) { /* the last block continues the free list */
-		unsigned short * flc_count;
-		unsigned long * flc_blocks;
+		u16 * flc_count;
+		u32 * flc_blocks;
 
 		if (!(bh = sv_bread(sb, sb->s_dev, block))) {
 			printk("sysv_new_block: cannot read free-list block\n");
@@ -201,13 +201,13 @@ int sysv_new_block(struct super_block * sb)
 		unlock_super(sb);
 		return 0;
 	}
-	if (bh->b_count != 1) {
+	if (atomic_read(&bh->b_count) != 1) {
 		printk("sysv_new_block: block already in use\n");
 		unlock_super(sb);
 		return 0;
 	}
 	memset(bh->b_data, 0, sb->sv_block_size);
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	mark_buffer_uptodate(bh, 1);
 	brelse(bh);
 	if (sb->sv_convert)
@@ -215,8 +215,8 @@ int sysv_new_block(struct super_block * sb)
 		  to_coh_ulong(from_coh_ulong(*sb->sv_sb_total_free_blocks) - 1);
 	else
 		*sb->sv_sb_total_free_blocks = *sb->sv_sb_total_free_blocks - 1;
-	mark_buffer_dirty(sb->sv_bh1, 1); /* super-block has been modified */
-	if (sb->sv_bh1 != sb->sv_bh2) mark_buffer_dirty(sb->sv_bh2, 1);
+	mark_buffer_dirty(sb->sv_bh1); /* super-block has been modified */
+	if (sb->sv_bh1 != sb->sv_bh2) mark_buffer_dirty(sb->sv_bh2);
 	sb->s_dirt = 1; /* and needs time stamp */
 	unlock_super(sb);
 	return block;
@@ -247,8 +247,8 @@ unsigned long sysv_count_free_blocks(struct super_block * sb)
 		}
 		/* block = sb->sv_sb_flc_blocks[0], the last block continues the free list */
 		while (1) {
-			unsigned short * flc_count;
-			unsigned long * flc_blocks;
+			u16 * flc_count;
+			u32 * flc_blocks;
 
 			if (block < sb->sv_firstdatazone || block >= sb->sv_nzones) {
 				printk("sysv_count_free_blocks: new block %d is not in data zone\n",block);
@@ -311,7 +311,7 @@ unsigned long sysv_count_free_blocks(struct super_block * sb)
 		printk("sysv_count_free_blocks: free block count was %d, correcting to %d\n",old_count,count);
 		if (!(sb->s_flags & MS_RDONLY)) {
 			*sb->sv_sb_total_free_blocks = (sb->sv_convert ? to_coh_ulong(count) : count);
-			mark_buffer_dirty(sb->sv_bh2, 1); /* super-block has been modified */
+			mark_buffer_dirty(sb->sv_bh2); /* super-block has been modified */
 			sb->s_dirt = 1; /* and needs time stamp */
 		}
 	}

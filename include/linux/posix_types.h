@@ -1,15 +1,7 @@
 #ifndef _LINUX_POSIX_TYPES_H
 #define _LINUX_POSIX_TYPES_H
 
-/*
- * This file is generally used by user-level software, so you need to
- * be a little careful about namespace pollution etc.  Also, we cannot
- * assume GCC is being used.
- */
-
-#ifndef NULL
-# define NULL		((void *) 0)
-#endif
+#include <linux/stddef.h>
 
 /*
  * This allows for 1024 file descriptors: if NR_OPEN is ever grown
@@ -27,23 +19,29 @@
  * use the ones here. 
  */
 #undef __NFDBITS
-#define __NFDBITS	(8 * sizeof(unsigned int))
+#define __NFDBITS	(8 * sizeof(unsigned long))
 
 #undef __FD_SETSIZE
 #define __FD_SETSIZE	1024
 
-#undef __FDSET_INTS
-#define __FDSET_INTS	(__FD_SETSIZE/__NFDBITS)
+#undef __FDSET_LONGS
+#define __FDSET_LONGS	(__FD_SETSIZE/__NFDBITS)
 
 #undef __FDELT
 #define	__FDELT(d)	((d) / __NFDBITS)
 
 #undef __FDMASK
-#define	__FDMASK(d)	(1 << ((d) % __NFDBITS))
+#define	__FDMASK(d)	(1UL << ((d) % __NFDBITS))
 
 typedef struct {
-	unsigned int fds_bits [__FDSET_INTS];
+	unsigned long fds_bits [__FDSET_LONGS];
 } __kernel_fd_set;
+
+/* Type of a signal handler.  */
+typedef void (*__kernel_sighandler_t)(int);
+
+/* Type of a SYSV IPC key.  */
+typedef int __kernel_key_t;
 
 #include <asm/posix_types.h>
 

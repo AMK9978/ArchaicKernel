@@ -61,6 +61,9 @@
 # define TIOCM_DSR	0x100
 # define TIOCM_CD	TIOCM_CAR
 # define TIOCM_RI	TIOCM_RNG
+# define TIOCM_OUT1	0x2000
+# define TIOCM_OUT2	0x4000
+# define TIOCM_LOOP	0x8000
 
 #define TIOCGSOFTCAR	0x5419
 #define TIOCSSOFTCAR	0x541A
@@ -83,6 +86,11 @@
 #define TIOCGETD	0x5424
 #define TCSBRKP		0x5425	/* Needed for POSIX tcsendbreak() */
 #define TIOCTTYGSTRUCT	0x5426  /* For debugging only */
+#define TIOCSBRK	0x5427  /* BSD compatibility */
+#define TIOCCBRK	0x5428  /* BSD compatibility */
+#define TIOCGSID	0x5429  /* Return the session ID of FD */
+#define TIOCGPTN	_IOR('T',0x30, unsigned int) /* Get Pty Number (of pty-mux device) */
+#define TIOCSPTLCK	_IOW('T',0x31, int)  /* Lock/unlock Pty */
 
 #define TIOCSERCONFIG	0x5453
 #define TIOCSERGWILD	0x5454

@@ -62,18 +62,18 @@ aeb - 950811
    However, everything runs fine with an arbitrary kdev_t type. */
 
 #define MINORBITS	8
-#define MINORMASK	((1<<MINORBITS) - 1)
+#define MINORMASK	((1U << MINORBITS) - 1)
 
 typedef unsigned short kdev_t;
 
-#define MAJOR(dev)	((dev) >> MINORBITS)
-#define MINOR(dev)	((dev) & MINORMASK)
-#define HASHDEV(dev)	(dev)
+#define MAJOR(dev)	((unsigned int) ((dev) >> MINORBITS))
+#define MINOR(dev)	((unsigned int) ((dev) & MINORMASK))
+#define HASHDEV(dev)	((unsigned int) (dev))
 #define NODEV		0
 #define MKDEV(ma,mi)	(((ma) << MINORBITS) | (mi))
 #define B_FREE		0xffff		/* yuk */
 
-extern char * kdevname(kdev_t);	/* note: returns pointer to static data! */
+extern const char * kdevname(kdev_t);	/* note: returns pointer to static data! */
 
 /*
 As long as device numbers in the outside world have 16 bits only,

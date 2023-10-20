@@ -1,11 +1,10 @@
-#
-# arch/mips/boot/Makefile
+# $Id: Makefile,v 1.9 1999/04/07 18:45:23 harald Exp $
 #
 # This file is subject to the terms and conditions of the GNU General Public
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 1995 by Ralf Baechle
+# Copyright (C) 1995, 1998 by Ralf Baechle
 #
 
 .S.s:
@@ -16,50 +15,56 @@
 OBJS  = milo.o a.out.o
 
 #
+# Some DECstations need all possible sections of an ECOFF executable
+#
+ifdef CONFIG_DECSTATION
+  E2EFLAGS = -a
+else
+  E2EFLAGS =
+endif
+
+#
 # Drop some uninteresting sections in the kernel.
 # This is only relevant for ELF kernels but doesn't hurt a.out
 #
-DROP_SECTIONS	= .reginfo .mdebug
+drop-sections	= .reginfo .mdebug
+strip-flags	= $(addprefix --remove-section=,$(drop-sections))
 
-#
-# The new options of binutils 2.6 help to shrink object files a lot.
-# This is especially useful for booting from floppy.  Though we
-# don't yet require everyone to have binutils 2.6 installed.
-#
-OBJDUMP_VERSION =  $(word 4,$(shell $(OBJDUMP) --version))
-ifneq ($(OBJDUMP_VERSION),2.5.2)
-KEEP = kernel_entry boot_info screen_info _end
-STRIP_FLAGS = $(addprefix --keep-symbol=,$(KEEP))
-else
-STRIP_FLAGS = --discard-all
-endif
+all: vmlinux.ecoff addinitrd
 
-#
-# Fake compressed boot
-#
-ifdef CONFIG_ELF_KERNEL
-zImage:	$(CONFIGURE) $(TOPDIR)/vmlinux
-	cp $(TOPDIR)/vmlinux zImage.tmp
-	$(STRIP) $(addprefix --remove-section=,$(DROP_SECTIONS)) \
-		--strip-symbol=blurb zImage.tmp
-	$(LD) -oformat=$(oformat) -N -e except_vec0 -Ttext=0x80000000 \
-		-o zImage zImage.tmp
-	rm -f zImage.tmp
-	$(STRIP) $(STRIP_FLAGS) zImage
-else
-zImage:	$(CONFIGURE) $(TOPDIR)/vmlinux
-	cp $(TOPDIR)/vmlinux $@
-	$(STRIP) $(STRIP_FLAGS) $@
-endif
+vmlinux.ecoff:	$(CONFIGURE) elf2ecoff $(TOPDIR)/vmlinux
+	./elf2ecoff $(TOPDIR)/vmlinux vmlinux.ecoff $(E2EFLAGS)
 
-zdisk:	zImage
-	mcopy -n zImage a:vmlinux
+elf2ecoff: elf2ecoff.c
+	$(HOSTCC) -o $@ $^
 
+addinitrd: addinitrd.c
+	$(HOSTCC) -o $@ $^
+
+# Don't build dependencies, this may die if $(CC) isn't gcc
 dep:
-	$(CPP) -M *.[cS] > .depend
 
 clean:
-	rm -f zImage zImage.tmp
+	rm -f vmlinux.ecoff
+	rm -f zImage zImage.tmp mkboot
+
+mrproper:
+	rm -f vmlinux.ecoff
+	rm -f addinitrd
+	rm -f elf2ecoff
+
+zImage:	$(CONFIGURE) mkboot $(TOPDIR)/vmlinux
+	$(OBJCOPY) $(strip-flags) $(TOPDIR)/vmlinux zImage.tmp
+	./mkboot zImage.tmp zImage
+	rm -f zImage.tmp
+
+mkboot: mkboot.c
+	$(HOSTCC) -o $@ $^
+
+zdisk: 	zImage
+	cp $(TOPDIR)/vmlinux $(TOPDIR)/vm
+	$(STRIP) $(TOPDIR)/vm
+	gzip -9f $(TOPDIR)/vm
 
 dummy:
 

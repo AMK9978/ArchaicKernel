@@ -7,70 +7,91 @@
 #
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
-.c.s:
-	$(CC) $(CFLAGS) -S $<
-.s.o:
-	$(AS) $(ASFLAGS) -o $*.o $<
-.c.o:
-	$(CC) $(CFLAGS) -c $<
-.S.s:
-#	$(CPP) $(CFLAGS) -D__ASSEMBLY__ -traditional $< -o $*.s
-	$(CPP) $(CFLAGS) -D__ASSEMBLY__ $< -o $*.s
+ifdef CONFIG_PPC64BRIDGE
 .S.o:
-#	$(CC) -D__ASSEMBLY__ -traditional -c $< -o $*.o
-	$(CPP) $(CFLAGS) -D__ASSEMBLY__ $< -o $*.s
-	$(AS) $(ASFLAGS) -o $*.o $*.s
-	rm $*.s
-
-HOST_CC = gcc
-
-OBJS  = misc.o setup.o port_io.o irq.o pci.o traps.o stubs.o process.o \
-	signal.o raw_printf.o ksyms.o time.o ramdisk_drvr.o syscalls.o \
-	support.o ptrace.o
-
-all: head.o kernel.o no_ramdisk.o ramdisk.o
-
-head.o: head.s
-head.s: head.S $(TOPDIR)/include/linux/tasks.h ppc_defs.h
-
-ppc_defs.h: mk_defs
-#	simppc mk_defs -- $@
-	mk_defs $@
-
-no_ramdisk.o: no_ramdisk.S
-
-ramdisk.o: ramdisk.image mk_ramdisk
-	mk_ramdisk ramdisk.image $*.s
-	$(AS) -o $@ $*.s
-	rm $*.s
-
-mk_ramdisk: mk_ramdisk.c
-	${HOST_CC} -o mk_ramdisk mk_ramdisk.c	
-	
-mk_defs: mk_defs.c $(TOPDIR)/include/asm/mmu.h $(TOPDIR)/include/asm/processor.h $(TOPDIR)/include/asm/pgtable.h $(TOPDIR)/include/asm/ptrace.h
-#	cc.ppc ${CFLAGS} -o mk_defs -T ld.script-user -Ttext 0x1000 mk_defs.c
-	cc.ppc ${CFLAGS} -o mk_defs mk_defs.c
-
-
-kernel.o: $(OBJS)
-	$(LD) -r -o kernel.o $(OBJS)
-	sync
-
-mkboot: mkboot.c
-	${HOST_CC} -o $@ -Iinclude mkboot.c
-
-dep:
-	$(CPP) -M *.c > .depend
-	
-fastdep:
-
-modules:
-
-dummy:
-
-#
-# include a dependency file if one exists
-#
-ifeq (.depend,$(wildcard .depend))
-include .depend
+	$(CC) $(CFLAGS) -D__ASSEMBLY__ -mppc64bridge -c $< -o $*.o
+else
+.S.o:
+	$(CC) $(CFLAGS) -D__ASSEMBLY__ -c $< -o $*.o
 endif
+
+ifeq ($(CONFIG_4xx),y)
+  KHEAD := head_4xx.o
+else
+  ifeq ($(CONFIG_8xx),y)
+    KHEAD := head_8xx.o
+  else
+    KHEAD := head.o
+  endif
+endif
+
+all: $(KHEAD) kernel.o
+
+O_TARGET := kernel.o
+
+export-objs			:= ppc_ksyms.o prep_setup.o 
+
+obj-$(CONFIG_PPC)		:= entry.o traps.o irq.o idle.o time.o misc.o \
+					process.o signal.o bitops.o ptrace.o \
+					ppc_htab.o semaphore.o syscalls.o  \
+					align.o setup.o
+obj-$(CONFIG_POWER4)		+= xics.o
+obj-$(CONFIG_PCI)		+= pci.o pci-dma.o
+obj-$(CONFIG_KGDB)		+= ppc-stub.o
+obj-$(CONFIG_PMAC_PBOOK)	+= sleep.o
+obj-$(CONFIG_SMP)		+= smp.o
+obj-$(CONFIG_PPC_RTAS)		+= error_log.o proc_rtas.o
+obj-$(CONFIG_NVRAM)		+= pmac_nvram.o
+obj-$(CONFIG_PREP_RESIDUAL)	+= residual.o
+obj-$(CONFIG_4xx)		+= ppc4xx_pic.o
+obj-$(CONFIG_OAK)		+= oak_setup.o
+obj-$(CONFIG_WALNUT)		+= walnut_setup.o
+ifeq ($(CONFIG_WALNUT),y)
+obj-$(CONFIG_PCI)		+= galaxy_pci.o
+endif
+obj-$(CONFIG_8xx)		+= m8xx_setup.o ppc8xx_pic.o
+ifeq ($(CONFIG_8xx),y)
+obj-$(CONFIG_PCI)		+= qspan_pci.c
+else
+obj-$(CONFIG_PPC)		+= hashtable.o
+endif
+obj-$(CONFIG_MATH_EMULATION)	+= softemu8xx.o
+obj-$(CONFIG_MBX)		+= i8259.o
+obj-$(CONFIG_APUS)		+= apus_setup.o
+obj-$(CONFIG_ALL_PPC)		+= pmac_pic.o pmac_setup.o pmac_time.o prom.o \
+					feature.o pmac_pci.o chrp_setup.o \
+					chrp_time.o chrp_pci.o 	open_pic.o \
+					indirect_pci.o i8259.o prep_pci.o \
+					prep_time.o prep_nvram.o ppc_ksyms.o \
+					prep_setup.o 
+obj-$(CONFIG_PMAC_BACKLIGHT)	+= pmac_backlight.o
+obj-$(CONFIG_GEMINI)		+= gemini_prom.o gemini_pci.o gemini_setup.o \
+					open_pic.o
+obj-$(CONFIG_8260)		+= m8260_setup.o ppc8260_pic.o
+
+
+include $(TOPDIR)/Rules.make
+
+head.o: head.S ppc_defs.h
+head_4xx.o: head_4xx.S ppc_defs.h
+head_8xx.o: head_8xx.S ppc_defs.h
+
+ppc_defs.h: mk_defs.c ppc_defs.head \
+		$(TOPDIR)/include/asm/mmu.h \
+		$(TOPDIR)/include/asm/processor.h \
+		$(TOPDIR)/include/asm/pgtable.h \
+		$(TOPDIR)/include/asm/ptrace.h
+	$(CC) $(CFLAGS) -S mk_defs.c
+	cp ppc_defs.head ppc_defs.h
+# for bk, this way we can write to the file even if it's not checked out
+	chmod u+w ppc_defs.h
+	grep '^#define' mk_defs.s >> ppc_defs.h
+	rm mk_defs.s
+
+find_name : find_name.c
+	$(HOSTCC) $(HOSTCFLAGS) -o find_name find_name.c
+
+checks: checks.c
+	$(HOSTCC) -I$(HPATH) $(HOSTCFLAGS) -D__KERNEL__ -fno-builtin -o checks checks.c
+	./checks
+

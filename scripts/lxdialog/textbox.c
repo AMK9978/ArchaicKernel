@@ -90,6 +90,8 @@ dialog_textbox (const char *title, const char *file, int height, int width)
 
     /* Create window for text region, used for scrolling text */
     text = subwin (dialog, height - 4, width - 2, y + 1, x + 1);
+    wattrset (text, dialog_attr);
+    wbkgdset (text, dialog_attr & A_COLOR);
 
     keypad (text, TRUE);
 
@@ -101,7 +103,16 @@ dialog_textbox (const char *title, const char *file, int height, int width)
     for (i = 0; i < width - 2; i++)
 	waddch (dialog, ACS_HLINE);
     wattrset (dialog, dialog_attr);
+    wbkgdset (dialog, dialog_attr & A_COLOR);
     waddch (dialog, ACS_RTEE);
+
+    if (title != NULL && strlen(title) >= width-2 ) {
+	/* truncate long title -- mec */
+	char * title2 = malloc(width-2+1);
+	memcpy( title2, title, width-2 );
+	title2[width-2] = '\0';
+	title = title2;
+    }
 
     if (title != NULL) {
 	wattrset (dialog, title_attr);
@@ -448,7 +459,7 @@ print_page (WINDOW * win, int height, int width)
 static void
 print_line (WINDOW * win, int row, int width)
 {
-    int i, y, x;
+    int y, x;
     char *line;
 
     line = get_line ();
@@ -459,8 +470,15 @@ print_line (WINDOW * win, int row, int width)
 
     getyx (win, y, x);
     /* Clear 'residue' of previous line */
-    for (i = 0; i < width - x; i++)
-	waddch (win, ' ');
+#if OLD_NCURSES
+    {
+        int i;
+        for (i = 0; i < width - x; i++)
+	    waddch (win, ' ');
+    }
+#else
+    wclrtoeol(win);
+#endif
 }
 
 /*
@@ -530,6 +548,7 @@ print_position (WINDOW * win, int height, int width)
 	exit (-1);
     }
     wattrset (win, position_indicator_attr);
+    wbkgdset (win, position_indicator_attr & A_COLOR);
     percent = !file_size ?
 	100 : ((fpos - bytes_read + page - buf) * 100) / file_size;
     wmove (win, height - 3, width - 9);

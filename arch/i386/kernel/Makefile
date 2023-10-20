@@ -7,62 +7,38 @@
 #
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
-#.S.s:
-#	$(CPP) -D__ASSEMBLY__ -traditional $< -o $*.s
-
-ifdef SMP
-
 .S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -c $< -o $*.o
-else
-.S.o:
-	$(CC) -D__ASSEMBLY__ -traditional -c $< -o $*.o
-endif
+	$(CC) $(AFLAGS) -traditional -c $< -o $*.o
 
-all: kernel.o head.o
+all: kernel.o head.o init_task.o
 
 O_TARGET := kernel.o
-O_OBJS   := process.o signal.o entry.o traps.o irq.o vm86.o bios32.o \
-            ptrace.o ioport.o ldt.o setup.o time.o sys_i386.o ksyms.o
 
-ifdef SMP
+export-objs     := mca.o mtrr.o msr.o cpuid.o microcode.o i386_ksyms.o
 
-O_OBJS += smp.o
+obj-y	:= process.o semaphore.o signal.o entry.o traps.o irq.o vm86.o \
+		ptrace.o i8259.o ioport.o ldt.o setup.o time.o sys_i386.o \
+		pci-dma.o i386_ksyms.o i387.o bluesmoke.o dmi_scan.o
 
-head.o: head.S $(TOPDIR)/include/linux/tasks.h
-	$(CC) -D__ASSEMBLY__ -D__SMP__ -traditional -c $*.S -o $*.o
 
+ifdef CONFIG_PCI
+obj-y			+= pci-i386.o
+ifdef CONFIG_VISWS
+obj-y			+= pci-visws.o
 else
-
-head.o: head.S $(TOPDIR)/include/linux/tasks.h
-	$(CC) -D__ASSEMBLY__ -traditional -c $*.S -o $*.o
-
+obj-y			+= pci-pc.o pci-irq.o
+endif
 endif
 
-hexify:
-	$(HOSTCC) hexify.c -o hexify
-
-smp.c: trampoline.hex
-
-trampoline.hex: trampoline hexify
-	(dd if=trampoline bs=1 skip=32 | ./hexify >trampoline.hex )
-
-trampoline: trampoline.o trampoline32.o
-	$(LD86) -s -o $@ trampoline.o trampoline32.o
-
-trampoline.o: trampoline.s
-	$(AS86) -o $@ $<
-
-trampoline32.o: trampoline32.s
-	$(AS386) -o $@ $<
-
-trampoline.s: trampoline.S $(CONFIGURE) $(TOPDIR)/include/linux/config.h Makefile
-	$(CPP) -D__SMP__ -traditional $< -o $@
-
-trampoline32.s: trampoline32.S $(CONFIGURE) $(TOPDIR)/include/linux/config.h Makefile
-	$(CPP) -D__SMP__ -traditional $< -o $@
-
-clean:
-	rm -f trampoline hexify
+obj-$(CONFIG_MCA)	+= mca.o
+obj-$(CONFIG_MTRR)	+= mtrr.o
+obj-$(CONFIG_X86_MSR)	+= msr.o
+obj-$(CONFIG_X86_CPUID)	+= cpuid.o
+obj-$(CONFIG_MICROCODE)	+= microcode.o
+obj-$(CONFIG_APM)	+= apm.o
+obj-$(CONFIG_SMP)	+= smp.o smpboot.o trampoline.o
+obj-$(CONFIG_X86_LOCAL_APIC)	+= apic.o
+obj-$(CONFIG_X86_IO_APIC)	+= io_apic.o mpparse.o
+obj-$(CONFIG_X86_VISWS_APIC)	+= visws_apic.o
 
 include $(TOPDIR)/Rules.make

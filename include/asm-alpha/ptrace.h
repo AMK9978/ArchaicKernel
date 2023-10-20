@@ -37,6 +37,10 @@ struct pt_regs {
 	unsigned long r27;
 	unsigned long r28;
 	unsigned long hae;
+/* JRP - These are the values provided to a0-a2 by PALcode */
+	unsigned long trap_a0;
+	unsigned long trap_a1;
+	unsigned long trap_a2;
 /* These are saved by PAL-code: */
 	unsigned long ps;
 	unsigned long pc;
@@ -63,7 +67,7 @@ struct switch_stack {
 };
 
 #ifdef __KERNEL__
-#define user_mode(regs) ((regs)->ps & 8)
+#define user_mode(regs) (((regs)->ps & 8) != 0)
 #define instruction_pointer(regs) ((regs)->pc)
 extern void show_regs(struct pt_regs *);
 #endif

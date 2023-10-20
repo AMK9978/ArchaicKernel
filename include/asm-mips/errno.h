@@ -5,10 +5,10 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995 by Ralf Baechle
+ * Copyright (C) 1995, 1999 by Ralf Baechle
  */
-#ifndef __ASM_MIPS_ERRNO_H
-#define __ASM_MIPS_ERRNO_H
+#ifndef _ASM_ERRNO_H
+#define _ASM_ERRNO_H
 
 /*
  * These error numbers are intended to be MIPS ABI compatible
@@ -137,7 +137,20 @@
 #define	EINPROGRESS	150	/* Operation now in progress */
 #define	ESTALE		151	/* Stale NFS file handle */
 #define ECANCELED	158	/* AIO operation canceled */
-#define	EDQUOT		1133	/* Quota exceeded */
-#define ENFSREMOTE	1134	/* ??? */
 
-#endif /* __ASM_MIPS_ERRNO_H */
+/*
+ * These error are Linux extensions.
+ */
+#define ENOMEDIUM	159	/* No medium found */
+#define EMEDIUMTYPE	160	/* Wrong medium type */
+
+#define EDQUOT		1133	/* Quota exceeded */
+
+#ifdef __KERNEL__
+
+/* The biggest error number defined here or in <linux/errno.h>. */
+#define EMAXERRNO	1133
+
+#endif /* __KERNEL__ */
+
+#endif /* _ASM_ERRNO_H */

@@ -34,7 +34,7 @@ enum machine_type {
   /* skip a bunch so we don't run into any of sun's numbers */
   M_386 = 100,
   M_MIPS1 = 151,	/* MIPS R3000/R3000 binary */
-  M_MIPS2 = 152,	/* MIPS R6000/R4000 binary */
+  M_MIPS2 = 152		/* MIPS R6000/R4000 binary */
 };
 
 #if !defined (N_MAGIC)
@@ -94,15 +94,15 @@ enum machine_type {
 #endif
 
 #if !defined (N_DRELOFF)
-#define N_DRELOFF(x) (N_TRELOFF(x) + (x).a_trsize)
+#define N_DRELOFF(x) (N_TRELOFF(x) + N_TRSIZE(x))
 #endif
 
 #if !defined (N_SYMOFF)
-#define N_SYMOFF(x) (N_DRELOFF(x) + (x).a_drsize)
+#define N_SYMOFF(x) (N_DRELOFF(x) + N_DRSIZE(x))
 #endif
 
 #if !defined (N_STROFF)
-#define N_STROFF(x) (N_SYMOFF(x) + (x).a_syms)
+#define N_STROFF(x) (N_SYMOFF(x) + N_SYMSIZE(x))
 #endif
 
 /* Address of text segment in memory after it is loaded.  */

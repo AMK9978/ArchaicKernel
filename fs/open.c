@@ -4,148 +4,200 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <linux/vfs.h>
-#include <linux/types.h>
-#include <linux/utime.h>
-#include <linux/errno.h>
-#include <linux/fcntl.h>
-#include <linux/stat.h>
 #include <linux/string.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/signal.h>
-#include <linux/tty.h>
-#include <linux/time.h>
 #include <linux/mm.h>
+#include <linux/utime.h>
+#include <linux/file.h>
+#include <linux/smp_lock.h>
+#include <linux/quotaops.h>
+#include <linux/dnotify.h>
+#include <linux/module.h>
+#include <linux/slab.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
-asmlinkage int sys_statfs(const char * path, struct statfs * buf)
+#define special_file(m) (S_ISCHR(m)||S_ISBLK(m)||S_ISFIFO(m)||S_ISSOCK(m))
+
+int vfs_statfs(struct super_block *sb, struct statfs *buf)
 {
-	struct inode * inode;
-	int error;
+	int retval = -ENODEV;
 
-	error = verify_area(VERIFY_WRITE, buf, sizeof(struct statfs));
-	if (error)
-		return error;
-	error = namei(path,&inode);
-	if (error)
-		return error;
-	if (!inode->i_sb->s_op->statfs) {
-		iput(inode);
-		return -ENOSYS;
+	if (sb) {
+		retval = -ENOSYS;
+		if (sb->s_op && sb->s_op->statfs) {
+			memset(buf, 0, sizeof(struct statfs));
+			lock_kernel();
+			retval = sb->s_op->statfs(sb, buf);
+			unlock_kernel();
+		}
 	}
-	inode->i_sb->s_op->statfs(inode->i_sb, buf, sizeof(struct statfs));
-	iput(inode);
-	return 0;
+	return retval;
 }
 
-asmlinkage int sys_fstatfs(unsigned int fd, struct statfs * buf)
+
+asmlinkage long sys_statfs(const char * path, struct statfs * buf)
 {
-	struct inode * inode;
-	struct file * file;
+	struct nameidata nd;
 	int error;
 
-	error = verify_area(VERIFY_WRITE, buf, sizeof(struct statfs));
-	if (error)
-		return error;
-	if (fd >= NR_OPEN || !(file = current->files->fd[fd]))
-		return -EBADF;
-	if (!(inode = file->f_inode))
-		return -ENOENT;
-	if (!inode->i_sb)
-	        return -ENODEV;
-	if (!inode->i_sb->s_op->statfs)
-		return -ENOSYS;
-	inode->i_sb->s_op->statfs(inode->i_sb, buf, sizeof(struct statfs));
-	return 0;
+	error = user_path_walk(path, &nd);
+	if (!error) {
+		struct statfs tmp;
+		error = vfs_statfs(nd.dentry->d_inode->i_sb, &tmp);
+		if (!error && copy_to_user(buf, &tmp, sizeof(struct statfs)))
+			error = -EFAULT;
+		path_release(&nd);
+	}
+	return error;
 }
 
-int do_truncate(struct inode *inode, unsigned long length)
+asmlinkage long sys_fstatfs(unsigned int fd, struct statfs * buf)
 {
+	struct file * file;
+	struct statfs tmp;
+	int error;
+
+	error = -EBADF;
+	file = fget(fd);
+	if (!file)
+		goto out;
+	error = vfs_statfs(file->f_dentry->d_inode->i_sb, &tmp);
+	if (!error && copy_to_user(buf, &tmp, sizeof(struct statfs)))
+		error = -EFAULT;
+	fput(file);
+out:
+	return error;
+}
+
+int do_truncate(struct dentry *dentry, loff_t length)
+{
+	struct inode *inode = dentry->d_inode;
 	int error;
 	struct iattr newattrs;
+
+	/* Not pretty: "inode->i_size" shouldn't really be signed. But it is. */
+	if (length < 0)
+		return -EINVAL;
 
 	down(&inode->i_sem);
 	newattrs.ia_size = length;
 	newattrs.ia_valid = ATTR_SIZE | ATTR_CTIME;
-	error = notify_change(inode, &newattrs);
-	if (!error) {
-		/* truncate virtual mappings of this file */
-		vmtruncate(inode, length);
-		if (inode->i_op && inode->i_op->truncate)
-			inode->i_op->truncate(inode);
-	}
+	error = notify_change(dentry, &newattrs);
 	up(&inode->i_sem);
 	return error;
 }
 
-asmlinkage int sys_truncate(const char * path, unsigned long length)
+static inline long do_sys_truncate(const char * path, loff_t length)
 {
+	struct nameidata nd;
 	struct inode * inode;
 	int error;
 
-	error = namei(path,&inode);
+	error = -EINVAL;
+	if (length < 0)	/* sorry, but loff_t says... */
+		goto out;
+
+	error = user_path_walk(path, &nd);
 	if (error)
-		return error;
+		goto out;
+	inode = nd.dentry->d_inode;
 
 	error = -EACCES;
-	if (S_ISDIR(inode->i_mode))
-		goto out;
+	if (!S_ISREG(inode->i_mode))
+		goto dput_and_out;
 
 	error = permission(inode,MAY_WRITE);
 	if (error)
-		goto out;
+		goto dput_and_out;
 
 	error = -EROFS;
 	if (IS_RDONLY(inode))
-		goto out;
+		goto dput_and_out;
 
 	error = -EPERM;
 	if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
-		goto out;
+		goto dput_and_out;
+
+	/*
+	 * Make sure that there are no leases.
+	 */
+	error = get_lease(inode, FMODE_WRITE);
+	if (error)
+		goto dput_and_out;
 
 	error = get_write_access(inode);
 	if (error)
-		goto out;
+		goto dput_and_out;
 
-	error = locks_verify_area(FLOCK_VERIFY_WRITE, inode, NULL,
-				  length < inode->i_size ? length : inode->i_size,
-				  abs(inode->i_size - length));
+	error = locks_verify_truncate(inode, NULL, length);
 	if (!error) {
-		if (inode->i_sb && inode->i_sb->dq_op)
-			inode->i_sb->dq_op->initialize(inode, -1);
-		error = do_truncate(inode, length);
+		DQUOT_INIT(inode);
+		error = do_truncate(nd.dentry, length);
 	}
 	put_write_access(inode);
+
+dput_and_out:
+	path_release(&nd);
 out:
-	iput(inode);
 	return error;
 }
 
-asmlinkage int sys_ftruncate(unsigned int fd, unsigned long length)
+asmlinkage long sys_truncate(const char * path, unsigned long length)
+{
+	return do_sys_truncate(path, length);
+}
+
+static inline long do_sys_ftruncate(unsigned int fd, loff_t length)
 {
 	struct inode * inode;
+	struct dentry *dentry;
 	struct file * file;
 	int error;
 
-	if (fd >= NR_OPEN || !(file = current->files->fd[fd]))
-		return -EBADF;
-	if (!(inode = file->f_inode))
-		return -ENOENT;
-	if (S_ISDIR(inode->i_mode) || !(file->f_mode & FMODE_WRITE))
-		return -EACCES;
+	error = -EINVAL;
+	if (length < 0)
+		goto out;
+	error = -EBADF;
+	file = fget(fd);
+	if (!file)
+		goto out;
+	dentry = file->f_dentry;
+	inode = dentry->d_inode;
+	error = -EACCES;
+	if (!S_ISREG(inode->i_mode) || !(file->f_mode & FMODE_WRITE))
+		goto out_putf;
+	error = -EPERM;
 	if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
-		return -EPERM;
-	error = locks_verify_area(FLOCK_VERIFY_WRITE, inode, file,
-				  length < inode->i_size ? length : inode->i_size,
-				  abs(inode->i_size - length));
+		goto out_putf;
+
+	error = locks_verify_truncate(inode, file, length);
 	if (!error)
-		error = do_truncate(inode, length);
+		error = do_truncate(dentry, length);
+out_putf:
+	fput(file);
+out:
 	return error;
 }
 
-#ifndef __alpha__
+asmlinkage long sys_ftruncate(unsigned int fd, unsigned long length)
+{
+	return do_sys_ftruncate(fd, length);
+}
+
+/* LFS versions of truncate are only needed on 32 bit machines */
+#if BITS_PER_LONG == 32
+asmlinkage long sys_truncate64(const char * path, loff_t length)
+{
+	return do_sys_truncate(path, length);
+}
+
+asmlinkage long sys_ftruncate64(unsigned int fd, loff_t length)
+{
+	return do_sys_ftruncate(fd, length);
+}
+#endif
+
+#if !(defined(__alpha__) || defined(__ia64__))
 
 /*
  * sys_utime() can be implemented in user-level using sys_utimes().
@@ -158,38 +210,41 @@ asmlinkage int sys_ftruncate(unsigned int fd, unsigned long length)
  * must be owner or have write permission.
  * Else, update from *times, must be owner or super user.
  */
-asmlinkage int sys_utime(char * filename, struct utimbuf * times)
+asmlinkage long sys_utime(char * filename, struct utimbuf * times)
 {
 	int error;
+	struct nameidata nd;
 	struct inode * inode;
 	struct iattr newattrs;
 
-	error = namei(filename,&inode);
+	error = user_path_walk(filename, &nd);
 	if (error)
-		return error;
-	if (IS_RDONLY(inode)) {
-		iput(inode);
-		return -EROFS;
-	}
+		goto out;
+	inode = nd.dentry->d_inode;
+
+	error = -EROFS;
+	if (IS_RDONLY(inode))
+		goto dput_and_out;
+
 	/* Don't worry, the checks are done in inode_change_ok() */
 	newattrs.ia_valid = ATTR_CTIME | ATTR_MTIME | ATTR_ATIME;
 	if (times) {
-		error = verify_area(VERIFY_READ, times, sizeof(*times));
-		if (error) {
-			iput(inode);
-			return error;
-		}
-		newattrs.ia_atime = get_user(&times->actime);
-		newattrs.ia_mtime = get_user(&times->modtime);
+		error = get_user(newattrs.ia_atime, &times->actime);
+		if (!error) 
+			error = get_user(newattrs.ia_mtime, &times->modtime);
+		if (error)
+			goto dput_and_out;
+
 		newattrs.ia_valid |= ATTR_ATIME_SET | ATTR_MTIME_SET;
 	} else {
-		if ((error = permission(inode,MAY_WRITE)) != 0) {
-			iput(inode);
-			return error;
-		}
+		if (current->fsuid != inode->i_uid &&
+		    (error = permission(inode,MAY_WRITE)) != 0)
+			goto dput_and_out;
 	}
-	error = notify_change(inode, &newattrs);
-	iput(inode);
+	error = notify_change(nd.dentry, &newattrs);
+dput_and_out:
+	path_release(&nd);
+out:
 	return error;
 }
 
@@ -199,195 +254,266 @@ asmlinkage int sys_utime(char * filename, struct utimbuf * times)
  * must be owner or have write permission.
  * Else, update from *times, must be owner or super user.
  */
-asmlinkage int sys_utimes(char * filename, struct timeval * utimes)
+asmlinkage long sys_utimes(char * filename, struct timeval * utimes)
 {
 	int error;
+	struct nameidata nd;
 	struct inode * inode;
 	struct iattr newattrs;
 
-	error = namei(filename,&inode);
+	error = user_path_walk(filename, &nd);
+
 	if (error)
-		return error;
-	if (IS_RDONLY(inode)) {
-		iput(inode);
-		return -EROFS;
-	}
+		goto out;
+	inode = nd.dentry->d_inode;
+
+	error = -EROFS;
+	if (IS_RDONLY(inode))
+		goto dput_and_out;
+
 	/* Don't worry, the checks are done in inode_change_ok() */
 	newattrs.ia_valid = ATTR_CTIME | ATTR_MTIME | ATTR_ATIME;
 	if (utimes) {
 		struct timeval times[2];
-		error = verify_area(VERIFY_READ, utimes, sizeof(times));
-		if (error) {
-			iput(inode);
-			return error;
-		}
-		memcpy_fromfs(&times, utimes, sizeof(times));
+		error = -EFAULT;
+		if (copy_from_user(&times, utimes, sizeof(times)))
+			goto dput_and_out;
 		newattrs.ia_atime = times[0].tv_sec;
 		newattrs.ia_mtime = times[1].tv_sec;
 		newattrs.ia_valid |= ATTR_ATIME_SET | ATTR_MTIME_SET;
 	} else {
-		if ((error = permission(inode,MAY_WRITE)) != 0) {
-			iput(inode);
-			return error;
-		}
+		if ((error = permission(inode,MAY_WRITE)) != 0)
+			goto dput_and_out;
 	}
-	error = notify_change(inode, &newattrs);
-	iput(inode);
+	error = notify_change(nd.dentry, &newattrs);
+dput_and_out:
+	path_release(&nd);
+out:
 	return error;
 }
 
 /*
  * access() needs to use the real uid/gid, not the effective uid/gid.
- * We do this by temporarily setting fsuid/fsgid to the wanted values
+ * We do this by temporarily clearing all FS-related capabilities and
+ * switching the fsuid/fsgid around to the real ones.
  */
-asmlinkage int sys_access(const char * filename, int mode)
+asmlinkage long sys_access(const char * filename, int mode)
 {
-	struct inode * inode;
+	struct nameidata nd;
 	int old_fsuid, old_fsgid;
+	kernel_cap_t old_cap;
 	int res;
 
-	if (mode != (mode & S_IRWXO))	/* where's F_OK, X_OK, W_OK, R_OK? */
+	if (mode & ~S_IRWXO)	/* where's F_OK, X_OK, W_OK, R_OK? */
 		return -EINVAL;
+
 	old_fsuid = current->fsuid;
 	old_fsgid = current->fsgid;
+	old_cap = current->cap_effective;
+
 	current->fsuid = current->uid;
 	current->fsgid = current->gid;
-	res = namei(filename,&inode);
+
+	/* Clear the capabilities if we switch to a non-root user */
+	if (current->uid)
+		cap_clear(current->cap_effective);
+	else
+		current->cap_effective = current->cap_permitted;
+
+	res = user_path_walk(filename, &nd);
 	if (!res) {
-		res = permission(inode, mode);
-		iput(inode);
+		res = permission(nd.dentry->d_inode, mode);
+		/* SuS v2 requires we report a read only fs too */
+		if(!res && (mode & S_IWOTH) && IS_RDONLY(nd.dentry->d_inode)
+		   && !special_file(nd.dentry->d_inode->i_mode))
+			res = -EROFS;
+		path_release(&nd);
 	}
+
 	current->fsuid = old_fsuid;
 	current->fsgid = old_fsgid;
+	current->cap_effective = old_cap;
+
 	return res;
 }
 
-asmlinkage int sys_chdir(const char * filename)
+asmlinkage long sys_chdir(const char * filename)
 {
-	struct inode * inode;
 	int error;
+	struct nameidata nd;
+	char *name;
 
-	error = namei(filename,&inode);
+	name = getname(filename);
+	error = PTR_ERR(name);
+	if (IS_ERR(name))
+		goto out;
+
+	error = 0;
+	if (path_init(name,LOOKUP_POSITIVE|LOOKUP_FOLLOW|LOOKUP_DIRECTORY,&nd))
+		error = path_walk(name, &nd);
+	putname(name);
 	if (error)
-		return error;
-	if (!S_ISDIR(inode->i_mode)) {
-		iput(inode);
-		return -ENOTDIR;
-	}
-	if ((error = permission(inode,MAY_EXEC)) != 0) {
-		iput(inode);
-		return error;
-	}
-	iput(current->fs->pwd);
-	current->fs->pwd = inode;
-	return (0);
+		goto out;
+
+	error = permission(nd.dentry->d_inode,MAY_EXEC);
+	if (error)
+		goto dput_and_out;
+
+	set_fs_pwd(current->fs, nd.mnt, nd.dentry);
+
+dput_and_out:
+	path_release(&nd);
+out:
+	return error;
 }
 
-asmlinkage int sys_fchdir(unsigned int fd)
+asmlinkage long sys_fchdir(unsigned int fd)
 {
-	struct inode * inode;
-	struct file * file;
+	struct file *file;
+	struct dentry *dentry;
+	struct inode *inode;
+	struct vfsmount *mnt;
 	int error;
 
-	if (fd >= NR_OPEN || !(file = current->files->fd[fd]))
-		return -EBADF;
-	if (!(inode = file->f_inode))
-		return -ENOENT;
+	error = -EBADF;
+	file = fget(fd);
+	if (!file)
+		goto out;
+
+	dentry = file->f_dentry;
+	mnt = file->f_vfsmnt;
+	inode = dentry->d_inode;
+
+	error = -ENOTDIR;
 	if (!S_ISDIR(inode->i_mode))
-		return -ENOTDIR;
-	if ((error = permission(inode,MAY_EXEC)) != 0)
-		return error;
-	iput(current->fs->pwd);
-	current->fs->pwd = inode;
-	inode->i_count++;
-	return (0);
-}
+		goto out_putf;
 
-asmlinkage int sys_chroot(const char * filename)
-{
-	struct inode * inode;
-	int error;
-
-	error = namei(filename,&inode);
-	if (error)
-		return error;
-	if (!S_ISDIR(inode->i_mode)) {
-		iput(inode);
-		return -ENOTDIR;
-	}
-	if (!fsuser()) {
-		iput(inode);
-		return -EPERM;
-	}
-	iput(current->fs->root);
-	current->fs->root = inode;
-	return (0);
-}
-
-asmlinkage int sys_fchmod(unsigned int fd, mode_t mode)
-{
-	struct inode * inode;
-	struct file * file;
-	struct iattr newattrs;
-
-	if (fd >= NR_OPEN || !(file = current->files->fd[fd]))
-		return -EBADF;
-	if (!(inode = file->f_inode))
-		return -ENOENT;
-	if (IS_RDONLY(inode))
-		return -EROFS;
-	if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
-		return -EPERM;
-	if (mode == (mode_t) -1)
-		mode = inode->i_mode;
-	newattrs.ia_mode = (mode & S_IALLUGO) | (inode->i_mode & ~S_IALLUGO);
-	newattrs.ia_valid = ATTR_MODE | ATTR_CTIME;
-	inode->i_dirt = 1;
-	return notify_change(inode, &newattrs);
-}
-
-asmlinkage int sys_chmod(const char * filename, mode_t mode)
-{
-	struct inode * inode;
-	int error;
-	struct iattr newattrs;
-
-	error = namei(filename,&inode);
-	if (error)
-		return error;
-	if (IS_RDONLY(inode)) {
-		iput(inode);
-		return -EROFS;
-	}
-	if (IS_IMMUTABLE(inode) || IS_APPEND(inode)) {
-		iput(inode);
-		return -EPERM;
-	}
-	if (mode == (mode_t) -1)
-		mode = inode->i_mode;
-	newattrs.ia_mode = (mode & S_IALLUGO) | (inode->i_mode & ~S_IALLUGO);
-	newattrs.ia_valid = ATTR_MODE | ATTR_CTIME;
-	inode->i_dirt = 1;
-	error = notify_change(inode, &newattrs);
-	iput(inode);
+	error = permission(inode, MAY_EXEC);
+	if (!error)
+		set_fs_pwd(current->fs, mnt, dentry);
+out_putf:
+	fput(file);
+out:
 	return error;
 }
 
-asmlinkage int sys_fchown(unsigned int fd, uid_t user, gid_t group)
+asmlinkage long sys_chroot(const char * filename)
+{
+	int error;
+	struct nameidata nd;
+	char *name;
+
+	name = getname(filename);
+	error = PTR_ERR(name);
+	if (IS_ERR(name))
+		goto out;
+
+	path_init(name, LOOKUP_POSITIVE | LOOKUP_FOLLOW |
+		      LOOKUP_DIRECTORY | LOOKUP_NOALT, &nd);
+	error = path_walk(name, &nd);	
+	putname(name);
+	if (error)
+		goto out;
+
+	error = permission(nd.dentry->d_inode,MAY_EXEC);
+	if (error)
+		goto dput_and_out;
+
+	error = -EPERM;
+	if (!capable(CAP_SYS_CHROOT))
+		goto dput_and_out;
+
+	set_fs_root(current->fs, nd.mnt, nd.dentry);
+	set_fs_altroot();
+	error = 0;
+dput_and_out:
+	path_release(&nd);
+out:
+	return error;
+}
+
+asmlinkage long sys_fchmod(unsigned int fd, mode_t mode)
 {
 	struct inode * inode;
+	struct dentry * dentry;
 	struct file * file;
+	int err = -EBADF;
 	struct iattr newattrs;
-	int error;
 
-	if (fd >= NR_OPEN || !(file = current->files->fd[fd]))
-		return -EBADF;
-	if (!(inode = file->f_inode))
-		return -ENOENT;
+	file = fget(fd);
+	if (!file)
+		goto out;
+
+	dentry = file->f_dentry;
+	inode = dentry->d_inode;
+
+	err = -EROFS;
 	if (IS_RDONLY(inode))
-		return -EROFS;
+		goto out_putf;
+	err = -EPERM;
 	if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
-		return -EPERM;
+		goto out_putf;
+	if (mode == (mode_t) -1)
+		mode = inode->i_mode;
+	newattrs.ia_mode = (mode & S_IALLUGO) | (inode->i_mode & ~S_IALLUGO);
+	newattrs.ia_valid = ATTR_MODE | ATTR_CTIME;
+	err = notify_change(dentry, &newattrs);
+
+out_putf:
+	fput(file);
+out:
+	return err;
+}
+
+asmlinkage long sys_chmod(const char * filename, mode_t mode)
+{
+	struct nameidata nd;
+	struct inode * inode;
+	int error;
+	struct iattr newattrs;
+
+	error = user_path_walk(filename, &nd);
+	if (error)
+		goto out;
+	inode = nd.dentry->d_inode;
+
+	error = -EROFS;
+	if (IS_RDONLY(inode))
+		goto dput_and_out;
+
+	error = -EPERM;
+	if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
+		goto dput_and_out;
+
+	if (mode == (mode_t) -1)
+		mode = inode->i_mode;
+	newattrs.ia_mode = (mode & S_IALLUGO) | (inode->i_mode & ~S_IALLUGO);
+	newattrs.ia_valid = ATTR_MODE | ATTR_CTIME;
+	error = notify_change(nd.dentry, &newattrs);
+
+dput_and_out:
+	path_release(&nd);
+out:
+	return error;
+}
+
+static int chown_common(struct dentry * dentry, uid_t user, gid_t group)
+{
+	struct inode * inode;
+	int error;
+	struct iattr newattrs;
+
+	error = -ENOENT;
+	if (!(inode = dentry->d_inode)) {
+		printk("chown_common: NULL inode\n");
+		goto out;
+	}
+	error = -EROFS;
+	if (IS_RDONLY(inode))
+		goto out;
+	error = -EPERM;
+	if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
+		goto out;
 	if (user == (uid_t) -1)
 		user = inode->i_uid;
 	if (group == (gid_t) -1)
@@ -397,89 +523,78 @@ asmlinkage int sys_fchown(unsigned int fd, uid_t user, gid_t group)
 	newattrs.ia_gid = group;
 	newattrs.ia_valid =  ATTR_UID | ATTR_GID | ATTR_CTIME;
 	/*
-	 * If the owner has been changed, remove the setuid bit
+	 * If the user or group of a non-directory has been changed by a
+	 * non-root user, remove the setuid bit.
+	 * 19981026	David C Niemi <niemi@tux.org>
+	 *
+	 * Changed this to apply to all users, including root, to avoid
+	 * some races. This is the behavior we had in 2.0. The check for
+	 * non-root was definitely wrong for 2.2 anyway, as it should
+	 * have been using CAP_FSETID rather than fsuid -- 19990830 SD.
 	 */
-	if (inode->i_mode & S_ISUID) {
+	if ((inode->i_mode & S_ISUID) == S_ISUID &&
+		!S_ISDIR(inode->i_mode))
+	{
 		newattrs.ia_mode &= ~S_ISUID;
 		newattrs.ia_valid |= ATTR_MODE;
 	}
 	/*
-	 * If the group has been changed, remove the setgid bit
+	 * Likewise, if the user or group of a non-directory has been changed
+	 * by a non-root user, remove the setgid bit UNLESS there is no group
+	 * execute bit (this would be a file marked for mandatory locking).
+	 * 19981026	David C Niemi <niemi@tux.org>
 	 *
-	 * Don't remove the setgid bit if no group execute bit.
-	 * This is a file marked for mandatory locking.
+	 * Removed the fsuid check (see the comment above) -- 19990830 SD.
 	 */
-	if (((inode->i_mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP))) {
+	if (((inode->i_mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP)) 
+		&& !S_ISDIR(inode->i_mode))
+	{
 		newattrs.ia_mode &= ~S_ISGID;
 		newattrs.ia_valid |= ATTR_MODE;
 	}
-	inode->i_dirt = 1;
-	if (inode->i_sb && inode->i_sb->dq_op) {
-		inode->i_sb->dq_op->initialize(inode, -1);
-		if (inode->i_sb->dq_op->transfer(inode, &newattrs, 0))
-			return -EDQUOT;
-		error = notify_change(inode, &newattrs);
-		if (error)
-			inode->i_sb->dq_op->transfer(inode, &newattrs, 1);
-	} else
-		error = notify_change(inode, &newattrs);
+	error = DQUOT_TRANSFER(dentry, &newattrs);
+out:
 	return error;
 }
 
-asmlinkage int sys_chown(const char * filename, uid_t user, gid_t group)
+asmlinkage long sys_chown(const char * filename, uid_t user, gid_t group)
 {
-	struct inode * inode;
+	struct nameidata nd;
 	int error;
-	struct iattr newattrs;
 
-	error = lnamei(filename,&inode);
-	if (error)
-		return error;
-	if (IS_RDONLY(inode)) {
-		iput(inode);
-		return -EROFS;
+	error = user_path_walk(filename, &nd);
+	if (!error) {
+		error = chown_common(nd.dentry, user, group);
+		path_release(&nd);
 	}
-	if (IS_IMMUTABLE(inode) || IS_APPEND(inode)) {
-		iput(inode);
-		return -EPERM;
+	return error;
+}
+
+asmlinkage long sys_lchown(const char * filename, uid_t user, gid_t group)
+{
+	struct nameidata nd;
+	int error;
+
+	error = user_path_walk_link(filename, &nd);
+	if (!error) {
+		error = chown_common(nd.dentry, user, group);
+		path_release(&nd);
 	}
-	if (user == (uid_t) -1)
-		user = inode->i_uid;
-	if (group == (gid_t) -1)
-		group = inode->i_gid;
-	newattrs.ia_mode = inode->i_mode;
-	newattrs.ia_uid = user;
-	newattrs.ia_gid = group;
-	newattrs.ia_valid =  ATTR_UID | ATTR_GID | ATTR_CTIME;
-	/*
-	 * If the owner has been changed, remove the setuid bit
-	 */
-	if (inode->i_mode & S_ISUID) {
-		newattrs.ia_mode &= ~S_ISUID;
-		newattrs.ia_valid |= ATTR_MODE;
+	return error;
+}
+
+
+asmlinkage long sys_fchown(unsigned int fd, uid_t user, gid_t group)
+{
+	struct file * file;
+	int error = -EBADF;
+
+	file = fget(fd);
+	if (file) {
+		error = chown_common(file->f_dentry, user, group);
+		fput(file);
 	}
-	/*
-	 * If the group has been changed, remove the setgid bit
-	 *
-	 * Don't remove the setgid bit if no group execute bit.
-	 * This is a file marked for mandatory locking.
-	 */
-	if (((inode->i_mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP))) {
-		newattrs.ia_mode &= ~S_ISGID;
-		newattrs.ia_valid |= ATTR_MODE;
-	}
-	inode->i_dirt = 1;
-	if (inode->i_sb->dq_op) {
-		inode->i_sb->dq_op->initialize(inode, -1);
-		if (inode->i_sb->dq_op->transfer(inode, &newattrs, 0))
-			return -EDQUOT;
-		error = notify_change(inode, &newattrs);
-		if (error)
-			inode->i_sb->dq_op->transfer(inode, &newattrs, 1);
-	} else
-		error = notify_change(inode, &newattrs);
-	iput(inode);
-	return(error);
+	return error;
 }
 
 /*
@@ -496,36 +611,50 @@ asmlinkage int sys_chown(const char * filename, uid_t user, gid_t group)
  * for the internal routines (ie open_namei()/follow_link() etc). 00 is
  * used by symlinks.
  */
-int do_open(const char * filename,int flags,int mode)
+struct file *filp_open(const char * filename, int flags, int mode)
 {
-	struct inode * inode;
-	struct file * f;
-	int flag,error,fd;
+	int namei_flags, error;
+	struct nameidata nd;
 
+	namei_flags = flags;
+	if ((namei_flags+1) & O_ACCMODE)
+		namei_flags++;
+	if (namei_flags & O_TRUNC)
+		namei_flags |= 2;
+
+	error = open_namei(filename, namei_flags, mode, &nd);
+	if (!error)
+		return dentry_open(nd.dentry, nd.mnt, flags);
+
+	return ERR_PTR(error);
+}
+
+struct file *dentry_open(struct dentry *dentry, struct vfsmount *mnt, int flags)
+{
+	struct file * f;
+	struct inode *inode;
+	int error;
+
+	error = -ENFILE;
 	f = get_empty_filp();
 	if (!f)
-		return -ENFILE;
-	f->f_flags = flag = flags;
-	f->f_mode = (flag+1) & O_ACCMODE;
-	if (f->f_mode)
-		flag++;
-	if (flag & O_TRUNC)
-		flag |= 2;
-	error = open_namei(filename,flag,mode,&inode,NULL);
-	if (error)
-		goto cleanup_file;
+		goto cleanup_dentry;
+	f->f_flags = flags;
+	f->f_mode = (flags+1) & O_ACCMODE;
+	inode = dentry->d_inode;
 	if (f->f_mode & FMODE_WRITE) {
 		error = get_write_access(inode);
 		if (error)
-			goto cleanup_inode;
+			goto cleanup_file;
 	}
 
-	f->f_inode = inode;
+	f->f_dentry = dentry;
+	f->f_vfsmnt = mnt;
 	f->f_pos = 0;
 	f->f_reada = 0;
-	f->f_op = NULL;
-	if (inode->i_op)
-		f->f_op = inode->i_op->default_file_ops;
+	f->f_op = fops_get(inode->i_fop);
+	if (inode->i_sb)
+		file_move(f, &inode->i_sb->s_files);
 	if (f->f_op && f->f_op->open) {
 		error = f->f_op->open(inode,f);
 		if (error)
@@ -533,42 +662,112 @@ int do_open(const char * filename,int flags,int mode)
 	}
 	f->f_flags &= ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC);
 
-	/*
-	 * We have to do this last, because we mustn't export
-	 * an incomplete fd to other processes which may share
-	 * the same file table with us.
-	 */
-	for(fd = 0; fd < NR_OPEN && fd < current->rlim[RLIMIT_NOFILE].rlim_cur; fd++) {
-		if (!current->files->fd[fd]) {
-			current->files->fd[fd] = f;
-			FD_CLR(fd,&current->files->close_on_exec);
-			return fd;
-		}
-	}
-	error = -EMFILE;
-	if (f->f_op && f->f_op->release)
-		f->f_op->release(inode,f);
+	return f;
+
 cleanup_all:
+	fops_put(f->f_op);
 	if (f->f_mode & FMODE_WRITE)
 		put_write_access(inode);
-cleanup_inode:
-	iput(inode);
+	f->f_dentry = NULL;
+	f->f_vfsmnt = NULL;
 cleanup_file:
-	f->f_count--;
+	put_filp(f);
+cleanup_dentry:
+	dput(dentry);
+	mntput(mnt);
+	return ERR_PTR(error);
+}
+
+/*
+ * Find an empty file descriptor entry, and mark it busy.
+ */
+int get_unused_fd(void)
+{
+	struct files_struct * files = current->files;
+	int fd, error;
+
+  	error = -EMFILE;
+	write_lock(&files->file_lock);
+
+repeat:
+ 	fd = find_next_zero_bit(files->open_fds, 
+				files->max_fdset, 
+				files->next_fd);
+
+	/*
+	 * N.B. For clone tasks sharing a files structure, this test
+	 * will limit the total number of files that can be opened.
+	 */
+	if (fd >= current->rlim[RLIMIT_NOFILE].rlim_cur)
+		goto out;
+
+	/* Do we need to expand the fdset array? */
+	if (fd >= files->max_fdset) {
+		error = expand_fdset(files, fd);
+		if (!error) {
+			error = -EMFILE;
+			goto repeat;
+		}
+		goto out;
+	}
+	
+	/* 
+	 * Check whether we need to expand the fd array.
+	 */
+	if (fd >= files->max_fds) {
+		error = expand_fd_array(files, fd);
+		if (!error) {
+			error = -EMFILE;
+			goto repeat;
+		}
+		goto out;
+	}
+
+	FD_SET(fd, files->open_fds);
+	FD_CLR(fd, files->close_on_exec);
+	files->next_fd = fd + 1;
+#if 1
+	/* Sanity check */
+	if (files->fd[fd] != NULL) {
+		printk("get_unused_fd: slot %d not NULL!\n", fd);
+		files->fd[fd] = NULL;
+	}
+#endif
+	error = fd;
+
+out:
+	write_unlock(&files->file_lock);
 	return error;
 }
 
-asmlinkage int sys_open(const char * filename,int flags,int mode)
+asmlinkage long sys_open(const char * filename, int flags, int mode)
 {
 	char * tmp;
-	int error;
+	int fd, error;
 
-	error = getname(filename, &tmp);
-	if (error)
-		return error;
-	error = do_open(tmp,flags,mode);
-	putname(tmp);
-	return error;
+#if BITS_PER_LONG != 32
+	flags |= O_LARGEFILE;
+#endif
+	tmp = getname(filename);
+	fd = PTR_ERR(tmp);
+	if (!IS_ERR(tmp)) {
+		fd = get_unused_fd();
+		if (fd >= 0) {
+			struct file *f = filp_open(tmp, flags, mode);
+			error = PTR_ERR(f);
+			if (IS_ERR(f))
+				goto out_error;
+			fd_install(fd, f);
+		}
+out:
+		putname(tmp);
+	}
+	return fd;
+
+out_error:
+	put_unused_fd(fd);
+	fd = error;
+	goto out;
 }
 
 #ifndef __alpha__
@@ -577,61 +776,73 @@ asmlinkage int sys_open(const char * filename,int flags,int mode)
  * For backward compatibility?  Maybe this should be moved
  * into arch/i386 instead?
  */
-asmlinkage int sys_creat(const char * pathname, int mode)
+asmlinkage long sys_creat(const char * pathname, int mode)
 {
 	return sys_open(pathname, O_CREAT | O_WRONLY | O_TRUNC, mode);
 }
 
 #endif
 
-int close_fp(struct file *filp)
+/*
+ * "id" is the POSIX thread ID. We use the
+ * files pointer for this..
+ */
+int filp_close(struct file *filp, fl_owner_t id)
 {
-	struct inode *inode;
+	int retval;
 
-	if (filp->f_count == 0) {
+	if (!file_count(filp)) {
 		printk("VFS: Close: file count is 0\n");
 		return 0;
 	}
-	inode = filp->f_inode;
-	if (inode)
-		locks_remove_locks(current, filp);
-	if (filp->f_count > 1) {
-		filp->f_count--;
-		return 0;
+	retval = 0;
+	if (filp->f_op && filp->f_op->flush) {
+		lock_kernel();
+		retval = filp->f_op->flush(filp);
+		unlock_kernel();
 	}
-	if (filp->f_op && filp->f_op->release)
-		filp->f_op->release(inode,filp);
-	filp->f_count--;
-	filp->f_inode = NULL;
-	if (filp->f_mode & FMODE_WRITE)
-		put_write_access(inode);
-	iput(inode);
-	return 0;
+	fcntl_dirnotify(0, filp, 0);
+	locks_remove_posix(filp, id);
+	fput(filp);
+	return retval;
 }
 
-asmlinkage int sys_close(unsigned int fd)
-{	
+/*
+ * Careful here! We test whether the file pointer is NULL before
+ * releasing the fd. This ensures that one clone task can't release
+ * an fd while another clone is opening it.
+ */
+asmlinkage long sys_close(unsigned int fd)
+{
 	struct file * filp;
+	struct files_struct *files = current->files;
 
-	if (fd >= NR_OPEN)
-		return -EBADF;
-	FD_CLR(fd, &current->files->close_on_exec);
-	if (!(filp = current->files->fd[fd]))
-		return -EBADF;
-	current->files->fd[fd] = NULL;
-	return (close_fp (filp));
+	write_lock(&files->file_lock);
+	if (fd >= files->max_fds)
+		goto out_unlock;
+	filp = files->fd[fd];
+	if (!filp)
+		goto out_unlock;
+	files->fd[fd] = NULL;
+	FD_CLR(fd, files->close_on_exec);
+	__put_unused_fd(files, fd);
+	write_unlock(&files->file_lock);
+	return filp_close(filp, files);
+
+out_unlock:
+	write_unlock(&files->file_lock);
+	return -EBADF;
 }
 
 /*
  * This routine simulates a hangup on the tty, to arrange that users
  * are given clean terminals at login time.
  */
-asmlinkage int sys_vhangup(void)
+asmlinkage long sys_vhangup(void)
 {
-	if (!suser())
-		return -EPERM;
-	/* If there is a controlling tty, hang it up */
-	if (current->tty)
+	if (capable(CAP_SYS_TTY_CONFIG)) {
 		tty_vhangup(current->tty);
-	return 0;
+		return 0;
+	}
+	return -EPERM;
 }

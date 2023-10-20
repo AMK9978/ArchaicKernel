@@ -19,7 +19,7 @@
 #ifndef _LINUX_IF_H
 #define _LINUX_IF_H
 
-#include <linux/types.h>		/* for "caddr_t" et al		*/
+#include <linux/types.h>		/* for "__kernel_caddr_t" et al	*/
 #include <linux/socket.h>		/* for "struct sockaddr" et al	*/
 
 /* Standard interface flags. */
@@ -32,7 +32,6 @@
 #define	IFF_RUNNING	0x40		/* resources allocated		*/
 #define	IFF_NOARP	0x80		/* no ARP protocol		*/
 #define	IFF_PROMISC	0x100		/* receive all packets		*/
-/* Not supported */
 #define	IFF_ALLMULTI	0x200		/* receive all multicast packets*/
 
 #define IFF_MASTER	0x400		/* master of a load balancer 	*/
@@ -40,27 +39,11 @@
 
 #define IFF_MULTICAST	0x1000		/* Supports multicast		*/
 
-/*
- * The ifaddr structure contains information about one address
- * of an interface.  They are maintained by the different address
- * families, are allocated and attached when an address is set,
- * and are linked together so all addresses for an interface can
- * be located.
- */
- 
-struct ifaddr 
-{
-	struct sockaddr	ifa_addr;	/* address of interface		*/
-	union {
-		struct sockaddr	ifu_broadaddr;
-		struct sockaddr	ifu_dstaddr;
-	} ifa_ifu;
-	struct iface		*ifa_ifp;	/* back-pointer to interface	*/
-	struct ifaddr		*ifa_next;	/* next address for interface	*/
-};
+#define IFF_VOLATILE	(IFF_LOOPBACK|IFF_POINTOPOINT|IFF_BROADCAST|IFF_MASTER|IFF_SLAVE|IFF_RUNNING)
 
-#define	ifa_broadaddr	ifa_ifu.ifu_broadaddr	/* broadcast address	*/
-#define	ifa_dstaddr	ifa_ifu.ifu_dstaddr	/* other end of link	*/
+#define IFF_PORTSEL	0x2000          /* can set media type		*/
+#define IFF_AUTOMEDIA	0x4000		/* auto media select active	*/
+#define IFF_DYNAMIC	0x8000		/* dialup device with changing addresses*/
 
 /*
  *	Device mapping structure. I'd just gone off and designed a 
@@ -106,11 +89,12 @@ struct ifreq
 		struct	sockaddr ifru_netmask;
 		struct  sockaddr ifru_hwaddr;
 		short	ifru_flags;
-		int	ifru_metric;
+		int	ifru_ivalue;
 		int	ifru_mtu;
 		struct  ifmap ifru_map;
 		char	ifru_slave[IFNAMSIZ];	/* Just fits the size */
-		caddr_t	ifru_data;
+		char	ifru_newname[IFNAMSIZ];
+		char *	ifru_data;
 	} ifr_ifru;
 };
 
@@ -121,11 +105,15 @@ struct ifreq
 #define	ifr_broadaddr	ifr_ifru.ifru_broadaddr	/* broadcast address	*/
 #define	ifr_netmask	ifr_ifru.ifru_netmask	/* interface net mask	*/
 #define	ifr_flags	ifr_ifru.ifru_flags	/* flags		*/
-#define	ifr_metric	ifr_ifru.ifru_metric	/* metric		*/
+#define	ifr_metric	ifr_ifru.ifru_ivalue	/* metric		*/
 #define	ifr_mtu		ifr_ifru.ifru_mtu	/* mtu			*/
 #define ifr_map		ifr_ifru.ifru_map	/* device map		*/
 #define ifr_slave	ifr_ifru.ifru_slave	/* slave device		*/
 #define	ifr_data	ifr_ifru.ifru_data	/* for use by interface	*/
+#define ifr_ifindex	ifr_ifru.ifru_ivalue	/* interface index	*/
+#define ifr_bandwidth	ifr_ifru.ifru_ivalue    /* link bandwidth	*/
+#define ifr_qlen	ifr_ifru.ifru_ivalue	/* Queue length 	*/
+#define ifr_newname	ifr_ifru.ifru_newname	/* New name		*/
 
 /*
  * Structure used in SIOCGIFCONF request.
@@ -139,11 +127,12 @@ struct ifconf
 	int	ifc_len;			/* size of buffer	*/
 	union 
 	{
-		caddr_t	ifcu_buf;
-		struct	ifreq *ifcu_req;
+		char *			ifcu_buf;
+		struct	ifreq 		*ifcu_req;
 	} ifc_ifcu;
 };
 #define	ifc_buf	ifc_ifcu.ifcu_buf		/* buffer address	*/
 #define	ifc_req	ifc_ifcu.ifcu_req		/* array of structures	*/
+
 
 #endif /* _LINUX_IF_H */

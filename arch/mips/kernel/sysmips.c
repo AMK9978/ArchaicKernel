@@ -5,24 +5,21 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995 by Ralf Baechle
+ * Copyright (C) 1995, 1996, 1997, 2000 by Ralf Baechle
  */
 #include <linux/errno.h>
 #include <linux/linkage.h>
 #include <linux/mm.h>
+#include <linux/smp.h>
+#include <linux/smp_lock.h>
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/utsname.h>
 
 #include <asm/cachectl.h>
-#include <asm/segment.h>
+#include <asm/pgalloc.h>
 #include <asm/sysmips.h>
-
-static inline size_t
-strnlen_user(const char *s, size_t count)
-{
-	return strnlen(s, count);
-}
+#include <asm/uaccess.h>
 
 /*
  * How long a hostname can we get from user space?
@@ -35,7 +32,7 @@ get_max_hostname(unsigned long address)
 {
 	struct vm_area_struct * vma;
 
-	vma = find_vma(current, address);
+	vma = find_vma(current->mm, address);
 	if (!vma || vma->vm_start > address || !(vma->vm_flags & VM_READ))
 		return -EFAULT;
 	address = vma->vm_end - address;
@@ -52,46 +49,70 @@ sys_sysmips(int cmd, int arg1, int arg2, int arg3)
 {
 	int	*p;
 	char	*name;
-	int	flags, len, retval = -EINVAL;
+	int	flags, tmp, len, retval, errno;
 
-	switch(cmd)
-	{
-	case SETNAME:
-		if (!suser())
+	switch(cmd) {
+	case SETNAME: {
+		char nodename[__NEW_UTS_LEN + 1];
+
+		if (!capable(CAP_SYS_ADMIN))
 			return -EPERM;
+
 		name = (char *) arg1;
-		len = get_max_hostname((unsigned long)name);
-		if (retval < 0)
-			return len;
-		len = strnlen_user(name, retval);
-		if (len == 0 || len > __NEW_UTS_LEN)
-			return -EINVAL;
-		memcpy_fromfs(system_utsname.nodename, name, len);
-		system_utsname.nodename[len] = '\0';
+
+		len = strncpy_from_user(nodename, name, sizeof(nodename));
+		if (len < 0) 
+			return -EFAULT;
+
+		down_write(&uts_sem);
+		strncpy(system_utsname.nodename, name, len);
+		up_write(&uts_sem);
+		system_utsname.nodename[len] = '\0'; 
 		return 0;
-	case MIPS_ATOMIC_SET:
-		p = (int *) arg1;
-		retval = verify_area(VERIFY_WRITE, p, sizeof(*p));
-		if(retval)
-			return -EINVAL;
-		save_flags(flags);
-		cli();
-		retval = *p;
-		*p = arg2;
-		restore_flags(flags);
-		return retval;
-	case MIPS_FIXADE:
-		if (arg1)
-			current->tss.mflags |= MF_FIXADE;
-		else
-			current->tss.mflags |= MF_FIXADE;
-		retval = 0;
-		break;
-	case FLUSH_CACHE:
-		sys_cacheflush(0, ~0, BCACHE);
-		break;
 	}
 
+	case MIPS_ATOMIC_SET: {
+		/* This is broken in case of page faults and SMP ...
+		    Risc/OS faults after maximum 20 tries with EAGAIN.  */
+		unsigned int tmp;
+
+		p = (int *) arg1;
+		errno = verify_area(VERIFY_WRITE, p, sizeof(*p));
+		if (errno)
+			return errno;
+		errno = 0;
+		save_and_cli(flags);
+		errno |= __get_user(tmp, p);
+		errno |= __put_user(arg2, p);
+		restore_flags(flags);
+
+		if (errno)
+			return tmp;
+
+		return tmp;             /* This is broken ...  */ 
+        }
+
+	case MIPS_FIXADE:
+		tmp = current->thread.mflags & ~3;
+		current->thread.mflags = tmp | (arg1 & 3);
+		retval = 0;
+		goto out;
+
+	case FLUSH_CACHE:
+		flush_cache_all();
+		retval = 0;
+		goto out;
+
+	case MIPS_RDNVRAM:
+		retval = -EIO;
+		goto out;
+
+	default:
+		retval = -EINVAL;
+		goto out;
+	}
+
+out:
 	return retval;
 }
 
@@ -102,4 +123,11 @@ asmlinkage int
 sys_cachectl(char *addr, int nbytes, int op)
 {
 	return -ENOSYS;
+}
+
+asmlinkage int sys_pause(void)
+{
+	current->state = TASK_INTERRUPTIBLE;
+	schedule();
+	return -ERESTARTNOHAND;
 }

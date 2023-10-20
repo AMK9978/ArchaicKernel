@@ -19,62 +19,23 @@
 #include <linux/stat.h>
 #include <linux/string.h>
 
-#include <asm/segment.h>
+static int sysv_readdir(struct file *, void *, filldir_t);
 
-static int sysv_dir_read(struct inode * inode, struct file * filp, char * buf, int count)
-{
-	return -EISDIR;
-}
-
-static int sysv_readdir(struct inode *, struct file *, void *, filldir_t);
-
-static struct file_operations sysv_dir_operations = {
-	NULL,			/* lseek - default */
-	sysv_dir_read,		/* read */
-	NULL,			/* write - bad */
-	sysv_readdir,		/* readdir */
-	NULL,			/* select - default */
-	NULL,			/* ioctl - default */
-	NULL,			/* mmap */
-	NULL,			/* no special open code */
-	NULL,			/* no special release code */
-	file_fsync		/* default fsync */
+struct file_operations sysv_dir_operations = {
+	read:		generic_read_dir,
+	readdir:	sysv_readdir,
+	fsync:		file_fsync,
 };
 
-/*
- * directories can handle most operations...
- */
-struct inode_operations sysv_dir_inode_operations = {
-	&sysv_dir_operations,	/* default directory file-ops */
-	sysv_create,		/* create */
-	sysv_lookup,		/* lookup */
-	sysv_link,		/* link */
-	sysv_unlink,		/* unlink */
-	sysv_symlink,		/* symlink */
-	sysv_mkdir,		/* mkdir */
-	sysv_rmdir,		/* rmdir */
-	sysv_mknod,		/* mknod */
-	sysv_rename,		/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* bmap */
-	sysv_truncate,		/* truncate */
-	NULL			/* permission */
-};
-
-static int sysv_readdir(struct inode * inode, struct file * filp,
-	void * dirent, filldir_t filldir)
+static int sysv_readdir(struct file * filp, void * dirent, filldir_t filldir)
 {
-	struct super_block * sb;
+	struct inode *inode = filp->f_dentry->d_inode;
+	struct super_block * sb = inode->i_sb;
 	unsigned int offset,i;
 	struct buffer_head * bh;
 	char* bh_data;
 	struct sysv_dir_entry * de, sde;
 
-	if (!inode || !(sb = inode->i_sb) || !S_ISDIR(inode->i_mode))
-		return -EBADF;
 	if ((unsigned long)(filp->f_pos) % SYSV_DIRSIZE)
 		return -EBADF;
 	while (filp->f_pos < inode->i_size) {
@@ -100,7 +61,7 @@ static int sysv_readdir(struct inode * inode, struct file * filp,
 					       inode->i_ino, (off_t) filp->f_pos, sde.inode);
 
 				i = strnlen(sde.name, SYSV_NAMELEN);
-				if (filldir(dirent, sde.name, i, filp->f_pos, sde.inode) < 0) {
+				if (filldir(dirent, sde.name, i, filp->f_pos, sde.inode, DT_UNKNOWN) < 0) {
 					brelse(bh);
 					return 0;
 				}

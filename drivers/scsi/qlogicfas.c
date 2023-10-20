@@ -5,8 +5,8 @@
    these silly disclaimers.
 
    Copyright 1994, Tom Zerucha.   
-   zerucha@shell.portal.com
-
+   tz@execpc.com
+   
    Additional Code, and much appreciated help by
    Michael A. Griffith
    grif@cs.ucr.edu
@@ -18,10 +18,10 @@
    Reference Qlogic FAS408 Technical Manual, 53408-510-00A, May 10, 1994
    (you can reference it, but it is incomplete and inaccurate in places)
 
-   Version 0.44 5/7/96 - kernel 1.2.0+, pcmcia 2.5.4+
+   Version 0.46 1/30/97 - kernel 1.2.0+
 
    Functions as standalone, loadable, and PCMCIA driver, the latter from
-   Dave Hind's PCMCIA package.
+   Dave Hinds' PCMCIA package.
 
    Redistributable under terms of the GNU Public License
 
@@ -107,7 +107,6 @@
 #ifdef PCMCIA
 #undef QL_INT_ACTIVE_HIGH
 #define QL_INT_ACTIVE_HIGH 0
-#define MODULE
 #endif 
 
 #include <linux/module.h>
@@ -123,17 +122,13 @@
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
 #include <linux/unistd.h>
+#include <linux/spinlock.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include "sd.h"
 #include "hosts.h"
 #include "qlogicfas.h"
 #include<linux/stat.h>
-
-struct proc_dir_entry proc_scsi_qlogicfas = {
-    PROC_SCSI_QLOGICFAS, 6, "qlogicfas",
-    S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
 
 /*----------------------------------------------------------------*/
 /* driver state info, local to driver */
@@ -446,7 +441,7 @@ rtrc(0)
 #if QL_USE_IRQ
 /*----------------------------------------------------------------*/
 /* interrupt handler */
-static void	       ql_ihandl(int irq, void *dev_id, struct pt_regs * regs)
+static void	    ql_ihandl(int irq, void *dev_id, struct pt_regs * regs)
 {
 Scsi_Cmnd	   *icmd;
 	REG0;
@@ -463,6 +458,15 @@ Scsi_Cmnd	   *icmd;
 	qlcmd = NULL;
 /* if result is CHECK CONDITION done calls qcommand to request sense */
 	(icmd->scsi_done) (icmd);
+}
+
+static void	    do_ql_ihandl(int irq, void *dev_id, struct pt_regs * regs)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&io_request_lock, flags);
+	ql_ihandl(irq, dev_id, regs);
+	spin_unlock_irqrestore(&io_request_lock, flags);
 }
 #endif
 
@@ -540,7 +544,7 @@ int	qltyp;			/* type of chip */
 struct	Scsi_Host	*hreg;	/* registered host structure */
 unsigned long	flags;
 
-host->proc_dir =  &proc_scsi_qlogicfas;
+host->proc_name =  "qlogicfas";
 
 /* Qlogic Cards only exist at 0x230 or 0x330 (the chip itself decodes the
    address - I check 230 first since MIDI cards are typically at 330
@@ -609,10 +613,10 @@ host->proc_dir =  &proc_scsi_qlogicfas;
 	else
 		printk( "Ql: Using preset IRQ %d\n", qlirq );
 
-	if (qlirq >= 0 && !request_irq(qlirq, ql_ihandl, 0, "qlogicfas", NULL))
+	if (qlirq >= 0 && !request_irq(qlirq, do_ql_ihandl, 0, "qlogicfas", NULL))
 		host->can_queue = 1;
 #endif
-	request_region( qbase , 0x10 ,"qlogic");
+	request_region( qbase , 0x10 ,"qlogicfas");
 	hreg = scsi_register( host , 0 );	/* no host data */
 	hreg->io_port = qbase;
 	hreg->n_io_port = 16;
@@ -620,7 +624,7 @@ host->proc_dir =  &proc_scsi_qlogicfas;
 	if( qlirq != -1 )
 		hreg->irq = qlirq;
 
-	sprintf(qinfo, "Qlogicfas Driver version 0.44, chip %02X at %03X, IRQ %d, TPdma:%d",
+	sprintf(qinfo, "Qlogicfas Driver version 0.46, chip %02X at %03X, IRQ %d, TPdma:%d",
 	    qltyp, qbase, qlirq, QL_TURBO_PDMA );
 	host->name = qinfo;
 
@@ -639,8 +643,10 @@ int	qlogicfas_biosparam(Disk * disk, kdev_t dev, int ip[])
 		ip[0] = 0xff;
 		ip[1] = 0x3f;
 		ip[2] = disk->capacity / (ip[0] * ip[1]);
+#if 0
 		if (ip[2] > 1023)
 			ip[2] = 1023;
+#endif
 	}
 	return 0;
 }
@@ -656,7 +662,7 @@ int	qlogicfas_abort(Scsi_Cmnd * cmd)
 
 /*----------------------------------------------------------------*/
 /* reset SCSI bus */
-int	qlogicfas_reset(Scsi_Cmnd * cmd)
+int	qlogicfas_reset(Scsi_Cmnd * cmd, unsigned int ignored)
 {
 	qabort = 2;
 	ql_zap();
@@ -670,10 +676,7 @@ const char	*qlogicfas_info(struct Scsi_Host * host)
 	return qinfo;
 }
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = QLOGICFAS;
-
+static Scsi_Host_Template driver_template = QLOGICFAS;
 #include "scsi_module.c"
-#endif
 

@@ -1,4 +1,4 @@
-/* $Id: generic.c,v 1.2 1996/04/25 06:09:30 davem Exp $
+/* $Id: generic.c,v 1.10 2000/08/09 00:00:15 davem Exp $
  * generic.c: Generic Sparc mm routines that are not dependent upon
  *            MMU type but are Sparc specific.
  *
@@ -9,6 +9,7 @@
 #include <linux/mm.h>
 #include <linux/swap.h>
 
+#include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
 
@@ -17,16 +18,17 @@ static inline void forget_pte(pte_t page)
 	if (pte_none(page))
 		return;
 	if (pte_present(page)) {
-		unsigned long addr = pte_page(page);
-		if (addr >= high_memory || PageReserved(mem_map+MAP_NR(addr)))
+		struct page *ptpage = pte_page(page);
+		if ((!VALID_PAGE(ptpage)) || PageReserved(ptpage))
 			return;
-		free_page(addr);
-		if (current->mm->rss <= 0)
-			return;
-		current->mm->rss--;
+		/* 
+		 * free_page() used to be able to clear swap cache
+		 * entries.  We may now have to do it manually.  
+		 */
+		free_page_and_swap_cache(ptpage);
 		return;
 	}
-	swap_free(pte_val(page));
+	swap_free(pte_to_swp_entry(page));
 }
 
 /* Remap IO memory, the same way as remap_page_range(), but use
@@ -69,7 +71,9 @@ static inline int io_remap_pmd_range(pmd_t * pmd, unsigned long address, unsigne
 		pte_t * pte = pte_alloc(pmd, address);
 		if (!pte)
 			return -ENOMEM;
+		spin_lock(&current->mm->page_table_lock);
 		io_remap_pte_range(pte, address, end - address, address + offset, prot, space);
+		spin_unlock(&current->mm->page_table_lock);
 		address = (address + PMD_SIZE) & PMD_MASK;
 		pmd++;
 	} while (address < end);
@@ -83,7 +87,7 @@ int io_remap_page_range(unsigned long from, unsigned long offset, unsigned long 
 	unsigned long beg = from;
 	unsigned long end = from + size;
 
-	pgprot_val(prot) = pg_iobits;
+	prot = __pgprot(pg_iobits);
 	offset -= from;
 	dir = pgd_offset(current->mm, from);
 	flush_cache_range(current->mm, beg, end);

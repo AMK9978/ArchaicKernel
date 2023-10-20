@@ -80,6 +80,10 @@
  * means "IP packet".
  */
 
+
+#include <linux/ip.h>
+#include <linux/tcp.h>
+
 /* SLIP compression masks for len/vers byte */
 #define SL_TYPE_IP 0x40
 #define SL_TYPE_UNCOMPRESSED_TCP 0x70
@@ -112,8 +116,8 @@
  *	int		int32		long		32 bits
  */
 
-typedef unsigned char byte_t;
-typedef unsigned long int32;
+typedef __u8 byte_t;
+typedef __u32 int32;
 
 /*
  * "state" data for each active tcp conversation on the wire.  This is

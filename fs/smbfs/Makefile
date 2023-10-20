@@ -8,7 +8,17 @@
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
 O_TARGET := smbfs.o
-O_OBJS   := proc.o sock.o inode.o file.o dir.o ioctl.o mmap.o
-M_OBJS   := $(O_TARGET)
+
+obj-y   := proc.o dir.o cache.o sock.o inode.o file.o ioctl.o getopt.o
+obj-m   := $(O_TARGET)
+
+# If you want debugging output, you may add these flags to the EXTRA_CFLAGS
+# SMBFS_PARANOIA should normally be enabled.
+
+EXTRA_CFLAGS += -DSMBFS_PARANOIA
+#EXTRA_CFLAGS += -DSMBFS_DEBUG
+#EXTRA_CFLAGS += -DSMBFS_DEBUG_VERBOSE
+#EXTRA_CFLAGS += -DDEBUG_SMB_MALLOC
+#EXTRA_CFLAGS += -DDEBUG_SMB_TIMESTAMP
 
 include $(TOPDIR)/Rules.make

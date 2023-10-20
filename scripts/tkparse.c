@@ -1,751 +1,822 @@
-/* parser config.in
+/*
+ * tkparse.c
  *
- * Version 1.0
- * Eric Youngdale
- * 10/95
+ * Eric Youngdale was the original author of xconfig.
+ * Michael Elizabeth Chastain (mec@shout.net) is the current maintainer.
  *
- * The general idea here is that we want to parse a config.in file and 
- * from this, we generate a wish script which gives us effectively the
- * same functionality that the original config.in script provided.
+ * Parse a config.in file and translate it to a wish script.
+ * This task has three parts:
  *
- * This task is split roughly into 3 parts.  The first parse is the parse
- * of the input file itself.  The second part is where we analyze the 
- * #ifdef clauses, and attach a linked list of tokens to each of the
- * menu items.  In this way, each menu item has a complete list of
- * dependencies that are used to enable/disable the options.
- * The third part is to take the configuration database we have build,
- * and build the actual wish script.
+ *   tkparse.c	tokenize the input
+ *   tkcond.c   transform 'if ...' statements
+ *   tkgen.c    generate output
  *
- * This file contains the code to do the first parse of config.in.
+ * Change History
+ *
+ * 7 January 1999, Michael Elizabeth Chastain, <mec@shout.net>
+ * - Teach dep_tristate about a few literals, such as:
+ *     dep_tristate 'foo' CONFIG_FOO m
+ *   Also have it print an error message and exit on some parse failures.
+ *
+ * 14 January 1999, Michael Elizabeth Chastain, <mec@shout.net>
+ * - Don't fclose stdin.  Thanks to Tony Hoyle for nailing this one.
+ *
+ * 14 January 1999, Michael Elizabeth Chastain, <mec@shout.net>
+ * - Steam-clean this file.  I tested this by generating kconfig.tk for
+ *   every architecture and comparing it character-for-character against
+ *   the output of the old tkparse.
+ *
+ * 23 January 1999, Michael Elizabeth Chastain, <mec@shout.net>
+ * - Remove bug-compatible code.
+ *
+ * 07 July 1999, Andrzej M. Krzysztofowicz, <ankry@mif.pg.gda.pl>
+ * - Submenus implemented,
+ * - plenty of option updating/displaying fixes,
+ * - dep_bool, define_hex, define_int, define_string, define_tristate and
+ *   undef implemented,
+ * - dep_tristate fixed to support multiple dependencies,
+ * - handling of variables with an empty value implemented,
+ * - value checking for int and hex fields,
+ * - more checking during condition parsing; choice variables are treated as
+ *   all others now,
+ *
+ * TO DO:
+ * - xconfig is at the end of its life cycle.  Contact <mec@shout.net> if
+ *   you are interested in working on the replacement.
  */
-#include <stdlib.h>
+
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
 #include "tkparse.h"
 
-struct kconfig * config = NULL;
-struct kconfig * clast = NULL;
-struct kconfig * koption = NULL;
+static struct kconfig * config_list = NULL;
+static struct kconfig * config_last = NULL;
+static const char * current_file = "<unknown file>";
 static int lineno = 0;
-static int menus_seen = 0;
-static char * current_file = NULL;
-static int do_source(char * filename);
-static char * get_string(char *pnt, char ** labl);
-static int choose_number = 0;
+
+static void do_source( const char * );
+
+#undef strcmp
+int my_strcmp( const char * s1, const char * s2 ) { return strcmp( s1, s2 ); }
+#define strcmp my_strcmp
+
+/*
+ * Report a syntax error.
+ */
+static void syntax_error( const char * msg )
+{
+    fprintf( stderr, "%s: %d: %s\n", current_file, lineno, msg );
+    exit( 1 );
+}
+
 
 
 /*
- * Simple function just to skip over spaces and tabs in config.in.
+ * Find index of a specyfic variable in the symbol table.
+ * Create a new entry if it does not exist yet.
  */
-static char * skip_whitespace(char * pnt)
+#define VARTABLE_SIZE 2048
+struct variable vartable[VARTABLE_SIZE];
+int max_varnum = 0;
+
+int get_varnum( char * name )
 {
-  while( *pnt && (*pnt == ' ' || *pnt == '\t')) pnt++;
-  return pnt;
-}
-
-/*
- * This function parses a conditional from a config.in (i.e. from an ifdef)
- * and generates a linked list of tokens that describes the conditional.
- */
-static struct condition * parse_if(char * pnt)
-{
-  char * opnt;
-  struct condition *list;
-  struct condition *last;
-  struct condition *cpnt;
-  char varname[64];
-  char * pnt1;
-
-  opnt = pnt;
-
-  /*
-   * We need to find the various tokens, and build the linked list.
-   */
-  pnt = skip_whitespace(pnt);
-  if( *pnt != '[' ) return NULL;
-  pnt++;
-  pnt = skip_whitespace(pnt);
-
-  list = last = NULL;
-  while(*pnt && *pnt != ']') {
-
-    pnt = skip_whitespace(pnt);
-    if(*pnt== '\0' || *pnt == ']') break;
-
-    /*
-     * Allocate memory for the token we are about to parse, and insert
-     * it in the linked list.
-     */
-    cpnt = (struct condition *) malloc(sizeof(struct condition));
-    memset(cpnt, 0, sizeof(struct condition));
-    if( last == NULL )
-      {
-	list = last = cpnt;
-      }
-    else
-      {
-	last->next = cpnt;
-	last = cpnt;
-      }
-
-    /*
-     * Determine what type of operation this token represents.
-     */
-    if( *pnt == '-' && pnt[1] == 'a' )
-      {
-	cpnt->op = op_and;
-	pnt += 2;
-	continue;
-      }
-
-    if( *pnt == '-' && pnt[1] == 'o' )
-      {
-	cpnt->op = op_or;
-	pnt += 2;
-	continue;
-      }
-
-    if( *pnt == '!' && pnt[1] == '=' )
-      {
-	cpnt->op = op_neq;
-	pnt += 2;
-	continue;
-      }
-
-    if( *pnt == '=')
-      {
-	cpnt->op = op_eq;
-	pnt += 1;
-	continue;
-      }
-
-    if( *pnt == '!')
-      {
-	cpnt->op = op_bang;
-	pnt += 1;
-	continue;
-      }
-
-    if( *pnt != '"' ) goto error;  /* This cannot be right. */
-    pnt++;
-    if( *pnt == '`' )
-      {
-	cpnt->op = op_shellcmd;
-	pnt1 = varname;
-	pnt++;
-	while(*pnt && *pnt != '`') *pnt1++ = *pnt++;
-	*pnt1++ = '\0';
-	cpnt->variable.str = strdup(varname);
-	if( *pnt == '`' ) pnt++;
-	if( *pnt == '"' ) pnt++;
-	continue;
-      }
-    if( *pnt == '$' )
-      {
-	cpnt->op = op_variable;
-	pnt1 = varname;
-	pnt++;
-	while(*pnt && *pnt != '"') *pnt1++ = *pnt++;
-	*pnt1++ = '\0';
-	cpnt->variable.str = strdup(varname);
-	if( *pnt == '"' ) pnt++;
-	continue;
-      }
-
-    cpnt->op = op_constant;
-    pnt1 = varname;
-    while(*pnt && *pnt != '"') *pnt1++ = *pnt++;
-    *pnt1++ = '\0';
-    cpnt->variable.str = strdup(varname);
-    if( *pnt == '"' ) pnt++;
-    continue;
-  }
-
-  return list;
-
- error:
-  if(current_file != NULL) 
-    fprintf(stderr, 
-	    "Bad if clause at line %d(%s):%s\n", lineno, current_file, opnt);
-  else
-    fprintf(stderr,
-	    "Bad if clause at line %d:%s\n", lineno, opnt);
-  return NULL;
-}
-
-/*
- * This function looks for a quoted string, from the input buffer, and
- * returns a pointer to a copy of this string.  Any characters in
- * the string that need to be "quoted" have a '\' character inserted
- * in front - this way we can directly write these strings into
- * wish scripts.
- */
-static char * get_qstring(char *pnt, char ** labl)
-{
-  char quotechar;
-  char newlabel[1024];
-  char * pnt1;
-  char * pnt2;
-
-  while( *pnt && *pnt != '"' && *pnt != '\'') pnt++;
-  if (*pnt == '\0') return pnt;
-
-  quotechar = *pnt++;
-  pnt1 = newlabel;
-  while(*pnt && *pnt != quotechar && pnt[-1] != '\\')
-    {
-      /*
-       * Quote the character if we need to.
-       */
-      if( *pnt == '"' || *pnt == '\'' || *pnt == '[' || *pnt == ']')
-	*pnt1++ = '\\';
-
-      *pnt1++ = *pnt++;
-    }
-  *pnt1++ = '\0';
-
-  pnt2 = (char *) malloc(strlen(newlabel) + 1);
-  strcpy(pnt2, newlabel);
-  *labl = pnt2;
-
-  /*
-   * Skip over last quote, and whitespace.
-   */
-  pnt++;
-  pnt = skip_whitespace(pnt);
-  return pnt;
-}
-
-static char * parse_choices(struct kconfig * choice_kcfg, char * pnt)
-{
-  struct kconfig * kcfg;
-  int index = 1;
-
-  /*
-   * Choices appear in pairs of strings.  The parse is fairly trivial.
-   */
-  while(1)
-    {
-      pnt = skip_whitespace(pnt);
-      if(*pnt == '\0') break;
-
-      kcfg = (struct kconfig *) malloc(sizeof(struct kconfig));
-      memset(kcfg, 0, sizeof(struct kconfig));
-      kcfg->tok = tok_choice;
-      if( clast != NULL )
-	{
-	  clast->next = kcfg;
-	  clast = kcfg;
-	}
-      else
-	{
-	  clast = config = kcfg;
-	}
-
-      pnt = get_string(pnt, &kcfg->label);
-      pnt = skip_whitespace(pnt);
-      pnt = get_string(pnt, &kcfg->optionname);
-      kcfg->choice_label = choice_kcfg;
-      kcfg->choice_value = index++;
-      if( strcmp(kcfg->label, choice_kcfg->value) == 0 )
-	choice_kcfg->choice_value = kcfg->choice_value;
-    }
+    int i;
     
+    for ( i = 1; i <= max_varnum; i++ )
+	if ( strcmp( vartable[i].name, name ) == 0 )
+	    return i;
+    if (max_varnum > VARTABLE_SIZE-1)
+	syntax_error( "Too many variables defined." );
+    vartable[++max_varnum].name = malloc( strlen( name )+1 );
+    strcpy( vartable[max_varnum].name, name );
+    return max_varnum;
+}
+
+
+
+/*
+ * Get a string.
+ */
+static const char * get_string( const char * pnt, char ** label )
+{
+    const char * word;
+
+    word = pnt;
+    for ( ; ; )
+    {
+	if ( *pnt == '\0' || *pnt == ' ' || *pnt == '\t' )
+	    break;
+	pnt++;
+    }
+
+    *label = malloc( pnt - word + 1 );
+    memcpy( *label, word, pnt - word );
+    (*label)[pnt - word] = '\0';
+
+    if ( *pnt != '\0' )
+	pnt++;
     return pnt;
 }
 
 
+
 /*
- * This function grabs one text token from the input buffer
- * and returns a pointer to a copy of just the identifier.
- * This can be either a variable name (i.e. CONFIG_NET),
- * or it could be the default value for the option.
+ * Get a quoted string.
+ * Insert a '\' before any characters that need quoting.
  */
-static char * get_string(char *pnt, char ** labl)
+static const char * get_qstring( const char * pnt, char ** label )
 {
-  char newlabel[1024];
-  char * pnt1;
-  char * pnt2;
+    char quote_char;
+    char newlabel [2048];
+    char * pnt1;
 
-  if (*pnt == '\0') return pnt;
-
-  pnt1 = newlabel;
-  while(*pnt && *pnt != ' ' && *pnt != '\t')
+    /* advance to the open quote */
+    for ( ; ; )
     {
-      *pnt1++ = *pnt++;
+	if ( *pnt == '\0' )
+	    return pnt;
+	quote_char = *pnt++;
+	if ( quote_char == '"' || quote_char == '\'' )
+	    break;
     }
-  *pnt1++ = '\0';
 
-  pnt2 = (char *) malloc(strlen(newlabel) + 1);
-  strcpy(pnt2, newlabel);
-  *labl = pnt2;
+    /* copy into an intermediate buffer */
+    pnt1 = newlabel;
+    for ( ; ; )
+    {
+	if ( *pnt == '\0' )
+	    syntax_error( "unterminated quoted string" );
+	if ( *pnt == quote_char && pnt[-1] != '\\' )
+	    break;
 
-  if( *pnt ) pnt++;
-  return pnt;
+	/* copy the character, quoting if needed */
+	if ( *pnt == '"' || *pnt == '\'' || *pnt == '[' || *pnt == ']' )
+	    *pnt1++ = '\\';
+	*pnt1++ = *pnt++;
+    }
+
+    /* copy the label into a permanent location */
+    *pnt1++ = '\0';
+    *label = (char *) malloc( pnt1 - newlabel );
+    memcpy( *label, newlabel, pnt1 - newlabel );
+
+    /* skip over last quote and next whitespace */
+    pnt++;
+    while ( *pnt == ' ' || *pnt == '\t' )
+	pnt++;
+    return pnt;
 }
 
 
+
 /*
- * Top level parse function.  Input pointer is one complete line from config.in
- * and the result is that we create a token that describes this line
- * and insert it into our linked list.
+ * Get a quoted or unquoted string. It is recognized by the first 
+ * non-white character. '"' and '"' are not allowed inside the string.
  */
-void parse(char * pnt) {
-  enum token tok;
-  struct kconfig * kcfg;
-  char tmpbuf[24],fake_if[1024];
+static const char * get_qnqstring( const char * pnt, char ** label )
+{
+    char quote_char;
 
-  /*
-   * Ignore comments and leading whitespace.
-   */
+    while ( *pnt == ' ' || *pnt == '\t' )
+	pnt++;
 
-  pnt = skip_whitespace(pnt);
-  while( *pnt && (*pnt == ' ' || *pnt == '\t')) pnt++;
-  if(! *pnt ) return;
-  if( *pnt == '#' ) return;
+    if ( *pnt == '\0' )
+	return pnt;
+    quote_char = *pnt;
+    if ( quote_char == '"' || quote_char == '\'' )
+	return get_qstring( pnt, label );
+    else
+	return get_string( pnt, label );
+}
 
-  /*
-   * Now categorize the next token.
-   */
-  tok = tok_unknown;
-  if      (strncmp(pnt, "mainmenu_name", 13) == 0) 
-    {
-      tok = tok_menuname;
-      pnt += 13;
-    }
-  else if      (strncmp(pnt, "source", 6) == 0) 
-    {
-      pnt += 7;
-      pnt = skip_whitespace(pnt);
-      do_source(pnt);
-      return;
-    }
-  else if (strncmp(pnt, "mainmenu_option", 15) == 0) 
-    {
-      menus_seen++;
-      tok = tok_menuoption;
-      pnt += 15;
-    }
-  else if (strncmp(pnt, "$MAKE ", 6) == 0) 
-    {
-      tok = tok_make;
-    }
-  else if (strncmp(pnt, "comment", 7) == 0) 
-    {
-      tok = tok_comment;
-      pnt += 7;
-    }
-  else if (strncmp(pnt, "choice", 6) == 0) 
-    {
-      tok = tok_choose;
-      pnt += 6;
-    }
-  else if (strncmp(pnt, "define_bool", 11) == 0) 
-    {
-      tok = tok_define;
-      pnt += 11;
-    }
-  else if (strncmp(pnt, "bool", 4) == 0) 
-    {
-      tok = tok_bool;
-      pnt += 4;
-    }
-  else if (strncmp(pnt, "tristate", 8) == 0) 
-    {
-      tok = tok_tristate;
-      pnt += 8;
-    }
-  else if (strncmp(pnt, "dep_tristate", 12) == 0) 
-    {
-      tok = tok_dep_tristate;
-      pnt += 12;
-    }
-  else if (strncmp(pnt, "int", 3) == 0) 
-    {
-      tok = tok_int;
-      pnt += 3;
-    }
-  else if (strncmp(pnt, "hex", 3) == 0) 
-    {
-      tok = tok_hex;
-      pnt += 3;
-    }
-  else if (strncmp(pnt, "if", 2) == 0) 
-    {
-      tok = tok_if;
-      pnt += 2;
-    }
-  else if (strncmp(pnt, "else", 4) == 0) 
-    {
-      tok = tok_else;
-      pnt += 4;
-    }
-  else if (strncmp(pnt, "fi", 2) == 0) 
-    {
-      tok = tok_fi;
-      pnt += 2;
-    }
-  else if (strncmp(pnt, "endmenu", 7) == 0) 
-    {
-      tok = tok_endmenu;
-      pnt += 7;
-    }
 
-  if( tok == tok_unknown)
-    {
-      if( clast != NULL && clast->tok == tok_if 
-	  && strcmp(pnt,"then") == 0) return;
-      if( current_file != NULL )
-	fprintf(stderr, "unknown command=%s(%s %d)\n", pnt,
-		current_file, lineno);
-      else
-	fprintf(stderr, "unknown command=%s(%d)\n", pnt,lineno);
-      return;
-    }
 
-  /*
-   * Allocate memory for this item, and attach it to the end of the linked
-   * list.
-   */
-  kcfg = (struct kconfig *) malloc(sizeof(struct kconfig));
-  memset(kcfg, 0, sizeof(struct kconfig));
-  kcfg->tok = tok;
-  if( clast != NULL )
-    {
-      clast->next = kcfg;
-      clast = kcfg;
-    }
-  else
-    {
-      clast = config = kcfg;
-    }
+/*
+ * Tokenize an 'if' statement condition.
+ */
+static struct condition * tokenize_if( const char * pnt )
+{
+    struct condition * list;
+    struct condition * last;
+    struct condition * prev;
 
-  pnt = skip_whitespace(pnt);
+    /* eat the open bracket */
+    while ( *pnt == ' ' || *pnt == '\t' )
+	pnt++;
+    if ( *pnt != '[' )
+	syntax_error( "bad 'if' condition" );
+    pnt++;
 
-  /*
-   * Now parse the remaining parts of the option, and attach the results
-   * to the structure.
-   */
-  switch (tok)
+    list = last = NULL;
+    for ( ; ; )
     {
-    case tok_choose:
-      pnt = get_qstring(pnt, &kcfg->label);
-      pnt = get_qstring(pnt, &kcfg->optionname);
-      pnt = get_string(pnt, &kcfg->value);
-      /*
-       * Now we need to break apart the individual options into their
-       * own configuration structures.
-       */
-      parse_choices(kcfg, kcfg->optionname);
-      free(kcfg->optionname);
-      sprintf(tmpbuf, "tmpvar_%d", choose_number++);
-      kcfg->optionname = strdup(tmpbuf);
-      break;
-    case tok_define:
-      pnt = get_string(pnt, &kcfg->optionname);
-      if(*pnt == 'y' || *pnt == 'Y' ) kcfg->value = "1";
-      if(*pnt == 'n' || *pnt == 'N' ) kcfg->value = "0";
-      if(*pnt == 'm' || *pnt == 'M' ) kcfg->value = "2";
-      break;
-    case tok_menuname:
-      pnt = get_qstring(pnt, &kcfg->label);
-      break;
-    case tok_bool:
-    case tok_tristate:
-      pnt = get_qstring(pnt, &kcfg->label);
-      pnt = get_string(pnt, &kcfg->optionname);
-      break;
-    case tok_int:
-    case tok_hex:
-      pnt = get_qstring(pnt, &kcfg->label);
-      pnt = get_string(pnt, &kcfg->optionname);
-      pnt = get_string(pnt, &kcfg->value);
-      break;
-    case tok_dep_tristate:
-      pnt = get_qstring(pnt, &kcfg->label);
-      pnt = get_string(pnt, &kcfg->optionname);
-      pnt = skip_whitespace(pnt);
-      if( *pnt == '$') pnt++;
-      pnt = get_string(pnt, &kcfg->depend.str);
+	struct condition * cond;
 
-      /*
-       * Create a conditional for this object's dependency.
-       *
-       * We can't use "!= n" because this is internally converted to "!= 0"
-       * and if UMSDOS depends on MSDOS which depends on FAT, then when FAT
-       * is disabled MSDOS has 16 added to its value, making UMSDOS fully
-       * available.  Whew.
-       *
-       * This is more of a hack than a fix.  Nested "if" conditionals are
-       * probably affected too - that +/- 16 affects things in too many
-       * places.  But this should do for now.
-       */
-      sprintf(fake_if,"[ \"$%s\" = \"y\" -o \"$%s\" = \"m\" ]; then",
-	      	kcfg->depend.str,kcfg->depend.str);
-      kcfg->cond = parse_if(fake_if);
-      if(kcfg->cond == NULL )
+	/* advance to the next token */
+	while ( *pnt == ' ' || *pnt == '\t' )
+	    pnt++;
+	if ( *pnt == '\0' )
+	    syntax_error( "unterminated 'if' condition" );
+	if ( *pnt == ']' )
+	    return list;
+
+	/* allocate a new token */
+	cond = malloc( sizeof(*cond) );
+	memset( cond, 0, sizeof(*cond) );
+	if ( last == NULL )
+	    { list = last = cond; prev = NULL; }
+	else
+	    { prev = last; last->next = cond; last = cond; }
+
+	/* determine the token value */
+	if ( *pnt == '-' && pnt[1] == 'a' )
 	{
-	  exit(1);
+	    if ( ! prev || ( prev->op != op_variable && prev->op != op_constant ) )
+		syntax_error( "incorrect argument" );
+	    cond->op = op_and;  pnt += 2; continue;
 	}
-      break;
-    case tok_comment:
-      pnt = get_qstring(pnt, &kcfg->label);
-      if( koption != NULL )
+
+	if ( *pnt == '-' && pnt[1] == 'o' )
 	{
-	  pnt = get_qstring(pnt, &kcfg->label);
-	  koption->label = kcfg->label;
-	  koption = NULL;
+	    if ( ! prev || ( prev->op != op_variable && prev->op != op_constant ) )
+		syntax_error( "incorrect argument" );
+	    cond->op = op_or;   pnt += 2; continue;
 	}
-      break;
-    case tok_menuoption:
-      if( strncmp(pnt, "next_comment", 12) == 0)
+
+	if ( *pnt == '!' && pnt[1] == '=' )
 	{
-	  koption = kcfg;
+	    if ( ! prev || ( prev->op != op_variable && prev->op != op_constant ) )
+		syntax_error( "incorrect argument" );
+	    cond->op = op_neq;  pnt += 2; continue;
 	}
-      else
+
+	if ( *pnt == '=' )
 	{
-	  pnt = get_qstring(pnt, &kcfg->label);
+	    if ( ! prev || ( prev->op != op_variable && prev->op != op_constant ) )
+		syntax_error( "incorrect argument" );
+	    cond->op = op_eq;   pnt += 1; continue;
 	}
-      break;
-    case tok_make:
-      kcfg->value=strdup(pnt);
-      break;
-    case tok_else:
-    case tok_fi:
-    case tok_endmenu:
-      break;
-    case tok_if:
-      /*
-       * Conditionals are different.  For the first level parse, only
-       * tok_if and tok_dep_tristate items have a ->cond chain attached.
-       */
-      kcfg->cond = parse_if(pnt);
-      if(kcfg->cond == NULL )
+
+	if ( *pnt == '!' )
 	{
-	  exit(1);
+	    if ( prev && ( prev->op != op_and && prev->op != op_or
+		      && prev->op != op_bang ) )
+		syntax_error( "incorrect argument" );
+	    cond->op = op_bang; pnt += 1; continue;
 	}
-      break;
+
+	if ( *pnt == '"' )
+	{
+	    const char * word;
+
+	    if ( prev && ( prev->op == op_variable || prev->op == op_constant ) )
+		syntax_error( "incorrect argument" );
+	    /* advance to the word */
+	    pnt++;
+	    if ( *pnt == '$' )
+		{ cond->op = op_variable; pnt++; }
+	    else
+		{ cond->op = op_constant; }
+
+	    /* find the end of the word */
+	    word = pnt;
+	    for ( ; ; )
+	    {
+		if ( *pnt == '\0' )
+		    syntax_error( "unterminated double quote" );
+		if ( *pnt == '"' )
+		    break;
+		pnt++;
+	    }
+
+	    /* store a copy of this word */
+	    {
+		char * str = malloc( pnt - word + 1 );
+		memcpy( str, word, pnt - word );
+		str [pnt - word] = '\0';
+		if ( cond->op == op_variable )
+		{
+		    cond->nameindex = get_varnum( str );
+		    free( str );
+		}
+		else /* op_constant */
+		{
+		    cond->str = str;
+		}
+	    }
+
+	    pnt++;
+	    continue;
+	}
+
+	/* unknown token */
+	syntax_error( "bad if condition" );
+    }
+}
+
+
+
+/*
+ * Tokenize a choice list.  Choices appear as pairs of strings;
+ * note that I am parsing *inside* the double quotes.  Ugh.
+ */
+static const char * tokenize_choices( struct kconfig * cfg_choose,
+    const char * pnt )
+{
+    int default_checked = 0;
+    for ( ; ; )
+    {
+	struct kconfig * cfg;
+	char * buffer = malloc( 64 );
+
+	/* skip whitespace */
+	while ( *pnt == ' ' || *pnt == '\t' )
+	    pnt++;
+	if ( *pnt == '\0' )
+	    return pnt;
+
+	/* allocate a new kconfig line */
+	cfg = malloc( sizeof(*cfg) );
+	memset( cfg, 0, sizeof(*cfg) );
+	if ( config_last == NULL )
+	    { config_last = config_list = cfg; }
+	else
+	    { config_last->next = cfg; config_last = cfg; }
+
+	/* fill out the line */
+	cfg->token      = token_choice_item;
+	cfg->cfg_parent = cfg_choose;
+	pnt = get_string( pnt, &cfg->label );
+	if ( ! default_checked &&
+	     ! strncmp( cfg->label, cfg_choose->value, strlen( cfg_choose->value ) ) )
+	{
+	    default_checked = 1;
+	    free( cfg_choose->value );
+	    cfg_choose->value = cfg->label;
+	}
+	while ( *pnt == ' ' || *pnt == '\t' )
+	    pnt++;
+	pnt = get_string( pnt, &buffer );
+	cfg->nameindex = get_varnum( buffer );
+    }
+    if ( ! default_checked )
+	syntax_error( "bad 'choice' default value" );
+    return pnt;
+}
+
+
+
+/*
+ * Tokenize one line.
+ */
+static void tokenize_line( const char * pnt )
+{
+    static struct kconfig * last_menuoption = NULL;
+    enum e_token token;
+    struct kconfig * cfg;
+    struct dependency ** dep_ptr;
+    char * buffer = malloc( 64 );
+
+    /* skip white space */
+    while ( *pnt == ' ' || *pnt == '\t' )
+	pnt++;
+
+    /*
+     * categorize the next token
+     */
+
+#define match_token(t, s) \
+    if (strncmp(pnt, s, strlen(s)) == 0) { token = t; pnt += strlen(s); break; }
+
+    token = token_UNKNOWN;
+    switch ( *pnt )
+    {
     default:
-      exit(0);
+	break;
+
+    case '#':
+    case '\0':
+	return;
+
+    case 'b':
+	match_token( token_bool, "bool" );
+	break;
+
+    case 'c':
+	match_token( token_choice_header, "choice"  );
+	match_token( token_comment, "comment" );
+	break;
+
+    case 'd':
+	match_token( token_define_bool, "define_bool" );
+	match_token( token_define_hex, "define_hex" );
+	match_token( token_define_int, "define_int" );
+	match_token( token_define_string, "define_string" );
+	match_token( token_define_tristate, "define_tristate" );
+	match_token( token_dep_bool, "dep_bool" );
+	match_token( token_dep_mbool, "dep_mbool" );
+	match_token( token_dep_tristate, "dep_tristate" );
+	break;
+
+    case 'e':
+	match_token( token_else, "else" );
+	match_token( token_endmenu, "endmenu" );
+	break;
+
+    case 'f':
+	match_token( token_fi, "fi" );
+	break;
+
+    case 'h':
+	match_token( token_hex, "hex" );
+	break;
+
+    case 'i':
+	match_token( token_if, "if" );
+	match_token( token_int, "int" );
+	break;
+
+    case 'm':
+	match_token( token_mainmenu_name, "mainmenu_name" );
+	match_token( token_mainmenu_option, "mainmenu_option" );
+	break;
+
+    case 's':
+	match_token( token_source, "source" );
+	match_token( token_string, "string" );
+	break;
+
+    case 't':
+	match_token( token_then, "then" );
+	match_token( token_tristate, "tristate" );
+	break;
+
+    case 'u':
+	match_token( token_unset, "unset" );
+	break;
     }
-    
+
+#undef match_token
+
+    if ( token == token_source )
+    {
+	while ( *pnt == ' ' || *pnt == '\t' )
+	    pnt++;
+	do_source( pnt );
+	return;
+    }
+
+    if ( token == token_then )
+    {
+	if ( config_last != NULL && config_last->token == token_if )
+	    return;
+	syntax_error( "bogus 'then'" );
+    }
+
+#if 0
+    if ( token == token_unset )
+    {
+	fprintf( stderr, "Ignoring 'unset' command\n" );
+	return;
+    }
+#endif
+
+    if ( token == token_UNKNOWN )
+	syntax_error( "unknown command" );
+
+    /*
+     * Allocate an item.
+     */
+    cfg = malloc( sizeof(*cfg) );
+    memset( cfg, 0, sizeof(*cfg) );
+    if ( config_last == NULL )
+	{ config_last = config_list = cfg; }
+    else
+	{ config_last->next = cfg; config_last = cfg; }
+
+    /*
+     * Tokenize the arguments.
+     */
+    while ( *pnt == ' ' || *pnt == '\t' )
+	pnt++;
+
+    cfg->token = token;
+    switch ( token )
+    {
+    default:
+	syntax_error( "unknown token" );
+
+    case token_bool:
+    case token_tristate:
+	pnt = get_qstring ( pnt, &cfg->label );
+	pnt = get_string  ( pnt, &buffer );
+	cfg->nameindex = get_varnum( buffer );
+	break;
+
+    case token_choice_header:
+	{
+	    static int choose_number = 0;
+	    char * choice_list;
+
+	    pnt = get_qstring ( pnt, &cfg->label  );
+	    pnt = get_qstring ( pnt, &choice_list );
+	    pnt = get_string  ( pnt, &cfg->value  );
+	    cfg->nameindex = -(choose_number++);
+	    tokenize_choices( cfg, choice_list );
+	    free( choice_list );
+	}
+	break;
+
+    case token_comment:
+	pnt = get_qstring(pnt, &cfg->label);
+	if ( last_menuoption != NULL )
+	{
+	    pnt = get_qstring(pnt, &cfg->label);
+	    if (cfg->label == NULL)
+		syntax_error( "missing comment text" );
+	    last_menuoption->label = cfg->label;
+	    last_menuoption = NULL;
+	}
+	break;
+
+    case token_define_bool:
+    case token_define_tristate:
+	pnt = get_string( pnt, &buffer );
+	cfg->nameindex = get_varnum( buffer );
+	while ( *pnt == ' ' || *pnt == '\t' )
+	    pnt++;
+	if ( ( pnt[0] == 'Y'  || pnt[0] == 'M' || pnt[0] == 'N'
+	||     pnt[0] == 'y'  || pnt[0] == 'm' || pnt[0] == 'n' )
+	&&   ( pnt[1] == '\0' || pnt[1] == ' ' || pnt[1] == '\t' ) )
+	{
+	    if      ( *pnt == 'n' || *pnt == 'N' ) cfg->value = strdup( "CONSTANT_N" );
+	    else if ( *pnt == 'y' || *pnt == 'Y' ) cfg->value = strdup( "CONSTANT_Y" );
+	    else if ( *pnt == 'm' || *pnt == 'M' ) cfg->value = strdup( "CONSTANT_M" );
+	}
+	else if ( *pnt == '$' )
+	{
+	    pnt++;
+	    pnt = get_string( pnt, &cfg->value );
+	}
+	else
+	{
+	    syntax_error( "unknown define_bool value" );
+	}
+	get_varnum( cfg->value );
+	break;
+
+    case token_define_hex:
+    case token_define_int:
+	pnt = get_string( pnt, &buffer );
+	cfg->nameindex = get_varnum( buffer );
+	pnt = get_string( pnt, &cfg->value );
+	break;
+
+    case token_define_string:
+	pnt = get_string( pnt, &buffer );
+	cfg->nameindex = get_varnum( buffer );
+	pnt = get_qnqstring( pnt, &cfg->value );
+	if (cfg->value == NULL)
+	    syntax_error( "missing value" );
+	break;
+
+    case token_dep_bool:
+    case token_dep_mbool:
+    case token_dep_tristate:
+	pnt = get_qstring ( pnt, &cfg->label );
+	pnt = get_string  ( pnt, &buffer );
+	cfg->nameindex = get_varnum( buffer );
+
+	while ( *pnt == ' ' || *pnt == '\t' )
+	    pnt++;
+
+	dep_ptr = &(cfg->depend);
+
+	do {
+	    *dep_ptr = (struct dependency *) malloc( sizeof( struct dependency ) );
+	    (*dep_ptr)->next = NULL;
+
+	    if ( ( pnt[0] == 'Y'  || pnt[0] == 'M' || pnt[0] == 'N'
+	    ||     pnt[0] == 'y'  || pnt[0] == 'm' || pnt[0] == 'n' )
+	    &&   ( pnt[1] == '\0' || pnt[1] == ' ' || pnt[1] == '\t' ) )
+	    {
+		/* dep_tristate 'foo' CONFIG_FOO m */
+		if      ( pnt[0] == 'Y' || pnt[0] == 'y' )
+		    (*dep_ptr)->name = strdup( "CONSTANT_Y" );
+		else if ( pnt[0] == 'N' || pnt[0] == 'n' )
+		    (*dep_ptr)->name = strdup( "CONSTANT_N" );
+		else
+		    (*dep_ptr)->name = strdup( "CONSTANT_M" );
+		pnt++;
+		get_varnum( (*dep_ptr)->name );
+	    }
+	    else if ( *pnt == '$' )
+	    {
+		pnt++;
+		pnt = get_string( pnt, &(*dep_ptr)->name );
+		get_varnum( (*dep_ptr)->name );
+	    }
+	    else
+	    {
+		syntax_error( "can't handle dep_bool/dep_mbool/dep_tristate condition" );
+	    }
+	    dep_ptr = &(*dep_ptr)->next;
+	    while ( *pnt == ' ' || *pnt == '\t' )
+		pnt++;
+	} while ( *pnt );
+
+	/*
+	 * Create a conditional for this object's dependencies.
+	 */
+	{
+	    char fake_if [1024];
+	    struct dependency * dep;
+	    struct condition ** cond_ptr;
+	    int first = 1;
+
+	    cond_ptr = &(cfg->cond);
+	    for ( dep = cfg->depend; dep; dep = dep->next )
+	    {
+		if ( token == token_dep_tristate
+		&& ! strcmp( dep->name, "CONSTANT_M" ) )
+		{
+		    continue;
+		}
+		if ( first )
+		{
+		    first = 0;
+		}
+		else
+		{
+		    *cond_ptr = malloc( sizeof(struct condition) );
+		    memset( *cond_ptr, 0, sizeof(struct condition) );
+		    (*cond_ptr)->op = op_and;
+		    cond_ptr = &(*cond_ptr)->next;
+		}
+		*cond_ptr = malloc( sizeof(struct condition) );
+		memset( *cond_ptr, 0, sizeof(struct condition) );
+		(*cond_ptr)->op = op_lparen;
+		if ( token == token_dep_bool )
+		    sprintf( fake_if, "[ \"$%s\" = \"y\" -o \"$%s\" = \"\" ]; then",
+			dep->name, dep->name );
+		else
+		    sprintf( fake_if, "[ \"$%s\" = \"y\" -o \"$%s\" = \"m\" -o \"$%s\" = \"\" ]; then",
+			dep->name, dep->name, dep->name );
+		(*cond_ptr)->next = tokenize_if( fake_if );
+		while ( *cond_ptr )
+		    cond_ptr = &(*cond_ptr)->next;
+		*cond_ptr = malloc( sizeof(struct condition) );
+		memset( *cond_ptr, 0, sizeof(struct condition) );
+		(*cond_ptr)->op = op_rparen;
+		cond_ptr = &(*cond_ptr)->next;
+	    }
+	}
+	break;
+
+    case token_else:
+    case token_endmenu:
+    case token_fi:
+	break;
+
+    case token_hex:
+    case token_int:
+	pnt = get_qstring ( pnt, &cfg->label );
+	pnt = get_string  ( pnt, &buffer );
+	cfg->nameindex = get_varnum( buffer );
+	pnt = get_string  ( pnt, &cfg->value );
+	break;
+
+    case token_string:
+	pnt = get_qstring ( pnt, &cfg->label );
+	pnt = get_string  ( pnt, &buffer );
+	cfg->nameindex = get_varnum( buffer );
+	pnt = get_qnqstring  ( pnt, &cfg->value );
+	if (cfg->value == NULL)
+	    syntax_error( "missing initial value" );
+	break;
+
+    case token_if:
+	cfg->cond = tokenize_if( pnt );
+	break;
+
+    case token_mainmenu_name:
+	pnt = get_qstring( pnt, &cfg->label );
+	break;
+
+    case token_mainmenu_option:
+	if ( strncmp( pnt, "next_comment", 12 ) == 0 )
+	    last_menuoption = cfg;
+	else
+	    pnt = get_qstring( pnt, &cfg->label );
+	break;
+
+    case token_unset:
+	pnt = get_string( pnt, &buffer );
+	cfg->nameindex = get_varnum( buffer );
+	while ( *pnt == ' ' || *pnt == '\t' )
+	    pnt++;
+	while (*pnt)
+	{
+	    cfg->next = (struct kconfig *) malloc( sizeof(struct kconfig) );
+	    memset( cfg->next, 0, sizeof(struct kconfig) );
+	    cfg = cfg->next;
+	    cfg->token = token_unset;
+	    pnt = get_string( pnt, &buffer );
+	    cfg->nameindex = get_varnum( buffer );
+	    while ( *pnt == ' ' || *pnt == '\t' )
+		pnt++;
+	}
+	break;
+    }
     return;
 }
 
+
+
 /*
- * Simple function to dump to the screen what the condition chain looks like.
+ * Implement the "source" command.
  */
-void dump_if(struct condition * cond)
+static void do_source( const char * filename )
 {
-  printf(" ");
-  while(cond != NULL )
+    char buffer [2048];
+    FILE * infile;
+    const char * old_file;
+    int old_lineno;
+    int offset;
+
+    /* open the file */
+    if ( strcmp( filename, "-" ) == 0 )
+	infile = stdin;
+    else
+	infile = fopen( filename, "r" );
+
+    /* if that failed, try ../filename */
+    if ( infile == NULL )
     {
-      switch(cond->op){
-      case op_eq:
-	printf(" = ");
-	break;
-      case op_bang:
-	printf(" ! ");
-	break;
-      case op_neq:
-	printf(" != ");
-	break;
-      case op_and:
-	printf(" -a ");
-	break;
-      case op_lparen:
-	printf("(");
-	break;
-      case op_rparen:
-	printf(")");
-	break;
-      case op_variable:
-	printf("$%s", cond->variable.str);
-	break;
-      case op_constant:
-	printf("'%s'", cond->variable.str);
-	break;
-      default:
-        break;
-      }
-      cond = cond->next;
+	sprintf( buffer, "../%s", filename );
+	infile = fopen( buffer, "r" );
     }
 
-  printf("\n");
-}
+    if ( infile == NULL )
+    {
+	sprintf( buffer, "unable to open %s", filename );
+	syntax_error( buffer );
+    }
 
-static int do_source(char * filename)
-{
-  char buffer[1024];
-  int  offset;
-  int old_lineno;
-  char * old_file;
-  char * pnt;
-  FILE * infile;
-
-  if( strcmp(filename, "-") == 0 )
-    infile = stdin;
-  else
-    infile = fopen(filename,"r");
-
-  /*
-   * If our cwd was in the scripts directory, we might have to go up one
-   * to find the sourced file.
-   */
-  if(!infile) {
-    strcpy (buffer, "../");
-    strcat (buffer, filename);
-    infile = fopen(buffer,"r");
-  }
-
-  if(!infile) {
-    fprintf(stderr,"Unable to open file %s\n", filename);
-    return 1;
-  }
-  old_lineno = lineno;
-  lineno = 0;
-  if( infile != stdin ) {
-    old_file = current_file;
+    /* push the new file name and line number */
+    old_file     = current_file;
+    old_lineno   = lineno;
     current_file = filename;
-  }
-  offset = 0;
-  while(1)
-    {
-      fgets(&buffer[offset], sizeof(buffer) - offset, infile);
-      if(feof(infile)) break;
+    lineno       = 0;
 
-      /*
-       * Strip the trailing return character.
-       */
-      pnt = buffer + strlen(buffer) - 1;
-      if( *pnt == '\n') *pnt-- = 0;
-      lineno++;
-      if( *pnt == '\\' )
+    /* read and process lines */
+    for ( offset = 0; ; )
+    {
+	char * pnt;
+
+	/* read a line */
+	fgets( buffer + offset, sizeof(buffer) - offset, infile );
+	if ( feof( infile ) )
+	    break;
+	lineno++;
+
+	/* strip the trailing return character */
+	pnt = buffer + strlen(buffer) - 1;
+	if ( *pnt == '\n' )
+	    *pnt-- = '\0';
+
+	/* eat \ NL pairs */
+	if ( *pnt == '\\' )
 	{
-	  offset = pnt - buffer;
+	    offset = pnt - buffer;
+	    continue;
 	}
-      else
-	{
-	  parse(buffer);
-	  offset = 0;
-	}
+
+	/* tokenize this line */
+	tokenize_line( buffer );
+	offset = 0;
     }
-  fclose(infile);
-  if( infile != stdin ) {
+
+    /* that's all, folks */
+    if ( infile != stdin )
+	fclose( infile );
     current_file = old_file;
-  }
-  lineno = old_lineno;
-  return 0;
+    lineno       = old_lineno;
+    return;
 }
 
-int main(int argc, char * argv[])
+
+
+/*
+ * Main program.
+ */
+int main( int argc, const char * argv [] )
 {
-#if 0
-  char buffer[1024];
-  char * pnt;
-  struct kconfig * cfg;
-  int    i;
-#endif
-
-  /*
-   * Read stdin to get the top level script.
-   */
-  do_source("-");
-
-  if( menus_seen == 0 )
-    {
-      fprintf(stderr,"The config.in file for this platform does not support\n");
-      fprintf(stderr,"menus.\n");
-      exit(1);
-    }
-  /*
-   * Input file is now parsed.  Next we need to go through and attach
-   * the correct conditions to each of the actual menu items and kill
-   * the if/else/endif tokens from the list.  We also flag the menu items
-   * that have other things that depend upon its setting.
-   */
-  fix_conditionals(config);
-
-  /*
-   * Finally, we generate the wish script.
-   */
-  dump_tk_script(config);
-
-#if 0
-  /*
-   * Now dump what we have so far.  This is only for debugging so that
-   * we can display what we think we have in the list.
-   */
-  for(cfg = config; cfg; cfg = cfg->next)
-    {
-
-      if(cfg->cond != NULL && cfg->tok != tok_if)
-	dump_if(cfg->cond);
-
-      switch(cfg->tok)
-	{
-	case tok_menuname:
-	  printf("main_menuname ");
-	  break;
-	case tok_bool:
-	  printf("bool ");
-	  break;
-	case tok_tristate:
-	  printf("tristate ");
-	  break;
-	case tok_dep_tristate:
-	  printf("dep_tristate ");
-	  break;
-	case tok_int:
-	  printf("int ");
-	  break;
-	case tok_hex:
-	  printf("hex ");
-	  break;
-	case tok_comment:
-	  printf("comment ");
-	  break;
-	case tok_menuoption:
-	  printf("menuoption ");
-	  break;
-	case tok_else:
-	  printf("else");
-	  break;
-	case tok_fi:
-	  printf("fi");
-	  break;
-	case tok_if:
-	  printf("if");
-	  break;
-	default:
-	}
-
-      switch(cfg->tok)
-	{
-	case tok_menuoption:
-	case tok_comment:
-	case tok_menuname:
-	  printf("%s\n", cfg->label);
-	  break;
-	case tok_bool:
-	case tok_tristate:
-	case tok_dep_tristate:
-	case tok_int:
-	case tok_hex:
-	  printf("%s %s\n", cfg->label, cfg->optionname);
-	  break;
-	case tok_if:
-	  dump_if(cfg->cond);
-	  break;
-	case tok_nop:
-	case tok_endmenu:
-	  break;
-	default:
-	  printf("\n");
-	}
-    }
-#endif
-
-  return 0;
-
+    do_source        ( "-"         );
+    fix_conditionals ( config_list );
+    dump_tk_script   ( config_list );
+    return 0;
 }

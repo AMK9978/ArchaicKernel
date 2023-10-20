@@ -6,9 +6,27 @@
 #define PAGE_SIZE	(1UL << PAGE_SHIFT)
 #define PAGE_MASK	(~(PAGE_SIZE-1))
 
-void invalidate(void);
-
 #ifdef __KERNEL__
+#include <linux/config.h>
+
+#define PAGE_OFFSET	0xc0000000
+#define KERNELBASE	PAGE_OFFSET
+
+#ifndef __ASSEMBLY__
+#include <asm/system.h> /* for xmon definition */
+
+#ifdef CONFIG_XMON
+#define BUG() do { \
+	printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
+	xmon(0); \
+} while (0)
+#else
+#define BUG() do { \
+	printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
+	__asm__ __volatile__(".long 0x0"); \
+} while (0)
+#endif
+#define PAGE_BUG(page) do { BUG(); } while (0)
 
 #define STRICT_MM_TYPECHECKS
 
@@ -52,39 +70,68 @@ typedef unsigned long pgprot_t;
 
 #endif
 
+
+/* align addr on a size boundry - adjust address up if needed -- Cort */
+#define _ALIGN(addr,size)	(((addr)+size-1)&(~(size-1)))
+
 /* to align the pointer to the (next) page boundary */
 #define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
-/* This handles the memory map.. */
+extern void clear_page(void *page);
+extern void copy_page(void *to, void *from);
+#define clear_user_page(page, vaddr)	clear_page(page)
+#define copy_user_page(to, from, vaddr)	copy_page(to, from)
 
-#define KERNELBASE	0x90000000
-#define PAGE_OFFSET	KERNELBASE
-#define MAP_NR(addr)	((((unsigned long)addr) - PAGE_OFFSET) >> PAGE_SHIFT)
+/* map phys->virtual and virtual->phys for RAM pages */
+static inline unsigned long ___pa(unsigned long v)
+{ 
+	unsigned long p;
+	asm volatile ("1: addis %0, %1, %2;" 
+		      ".section \".vtop_fixup\",\"aw\";"
+		      ".align  1;"
+		      ".long   1b;"
+		      ".previous;"
+		      : "=r" (p) 
+		      : "b" (v), "K" (((-PAGE_OFFSET) >> 16) & 0xffff));
+
+	return p;
+}
+static inline void* ___va(unsigned long p)
+{ 
+	unsigned long v;
+	asm volatile ("1: addis %0, %1, %2;" 
+		      ".section \".ptov_fixup\",\"aw\";"
+		      ".align  1;"
+		      ".long   1b;"
+		      ".previous;"
+		      : "=r" (v) 
+		      : "b" (p), "K" (((PAGE_OFFSET) >> 16) & 0xffff));
+
+	return (void*) v;
+}
+#define __pa(x) ___pa ((unsigned long)(x))
+#define __va(x) ___va ((unsigned long)(x))
+
 #define MAP_PAGE_RESERVED	(1<<15)
+#define virt_to_page(kaddr)	(mem_map + (((unsigned long)kaddr-PAGE_OFFSET) >> PAGE_SHIFT))
+#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
 
+extern unsigned long get_zero_page_fast(void);
 
-#if 0  /* Now defined in "mm.h" */
-/*
- * This used to be an unsigned short...
- * 
- *                         -- Cort
- */
-/*typedef unsigned short mem_map_t;*/
+/* Pure 2^n version of get_order */
+extern __inline__ int get_order(unsigned long size)
+{
+	int order;
 
-typedef struct {
-	unsigned count:30,
-		 dirty:1,
-		 reserved:1;
-} mem_map_t;
-#endif
+	size = (size-1) >> (PAGE_SHIFT-1);
+	order = -1;
+	do {
+		size >>= 1;
+		order++;
+	} while (size);
+	return order;
+}
 
-/* Certain architectures need to do special things when pte's
- * within a page table are directly modified.  Thus, the following
- * hook is made available.
- */
-#define set_pte(pteptr, pteval) ((*(pteptr)) = (pteval))
-
-
+#endif /* __ASSEMBLY__ */
 #endif /* __KERNEL__ */
-
 #endif /* _PPC_PAGE_H */

@@ -34,6 +34,10 @@
 |	(3) example "Call-out" table
 |
 
+#include <linux/linkage.h>
+#include <asm/entry.h>
+#include "../kernel/m68k_defs.h"
+
 
 |################################
 | (1) EXAMPLE CALL-OUTS 	#
@@ -61,9 +65,20 @@
 | To simply continue execution at the next instruction, just
 | do an "rte".
 |
+| Linux/68k: If returning to user space, check for needed reselections.
+
 	.global		_060_isp_done
 _060_isp_done:
+	btst	#0x5,%sp@		| supervisor bit set in saved SR?
+	beq	.Lnotkern
 	rte
+.Lnotkern:
+	SAVE_ALL_INT
+	GET_CURRENT(%d0)
+	tstl	%curptr@(TASK_NEEDRESCHED)
+	jne	SYMBOL_NAME(ret_from_exception)	| deliver signals,
+						| reschedule etc..
+	RESTORE_ALL
 
 |
 | _060_real_chk():
@@ -71,13 +86,15 @@ _060_isp_done:
 | This is an alternate exit point for the Unimplemented Integer
 | Instruction exception handler. If the instruction was a "chk2"
 | and the operand was out of bounds, then _isp_unimp() creates
-| a CHK exception stack frame from the Unimplemented Integer Instruction
+| a CHK exception stack frame from the Unimplemented Integer Instrcution
 | stack frame and branches to this routine.
 |
+| Linux/68k: commented out test for tracing
+
 	.global		_060_real_chk
 _060_real_chk:
-	tst.b		(%sp)			| is tracing enabled?
-	bpls		real_chk_end		| no
+|	tst.b		(%sp)			| is tracing enabled?
+|	bpls		real_chk_end		| no
 
 |
 |	    CHK FRAME		   TRACE FRAME
@@ -92,11 +109,11 @@ _060_real_chk:
 |	*      SR	*	*      SR	*
 |	*****************	*****************
 |
-	move.b		#0x24,0x7(%sp)		| set trace vecno
-	bral		_060_real_trace
+|	move.b		#0x24,0x7(%sp)		| set trace vecno
+|	bral		_060_real_trace
 
 real_chk_end:
-	rte
+	bral		SYMBOL_NAME(trap)	| jump to trap handler
 
 |
 | _060_real_divbyzero:
@@ -112,10 +129,12 @@ real_chk_end:
 | then it create a Trace exception stack frame from the "chk" exception
 | stack frame and branches to the _real_trace() entry point.
 | 
+| Linux/68k: commented out test for tracing
+
 	.global		_060_real_divbyzero
 _060_real_divbyzero:
-	tst.b		(%sp)			| is tracing enabled?
-	bpls		real_divbyzero_end	| no
+|	tst.b		(%sp)			| is tracing enabled?
+|	bpls		real_divbyzero_end	| no
 
 |
 |	 DIVBYZERO FRAME	   TRACE FRAME
@@ -130,11 +149,11 @@ _060_real_divbyzero:
 |	*      SR	*	*      SR	*
 |	*****************	*****************
 |
-	move.b		#0x24,0x7(%sp)		| set trace vecno
-	bral		_060_real_trace
+|	move.b		#0x24,0x7(%sp)		| set trace vecno
+|	bral		_060_real_trace
 
 real_divbyzero_end:
-	rte
+	bral		SYMBOL_NAME(trap)	| jump to trap handler
 
 |##########################
 
@@ -163,7 +182,7 @@ _060_real_cas2:
 |
 | _060_lock_page():
 |
-| Entry point for the operating system's routine to "lock" a page
+| Entry point for the operating system`s routine to "lock" a page
 | from being paged out. This routine is needed by the cas/cas2
 | algorithms so that no page faults occur within the "core" code
 | region. Note: the routine must lock two pages if the operand 
@@ -177,6 +196,9 @@ _060_real_cas2:
 | Expected outputs:
 |	d0 = 0 -> success; non-zero -> failure
 |
+| Linux/68k: As long as ints are disabled, no swapping out should
+| occur (hopefully...)
+|
 	.global		_060_real_lock_page
 _060_real_lock_page:
 	clr.l		%d0
@@ -185,7 +207,7 @@ _060_real_lock_page:
 |
 | _060_unlock_page():
 |
-| Entry point for the operating system's routine to "unlock" a
+| Entry point for the operating system`s routine to "unlock" a
 | page that has been "locked" previously with _real_lock_page.
 | Note: the routine must unlock two pages if the operand spans
 | two pages.
@@ -194,6 +216,9 @@ _060_real_lock_page:
 |	d0 = `xxxxxxff -> supervisor; `xxxxxx00 -> user
 |	d1 = `xxxxxxff -> longword; `xxxxxx00 -> word
 |
+| Linux/68k: As we do no special locking operation, also no unlocking
+| is needed...
+
 	.global		_060_real_unlock_page
 _060_real_unlock_page:
 	clr.l		%d0

@@ -1,3 +1,11 @@
+/*
+ * Update: The Berkeley copyright was changed, and the change 
+ * is retroactive to all "true" BSD software (ie everything
+ * from UCB as opposed to other peoples code that just carried
+ * the same license). The new copyright doesn't clash with the
+ * GPL, so the module-only restriction has been removed..
+ */
+
 /* Because this code is derived from the 4.3BSD compress source:
  *
  * Copyright (c) 1985, 1986 The Regents of the University of California.
@@ -39,62 +47,26 @@
 /*
  * This version is for use with contiguous buffers on Linux-derived systems.
  *
- *  ==FILEVERSION 4==
+ *  ==FILEVERSION 20000226==
  *
  *  NOTE TO MAINTAINERS:
- *     If you modify this file at all, increment the number above.
+ *     If you modify this file at all, please set the number above to the
+ *     date of the modification as YYMMDD (year month day).
  *     bsd_comp.c is shipped with a PPP distribution as well as with
  *     the kernel; if everyone increases the FILEVERSION number above,
  *     then scripts can do the right thing when deciding whether to
  *     install a new bsd_comp.c file. Don't change the format of that
  *     line otherwise, so the installation script can recognize it.
  *
- * $Id: bsd_comp.c,v 1.1 1994/12/08 01:59:58 paulus Exp $
+ * From: bsd_comp.c,v 1.3 1994/12/08 01:59:58 paulus Exp
  */
 
-#ifndef MODULE
-#error This file must be compiled as a module.
-#endif
-
 #include <linux/module.h>
-
-#include <endian.h>
-#include <linux/kernel.h>
-#include <linux/sched.h>
-#include <linux/types.h>
-#include <linux/fcntl.h>
-#include <linux/interrupt.h>
-#include <linux/ptrace.h>
-#include <linux/ioport.h>
-#include <linux/in.h>
+#include <linux/init.h>
 #include <linux/malloc.h>
-#include <linux/tty.h>
-#include <linux/errno.h>
-#include <linux/sched.h>	/* to get the struct task_struct */
-#include <linux/string.h>	/* used in new tty drivers */
-#include <linux/signal.h>	/* used in new tty drivers */
-
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/segment.h>
-
-#include <linux/if.h>
-
-#include <linux/if_ether.h>
-#include <linux/netdevice.h>
-#include <linux/skbuff.h>
-#include <linux/inet.h>
-#include <linux/ioctl.h>
+#include <linux/vmalloc.h>
 
 #include <linux/ppp_defs.h>
-
-#ifdef NEW_SKBUFF
-#include <linux/netprotocol.h>
-#endif
-
-#include <linux/ip.h>
-#include <linux/tcp.h>
-#include <linux/if_arp.h>
 
 #undef   PACKETPTR
 #define  PACKETPTR 1
@@ -141,14 +113,16 @@ struct bsd_dict {
     union {				/* hash value */
 	unsigned long	fcode;
 	struct {
-#ifndef BIG_ENDIAN_BITFIELD /* Little endian order */
+#if defined(__LITTLE_ENDIAN)		/* Little endian order */
 	    unsigned short	prefix;	/* preceding code */
 	    unsigned char	suffix; /* last character of new code */
 	    unsigned char	pad;
-#else /* Big endian order */
+#elif defined(__BIG_ENDIAN)		/* Big endian order */
 	    unsigned char	pad;
 	    unsigned char	suffix; /* last character of new code */
 	    unsigned short	prefix; /* preceding code */
+#else
+#error Endianness not defined...
 #endif
 	} hs;
     } f;
@@ -249,7 +223,6 @@ bsd_clear(struct bsd_db *db)
     db->n_bits       = BSD_INIT_BITS;
     db->bytes_out    = 0;
     db->in_count     = 0;
-    db->incomp_count = 0;
     db->ratio	     = 0;
     db->checkpoint   = CHECK_GAP;
 }
@@ -684,7 +657,7 @@ static int bsd_compress (void *state, unsigned char *rptr, unsigned char *obuf,
     /* Skip the input header */
     rptr  += PPP_HDRLEN;
     isize -= PPP_HDRLEN;
-    ilen   = ++isize; /* This is off by one, but that is what is in draft! */
+    ilen   = ++isize;	/* Low byte of protocol is counted as input */
 
     while (--ilen > 0)
       {
@@ -773,7 +746,7 @@ nomatch:
     
     OUTPUT(ent);		/* output the last code */
 
-    db->bytes_out    += olen;	/* Do not count bytes from here */
+    db->bytes_out    += olen - PPP_HDRLEN - BSD_OVHD;
     db->uncomp_bytes += isize;
     db->in_count     += isize;
     ++db->uncomp_count;
@@ -1185,17 +1158,18 @@ static struct compressor ppp_bsd_compress = {
  * Module support routines
  *************************************************************/
 
-int
-init_module(void)
+int bsdcomp_init(void)
 {
-	int answer = ppp_register_compressor (&ppp_bsd_compress);
+	int answer = ppp_register_compressor(&ppp_bsd_compress);
 	if (answer == 0)
-		printk (KERN_INFO "PPP BSD Compression module registered\n");
+		printk(KERN_INFO "PPP BSD Compression module registered\n");
 	return answer;
 }
 
-void
-cleanup_module(void)
+void bsdcomp_cleanup(void)
 {
-	ppp_unregister_compressor (&ppp_bsd_compress);
+	ppp_unregister_compressor(&ppp_bsd_compress);
 }
+
+module_init(bsdcomp_init);
+module_exit(bsdcomp_cleanup);

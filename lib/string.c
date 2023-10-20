@@ -9,12 +9,44 @@
  * as inline code in <asm-xx/string.h>
  *
  * These are buggy as well..
+ *
+ * * Fri Jun 25 1999, Ingo Oeser <ioe@informatik.tu-chemnitz.de>
+ * -  Added strsep() which will replace strtok() soon (because strsep() is
+ *    reentrant and should be faster). Use only strsep() in new code, please.
  */
  
 #include <linux/types.h>
 #include <linux/string.h>
+#include <linux/ctype.h>
 
-char * ___strtok = NULL;
+#ifndef __HAVE_ARCH_STRNICMP
+int strnicmp(const char *s1, const char *s2, size_t len)
+{
+	/* Yes, Virginia, it had better be unsigned */
+	unsigned char c1, c2;
+
+	c1 = 0;	c2 = 0;
+	if (len) {
+		do {
+			c1 = *s1; c2 = *s2;
+			s1++; s2++;
+			if (!c1)
+				break;
+			if (!c2)
+				break;
+			if (c1 == c2)
+				continue;
+			c1 = tolower(c1);
+			c2 = tolower(c2);
+			if (c1 != c2)
+				break;
+		} while (--len);
+	}
+	return (int)c1 - (int)c2;
+}
+#endif
+
+char * ___strtok;
 
 #ifndef __HAVE_ARCH_STRCPY
 char * strcpy(char * dest,const char *src)
@@ -204,8 +236,27 @@ char * strtok(char * s,const char * ct)
 }
 #endif
 
+#ifndef __HAVE_ARCH_STRSEP
+
+char * strsep(char **s, const char * ct)
+{
+	char *sbegin=*s;
+	if (!sbegin) 
+		return NULL;
+	
+	sbegin += strspn(sbegin,ct);
+	if (*sbegin == '\0') 
+		return NULL;
+	
+	*s = strpbrk( sbegin, ct);
+	if (*s && **s != '\0')
+		*(*s)++ = '\0';
+	return (sbegin);
+}
+#endif
+
 #ifndef __HAVE_ARCH_MEMSET
-void * memset(void * s,char c,size_t count)
+void * memset(void * s,int c,size_t count)
 {
 	char *xs = (char *) s;
 
@@ -310,4 +361,18 @@ char * strstr(const char * s1,const char * s2)
 	}
 	return NULL;
 }
+#endif
+
+#ifndef __HAVE_ARCH_MEMCHR
+void *memchr(const void *s, int c, size_t n)
+{
+	const unsigned char *p = s;
+	while (n-- != 0) {
+        	if ((unsigned char)c == *p++) {
+			return (void *)(p-1);
+		}
+	}
+	return NULL;
+}
+
 #endif
