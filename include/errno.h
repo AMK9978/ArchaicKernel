@@ -56,5 +56,10 @@ extern int errno;
 #define ENOLCK		37
 #define ENOSYS		38
 #define ENOTEMPTY	39
+#define ELOOP		40
+
+/* Should never be seen by user programs */
+#define ERESTARTSYS	512
+#define ERESTARTNOINTR	513
 
 #endif

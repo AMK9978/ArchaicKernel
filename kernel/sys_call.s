@@ -15,35 +15,49 @@
  * unnecessarily.
  *
  * Stack layout in 'ret_from_system_call':
+ * 	ptrace needs to have all regs on the stack.
+ *	if the order here is changed, it needs to be 
+ *	updated in fork.c:copy_process, signal.c:do_signal,
+ *	ptrace.c ptrace.h
  *
- *	 0(%esp) - %eax
- *	 4(%esp) - %ebx
- *	 8(%esp) - %ecx
- *	 C(%esp) - %edx
- *	10(%esp) - %fs
- *	14(%esp) - %es
- *	18(%esp) - %ds
- *	1C(%esp) - %eip
- *	20(%esp) - %cs
- *	24(%esp) - %eflags
- *	28(%esp) - %oldesp
- *	2C(%esp) - %oldss
+ *	 0(%esp) - %ebx
+ *	 4(%esp) - %ecx
+ *	 8(%esp) - %edx
+ *       C(%esp) - %esi
+ *	10(%esp) - %edi
+ *	14(%esp) - %ebp
+ *	18(%esp) - %eax
+ *	1C(%esp) - %ds
+ *	20(%esp) - %es
+ *      24(%esp) - %fs
+ *	28(%esp) - %gs
+ *	2C(%esp) - orig_eax
+ *	30(%esp) - %eip
+ *	34(%esp) - %cs
+ *	38(%esp) - %eflags
+ *	3C(%esp) - %oldesp
+ *	40(%esp) - %oldss
  */
 
 SIG_CHLD	= 17
 
-EAX		= 0x00
-EBX		= 0x04
-ECX		= 0x08
-EDX		= 0x0C
-FS		= 0x10
-ES		= 0x14
-DS		= 0x18
-EIP		= 0x1C
-CS		= 0x20
-EFLAGS		= 0x24
-OLDESP		= 0x28
-OLDSS		= 0x2C
+EBX		= 0x00
+ECX		= 0x04
+EDX		= 0x08
+ESI		= 0x0C
+EDI		= 0x10
+EBP		= 0x14
+EAX		= 0x18
+DS		= 0x1C
+ES		= 0x20
+FS		= 0x24
+GS		= 0x28
+ORIG_EAX	= 0x2C
+EIP		= 0x30
+CS		= 0x34
+EFLAGS		= 0x38
+OLDESP		= 0x3C
+OLDSS		= 0x40
 
 state	= 0		# these are offsets into the task-struct.
 counter	= 4
@@ -58,32 +72,39 @@ sa_mask = 4
 sa_flags = 8
 sa_restorer = 12
 
-nr_system_calls = 72
+nr_system_calls = 82
+
+ENOSYS = 38
 
 /*
  * Ok, I get parallel printer interrupts while using the floppy for some
  * strange reason. Urgel. Now I just ignore them.
  */
-.globl _system_call,_sys_fork,_timer_interrupt,_sys_execve
+.globl _system_call,_timer_interrupt,_sys_execve
 .globl _hd_interrupt,_floppy_interrupt,_parallel_interrupt
 .globl _device_not_available, _coprocessor_error
 
 .align 2
 bad_sys_call:
-	movl $-1,%eax
-	iret
+	pushl $-ENOSYS
+	jmp ret_from_sys_call
 .align 2
 reschedule:
 	pushl $ret_from_sys_call
 	jmp _schedule
 .align 2
 _system_call:
-	cmpl $nr_system_calls-1,%eax
-	ja bad_sys_call
-	push %ds
-	push %es
+	cld
+	pushl %eax		# save orig_eax
+	push %gs
 	push %fs
-	pushl %edx
+	push %es
+	push %ds
+	pushl %eax		# save eax.  The return value will be put here.
+	pushl %ebp
+	pushl %edi
+	pushl %esi
+	pushl %edx		
 	pushl %ecx		# push %ebx,%ecx,%edx as parameters
 	pushl %ebx		# to the system call
 	movl $0x10,%edx		# set up ds,es to kernel space
@@ -91,16 +112,18 @@ _system_call:
 	mov %dx,%es
 	movl $0x17,%edx		# fs points to local data space
 	mov %dx,%fs
+	cmpl _NR_syscalls,%eax
+	jae bad_sys_call
 	call _sys_call_table(,%eax,4)
-	pushl %eax
-	movl _current,%eax
+	movl %eax,EAX(%esp)		# save the return value
+2:	movl _current,%eax
 	cmpl $0,state(%eax)		# state
 	jne reschedule
 	cmpl $0,counter(%eax)		# counter
 	je reschedule
 ret_from_sys_call:
-	movl _current,%eax		# task[0] cannot have signals
-	cmpl _task,%eax
+	movl _current,%eax
+	cmpl _task,%eax			# task[0] cannot have signals
 	je 3f
 	cmpw $0x0f,CS(%esp)		# was old code segment supervisor ?
 	jne 3f
@@ -117,25 +140,39 @@ ret_from_sys_call:
 	incl %ecx
 	pushl %ecx
 	call _do_signal
-	popl %eax
-3:	popl %eax
+	popl %ecx
+	testl %eax, %eax
+	jne 2b		# see if we need to switch tasks, or do more signals
+3:
 	popl %ebx
 	popl %ecx
 	popl %edx
-	pop %fs
-	pop %es
+	popl %esi
+	popl %edi
+	popl %ebp
+	popl %eax
 	pop %ds
+	pop %es
+	pop %fs
+	pop %gs
+	addl $4,%esp 		# skip the orig_eax
 	iret
 
 .align 2
 _coprocessor_error:
-	push %ds
-	push %es
+	cld
+	pushl $-1		# mark this as an int. 
+	push %gs
 	push %fs
+	push %es
+	push %ds
+	pushl %eax		# save eax.
+	pushl %ebp
+	pushl %edi
+	pushl %esi
 	pushl %edx
 	pushl %ecx
 	pushl %ebx
-	pushl %eax
 	movl $0x10,%eax
 	mov %ax,%ds
 	mov %ax,%es
@@ -146,13 +183,19 @@ _coprocessor_error:
 
 .align 2
 _device_not_available:
-	push %ds
-	push %es
+	cld
+	pushl $-1		# mark this as an int
+	push %gs
 	push %fs
+	push %es
+	push %ds
+	pushl %eax		
+	pushl %ebp
+	pushl %edi
+	pushl %esi
 	pushl %edx
 	pushl %ecx
 	pushl %ebx
-	pushl %eax
 	movl $0x10,%eax
 	mov %ax,%ds
 	mov %ax,%es
@@ -163,24 +206,26 @@ _device_not_available:
 	movl %cr0,%eax
 	testl $0x4,%eax			# EM (math emulation bit)
 	je _math_state_restore
-	pushl %ebp
-	pushl %esi
-	pushl %edi
+	pushl $0		# temporary storage for ORIG_EIP
 	call _math_emulate
-	popl %edi
-	popl %esi
-	popl %ebp
+	addl $4,%esp
 	ret
 
 .align 2
 _timer_interrupt:
-	push %ds		# save ds,es and put kernel data space
-	push %es		# into them. %fs is used by _system_call
+	cld
+	pushl $-1		# mark this as an int
+	push %gs
 	push %fs
-	pushl %edx		# we save %eax,%ecx,%edx as gcc doesn't
-	pushl %ecx		# save those across function calls. %ebx
-	pushl %ebx		# is saved as we use that in ret_sys_call
+	push %es
+	push %ds
 	pushl %eax
+	pushl %ebp
+	pushl %edi
+	pushl %esi
+	pushl %edx		
+	pushl %ecx
+	pushl %ebx
 	movl $0x10,%eax
 	mov %ax,%ds
 	mov %ax,%es
@@ -198,27 +243,14 @@ _timer_interrupt:
 
 .align 2
 _sys_execve:
-	lea EIP(%esp),%eax
+	lea (EIP+4)(%esp),%eax  # don't forget about the return address.
 	pushl %eax
 	call _do_execve
 	addl $4,%esp
 	ret
 
-.align 2
-_sys_fork:
-	call _find_empty_process
-	testl %eax,%eax
-	js 1f
-	push %gs
-	pushl %esi
-	pushl %edi
-	pushl %ebp
-	pushl %eax
-	call _copy_process
-	addl $20,%esp
-1:	ret
-
 _hd_interrupt:
+	cld
 	pushl %eax
 	pushl %ecx
 	pushl %edx
@@ -234,13 +266,14 @@ _hd_interrupt:
 	outb %al,$0xA0		# EOI to interrupt controller #1
 	jmp 1f			# give port chance to breathe
 1:	jmp 1f
-1:	xorl %edx,%edx
+1:	outb %al,$0x20
+	andl $0xfffeffff,_timer_active
+	xorl %edx,%edx
 	xchgl _do_hd,%edx
 	testl %edx,%edx
 	jne 1f
 	movl $_unexpected_hd_interrupt,%edx
-1:	outb %al,$0x20
-	call *%edx		# "interesting" way of handling intr.
+1:	call *%edx		# "interesting" way of handling intr.
 	pop %fs
 	pop %es
 	pop %ds
@@ -250,6 +283,7 @@ _hd_interrupt:
 	iret
 
 _floppy_interrupt:
+	cld
 	pushl %eax
 	pushl %ecx
 	pushl %edx
@@ -278,6 +312,7 @@ _floppy_interrupt:
 	iret
 
 _parallel_interrupt:
+	cld
 	pushl %eax
 	movb $0x20,%al
 	outb %al,$0x20

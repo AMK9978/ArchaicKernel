@@ -38,9 +38,9 @@ struct request {
  * are much more time-critical than writes.
  */
 #define IN_ORDER(s1,s2) \
-((s1)->cmd<(s2)->cmd || (s1)->cmd==(s2)->cmd && \
-((s1)->dev < (s2)->dev || ((s1)->dev == (s2)->dev && \
-(s1)->sector < (s2)->sector)))
+((s1)->cmd<(s2)->cmd || ((s1)->cmd==(s2)->cmd && \
+((s1)->dev < (s2)->dev || (((s1)->dev == (s2)->dev && \
+(s1)->sector < (s2)->sector)))))
 
 struct blk_dev_struct {
 	void (*request_fn)(void);
@@ -50,6 +50,8 @@ struct blk_dev_struct {
 extern struct blk_dev_struct blk_dev[NR_BLK_DEV];
 extern struct request request[NR_REQUEST];
 extern struct task_struct * wait_for_request;
+
+extern int * blk_size[NR_BLK_DEV];
 
 #ifdef MAJOR_NR
 
@@ -79,8 +81,9 @@ extern struct task_struct * wait_for_request;
 /* harddisk */
 #define DEVICE_NAME "harddisk"
 #define DEVICE_INTR do_hd
+#define DEVICE_TIMEOUT HD_TIMER
 #define DEVICE_REQUEST do_hd_request
-#define DEVICE_NR(device) (MINOR(device)/5)
+#define DEVICE_NR(device) (MINOR(device)>>6)
 #define DEVICE_ON(device)
 #define DEVICE_OFF(device)
 
@@ -95,6 +98,13 @@ extern struct task_struct * wait_for_request;
 
 #ifdef DEVICE_INTR
 void (*DEVICE_INTR)(void) = NULL;
+#endif
+#ifdef DEVICE_TIMEOUT
+#define SET_INTR(x) (DEVICE_INTR = (x), \
+	timer_table[DEVICE_TIMEOUT].expires = jiffies + 200, \
+	timer_active |= 1<<DEVICE_TIMEOUT)
+#else
+#define SET_INTR(x) (DEVICE_INTR = (x))
 #endif
 static void (DEVICE_REQUEST)(void);
 
@@ -124,10 +134,25 @@ extern inline void end_request(int uptodate)
 	CURRENT = CURRENT->next;
 }
 
+#ifdef DEVICE_TIMEOUT
+#define CLEAR_DEVICE_TIMEOUT timer_active &= ~(1<<DEVICE_TIMEOUT);
+#else
+#define CLEAR_DEVICE_TIMEOUT
+#endif
+
+#ifdef DEVICE_INTR
+#define CLEAR_DEVICE_INTR DEVICE_INTR = 0;
+#else
+#define CLEAR_DEVICE_INTR
+#endif
+
 #define INIT_REQUEST \
 repeat: \
-	if (!CURRENT) \
+	if (!CURRENT) {\
+		CLEAR_DEVICE_INTR \
+		CLEAR_DEVICE_TIMEOUT \
 		return; \
+	} \
 	if (MAJOR(CURRENT->dev) != MAJOR_NR) \
 		panic(DEVICE_NAME ": request list destroyed"); \
 	if (CURRENT->bh) { \

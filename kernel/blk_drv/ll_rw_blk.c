@@ -39,6 +39,15 @@ struct blk_dev_struct blk_dev[NR_BLK_DEV] = {
 	{ NULL, NULL }		/* dev lp */
 };
 
+/*
+ * blk_size contains the size of all block-devices:
+ *
+ * blk_size[MAJOR][MINOR]
+ *
+ * if (!blk_size[MAJOR]) then no minor size checking is done.
+ */
+int * blk_size[NR_BLK_DEV] = { NULL, NULL, };
+
 static inline void lock_buffer(struct buffer_head * bh)
 {
 	cli();
@@ -60,6 +69,9 @@ static inline void unlock_buffer(struct buffer_head * bh)
  * add-request adds a request to the linked list.
  * It disables interrupts so that it can muck with the
  * request-lists in peace.
+ *
+ * Note that swapping requests always go before other requests,
+ * and are done in the order they appear.
  */
 static void add_request(struct blk_dev_struct * dev, struct request * req)
 {
@@ -75,13 +87,19 @@ static void add_request(struct blk_dev_struct * dev, struct request * req)
 		(dev->request_fn)();
 		return;
 	}
-	for ( ; tmp->next ; tmp=tmp->next)
+	for ( ; tmp->next ; tmp = tmp->next) {
+		if (!req->bh)
+			if (tmp->next->bh)
+				break;
+			else
+				continue;
 		if ((IN_ORDER(tmp,req) ||
 		    !IN_ORDER(tmp,tmp->next)) &&
 		    IN_ORDER(req,tmp->next))
 			break;
-	req->next=tmp->next;
-	tmp->next=req;
+	}
+	req->next = tmp->next;
+	tmp->next = req;
 	sti();
 }
 
@@ -100,8 +118,10 @@ static void make_request(int major,int rw, struct buffer_head * bh)
 		else
 			rw = WRITE;
 	}
-	if (rw!=READ && rw!=WRITE)
-		panic("Bad block dev command, must be R/W/RA/WA");
+	if (rw!=READ && rw!=WRITE) {
+		printk("Bad block dev command, must be R/W/RA/WA\n");
+		return;
+	}
 	lock_buffer(bh);
 	if ((rw == WRITE && !bh->b_dirt) || (rw == READ && bh->b_uptodate)) {
 		unlock_buffer(bh);
@@ -117,18 +137,21 @@ repeat:
 	else
 		req = request+((NR_REQUEST*2)/3);
 /* find an empty request */
+	cli();
 	while (--req >= request)
-		if (req->dev<0)
-			break;
+		if (req->dev < 0)
+			goto found;
 /* if none found, sleep on new requests: check for rw_ahead */
-	if (req < request) {
-		if (rw_ahead) {
-			unlock_buffer(bh);
-			return;
-		}
-		sleep_on(&wait_for_request);
-		goto repeat;
+	if (rw_ahead) {
+		sti();
+		unlock_buffer(bh);
+		return;
 	}
+	sleep_on(&wait_for_request);
+	sti();
+	goto repeat;
+
+found:	sti();
 /* fill up the request-info, and add it to the queue */
 	req->dev = bh->b_dev;
 	req->cmd = rw;
@@ -142,13 +165,50 @@ repeat:
 	add_request(major+blk_dev,req);
 }
 
+void ll_rw_page(int rw, int dev, int page, char * buffer)
+{
+	struct request * req;
+	unsigned int major = MAJOR(dev);
+
+	if (major >= NR_BLK_DEV || !(blk_dev[major].request_fn)) {
+		printk("Trying to read nonexistent block-device\n\r");
+		return;
+	}
+	if (rw!=READ && rw!=WRITE)
+		panic("Bad block dev command, must be R/W");
+	cli();
+repeat:
+	req = request+NR_REQUEST;
+	while (--req >= request)
+		if (req->dev<0)
+			break;
+	if (req < request) {
+		sleep_on(&wait_for_request);
+		goto repeat;
+	}
+	sti();
+/* fill up the request-info, and add it to the queue */
+	req->dev = dev;
+	req->cmd = rw;
+	req->errors = 0;
+	req->sector = page<<3;
+	req->nr_sectors = 8;
+	req->buffer = buffer;
+	req->waiting = current;
+	req->bh = NULL;
+	req->next = NULL;
+	current->state = TASK_UNINTERRUPTIBLE;
+	add_request(major+blk_dev,req);
+	schedule();
+}
+
 void ll_rw_block(int rw, struct buffer_head * bh)
 {
 	unsigned int major;
 
 	if ((major=MAJOR(bh->b_dev)) >= NR_BLK_DEV ||
 	!(blk_dev[major].request_fn)) {
-		printk("Trying to read nonexistent block-device\n\r");
+		printk("ll_rw_block: Trying to read nonexistent block-device\n\r");
 		return;
 	}
 	make_request(major,rw,bh);
@@ -161,5 +221,48 @@ void blk_dev_init(void)
 	for (i=0 ; i<NR_REQUEST ; i++) {
 		request[i].dev = -1;
 		request[i].next = NULL;
+	}
+}
+
+void ll_rw_swap_file(int rw, int dev, unsigned int *b, int nb, char *buf)
+{
+	int i;
+	struct request * req;
+	unsigned int major = MAJOR(dev);
+
+	if (major >= NR_BLK_DEV || !(blk_dev[major].request_fn)) {
+		printk("ll_rw_swap_file: trying to swap nonexistent block-device\n\r");
+		return;
+	}
+
+	if (rw!=READ && rw!=WRITE) {
+		printk("ll_rw_swap: bad block dev command, must be R/W");
+		return;
+	}
+	
+	for (i=0; i<nb; i++, buf += BLOCK_SIZE)
+	{
+repeat:
+		req = request+NR_REQUEST;
+		while (--req >= request)
+			if (req->dev<0)
+				break;
+		if (req < request) {
+			sleep_on(&wait_for_request);
+			goto repeat;
+		}
+
+		req->dev = dev;
+		req->cmd = rw;
+		req->errors = 0;
+		req->sector = b[i] << 1;
+		req->nr_sectors = 2;
+		req->buffer = buf;
+		req->waiting = current;
+		req->bh = NULL;
+		req->next = NULL;
+		current->state = TASK_UNINTERRUPTIBLE;
+		add_request(major+blk_dev,req);
+		schedule();
 	}
 }

@@ -9,9 +9,11 @@
 #include <asm/segment.h>
 
 #include <signal.h>
-
-volatile void do_exit(int error_code);
-
+#include <sys/wait.h>
+#include <errno.h>
+  
+int send_sig (int, struct task_struct *, int);
+  
 int sys_sgetmask()
 {
 	return current->blocked;
@@ -21,8 +23,46 @@ int sys_ssetmask(int newmask)
 {
 	int old=current->blocked;
 
-	current->blocked = newmask & ~(1<<(SIGKILL-1));
+	current->blocked = newmask & ~(1<<(SIGKILL-1)) & ~(1<<(SIGSTOP-1));
 	return old;
+}
+
+int sys_sigpending(sigset_t *set)
+{
+    /* fill in "set" with signals pending but blocked. */
+    verify_area(set,4);
+    put_fs_long(current->blocked & current->signal, (unsigned long *)set);
+    return 0;
+}
+
+/* atomically swap in the new signal mask, and wait for a signal.
+ *
+ * we need to play some games with syscall restarting.  We get help
+ * from the syscall library interface.  Note that we need to coordinate
+ * the calling convention with the libc routine.
+ *
+ * "set" is just the sigmask as described in 1003.1-1988, 3.3.7.
+ * 	It is assumed that sigset_t can be passed as a 32 bit quantity.
+ *
+ * "restart" holds a restart indication.  If it's non-zero, then we 
+ * 	install the old mask, and return normally.  If it's zero, we store 
+ * 	the current mask in old_mask and block until a signal comes in.
+ */
+int sys_sigsuspend(int restart, unsigned long old_mask, unsigned long set)
+{
+    extern int sys_pause(void);
+
+    if (restart) {
+	/* we're restarting */
+	current->blocked = old_mask;
+	return -EINTR;
+    }
+    /* we're not restarting.  do the work */
+    *(&restart) = 1;
+    *(&old_mask) = current->blocked;
+    current->blocked = set;
+    (void) sys_pause();			/* return after a signal arrives */
+    return -ERESTARTNOINTR;		/* handle the signal, and come back */
 }
 
 static inline void save_old(char * from,char * to)
@@ -49,8 +89,8 @@ int sys_signal(int signum, long handler, long restorer)
 {
 	struct sigaction tmp;
 
-	if (signum<1 || signum>32 || signum==SIGKILL)
-		return -1;
+	if (signum<1 || signum>32 || signum==SIGKILL || signum==SIGSTOP)
+		return -EINVAL;
 	tmp.sa_handler = (void (*)(int)) handler;
 	tmp.sa_mask = 0;
 	tmp.sa_flags = SA_ONESHOT | SA_NOMASK;
@@ -65,8 +105,8 @@ int sys_sigaction(int signum, const struct sigaction * action,
 {
 	struct sigaction tmp;
 
-	if (signum<1 || signum>32 || signum==SIGKILL)
-		return -1;
+	if (signum<1 || signum>32 || signum==SIGKILL || signum==SIGSTOP)
+		return -EINVAL;
 	tmp = current->sigaction[signum-1];
 	get_new((char *) action,
 		(char *) (signum-1+current->sigaction));
@@ -79,8 +119,21 @@ int sys_sigaction(int signum, const struct sigaction * action,
 	return 0;
 }
 
-void do_signal(long signr,long eax, long ebx, long ecx, long edx,
-	long fs, long es, long ds,
+/*
+ * Routine writes a core dump image in the current directory.
+ * Currently not implemented.
+ */
+int core_dump(long signr)
+{
+	return(0);	/* We didn't do a dump */
+}
+
+extern int sys_waitpid(pid_t pid,unsigned long * stat_addr, int options);
+
+int do_signal(long signr,long ebx, long ecx, long edx,
+	      long esi, long edi, long ebp, long eax,
+	      long ds, long es, long fs, long gs,
+	      long orig_eax,
 	long eip, long cs, long eflags,
 	unsigned long * esp, long ss)
 {
@@ -88,17 +141,68 @@ void do_signal(long signr,long eax, long ebx, long ecx, long edx,
 	long old_eip=eip;
 	struct sigaction * sa = current->sigaction + signr - 1;
 	int longs;
+
 	unsigned long * tmp_esp;
 
-	sa_handler = (unsigned long) sa->sa_handler;
-	if (sa_handler==1)
-		return;
-	if (!sa_handler) {
-		if (signr==SIGCHLD)
-			return;
-		else
-			do_exit(1<<(signr-1));
+#ifdef notdef
+	printk("pid: %d, signr: %x, eax=%d, oeax = %d, int=%d\n", 
+		current->pid, signr, eax, orig_eax, 
+		sa->sa_flags & SA_INTERRUPT);
+#endif
+	if ((orig_eax != -1) &&
+	    ((eax == -ERESTARTSYS) || (eax == -ERESTARTNOINTR))) {
+		if ((eax == -ERESTARTSYS) && ((sa->sa_flags & SA_INTERRUPT) ||
+		    signr < SIGCONT || signr > SIGTTOU))
+			*(&eax) = -EINTR;
+		else {
+			*(&eax) = orig_eax;
+			*(&eip) = old_eip -= 2;
+		}
 	}
+	sa_handler = (unsigned long) sa->sa_handler;
+	if (sa_handler==1) {
+/* check for SIGCHLD: it's special */
+		if (signr == SIGCHLD)
+			while (sys_waitpid(-1,NULL,WNOHANG) > 0)
+				/* nothing */;
+		return(1);   /* Ignore, see if there are more signals... */
+	}
+	if (!sa_handler) {
+		switch (signr) {
+		case SIGCONT:
+		case SIGCHLD:
+		case SIGWINCH:
+			return(1);  /* Ignore, ... */
+
+		case SIGSTOP:
+		case SIGTSTP:
+		case SIGTTIN:
+		case SIGTTOU:
+			current->state = TASK_STOPPED;
+			current->exit_code = signr;
+			if (!(current->p_pptr->sigaction[SIGCHLD-1].sa_flags & 
+					SA_NOCLDSTOP))
+			  send_sig(SIGCHLD, current->p_pptr, 1);
+/*				current->p_pptr->signal |= (1<<(SIGCHLD-1));*/
+			
+			return(1);  /* Reschedule another event */
+
+		case SIGQUIT:
+		case SIGILL:
+		case SIGTRAP:
+		case SIGIOT:
+		case SIGFPE:
+		case SIGSEGV:
+			if (core_dump(signr))
+				do_exit(signr|0x80);
+			/* fall through */
+		default:
+			do_exit(signr);
+		}
+	}
+	/*
+	 * OK, we're invoking a handler 
+	 */
 	if (sa->sa_flags & SA_ONESHOT)
 		sa->sa_handler = NULL;
 	*(&eip) = sa_handler;
@@ -116,4 +220,7 @@ void do_signal(long signr,long eax, long ebx, long ecx, long edx,
 	put_fs_long(eflags,tmp_esp++);
 	put_fs_long(old_eip,tmp_esp++);
 	current->blocked |= sa->sa_mask;
+/* force a supervisor-mode page-in of the signal handler to reduce races */
+	__asm__("testb $0,%%fs:%0"::"m" (*(char *) sa_handler));
+	return(0);		/* Continue, execute handler */
 }
